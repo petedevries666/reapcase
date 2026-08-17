@@ -1,7 +1,85 @@
 import json
+from dataclasses import replace
+from pathlib import Path
 import unittest
 
 from stadium_reaper_bridge.stadium import MusicalPosition, StadiumFlag, StadiumSong
+
+
+MONZTER_FIXTURE = Path(__file__).parent / "fixtures" / "monzter_332.json"
+
+
+class MonzterFixtureTests(unittest.TestCase):
+    """Validation against the unmodified real-world MONZTER Song export."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = MONZTER_FIXTURE.read_text(encoding="utf-8")
+        cls.document = json.loads(cls.source)
+
+    def setUp(self):
+        self.song = StadiumSong.from_json_text(self.source)
+
+    def test_song_loads_with_real_ppqn_and_preserves_every_flag(self):
+        self.assertEqual(self.song.name, "MONZTER")
+        self.assertEqual(self.song.ppqn, 240)
+        self.assertEqual(
+            [flag.render() for flag in self.song.flags],
+            self.document["flags"],
+        )
+
+    def test_no_op_round_trip_is_the_exact_fixture_text(self):
+        self.assertEqual(self.song.to_json_text(), self.source)
+
+    def test_all_observed_flag_types_are_identified(self):
+        self.assertEqual(
+            {flag.type for flag in self.song.flags},
+            {"START", "MIDI_BANK_PROGRAM", "MIDI_CC", "MARKER", "PRESETSNAP", "END"},
+        )
+
+    def test_all_real_musical_positions_parse_at_song_ppqn(self):
+        expected_positions = [value.partition("|")[0] for value in self.document["flags"]]
+
+        self.assertEqual(
+            [flag.position.render() for flag in self.song.flags],
+            expected_positions,
+        )
+        positions = [flag.position for flag in self.song.flags]
+        self.assertIn(MusicalPosition.parse("026-06.200", ppqn=240), positions)
+        self.assertIn(MusicalPosition.parse("081-01.002", ppqn=240), positions)
+
+    def test_moving_one_flag_changes_only_its_position(self):
+        index = self.document["flags"].index(
+            "026-06.200|MIDI_CC;CHORUS;4;CC;3;69;1"
+        )
+        original_flag = self.song.flags[index]
+        original_prefix, separator, original_suffix = original_flag.render().partition("|")
+        self.song.flags[index] = replace(
+            original_flag,
+            position=MusicalPosition(27, 1, 1),
+        )
+
+        exported_flags = self.song.to_dict()["flags"]
+        moved_prefix, moved_separator, moved_suffix = exported_flags[index].partition("|")
+        self.assertEqual((separator, moved_separator), ("|", "|"))
+        self.assertEqual(original_prefix, "026-06.200")
+        self.assertEqual(moved_prefix, "027-01.001")
+        self.assertEqual(moved_suffix, original_suffix)
+        self.assertEqual(
+            exported_flags[:index] + exported_flags[index + 1:],
+            self.document["flags"][:index] + self.document["flags"][index + 1:],
+        )
+
+    def test_moving_a_flag_keeps_tracks_and_unknown_song_fields(self):
+        self.song.flags[0] = replace(
+            self.song.flags[0],
+            position=MusicalPosition(1, 2, 1),
+        )
+
+        exported = self.song.to_dict()
+        self.assertEqual(exported["tracks"], self.document["tracks"])
+        self.assertEqual(exported["bypass-flags"], self.document["bypass-flags"])
+        self.assertEqual(set(exported), set(self.document))
 
 
 class StadiumModelTests(unittest.TestCase):
