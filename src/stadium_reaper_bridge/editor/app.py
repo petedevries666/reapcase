@@ -15,6 +15,10 @@ from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_H
                      snapped_units_at_x, timeline_x, units_at_x,
                      zoom_about_cursor)
 from .model import EditorModel, LANES, MovePreview
+from .style import lane_colors
+from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
+                        STRUCTURE_HEIGHT, derive_structure_layout,
+                        sticky_label_x, structure_sublane)
 from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
                        create_generic_midi_cc, create_second_helix_looper,
                        create_second_helix_preset, create_second_helix_snapshot,
@@ -23,6 +27,48 @@ from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
                        raster_ppm, timeline_units_to_x, viewport_columns)
+
+
+class Tooltip:
+    """Small reusable delayed tooltip for compact controls."""
+
+    def __init__(self, widget, text, delay=450):
+        self.widget, self.text, self.delay = widget, text, delay
+        self.pending = self.window = None
+        widget.bind("<Enter>", self._schedule, add=True)
+        widget.bind("<Leave>", self._hide, add=True)
+        widget.bind("<ButtonPress>", self._hide, add=True)
+
+    def _schedule(self, _event=None):
+        self.pending = self.widget.after(self.delay, self._show)
+
+    def _show(self):
+        self.pending = None
+        if self.window or not self.widget.winfo_exists():
+            return
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.window = tk.Toplevel(self.widget)
+        self.window.wm_overrideredirect(True)
+        self.window.wm_geometry(f"+{x}+{y}")
+        tk.Label(self.window, text=self.text, background="#fff4c2", foreground="#202020",
+                 relief="solid", borderwidth=1, padx=5, pady=2).pack()
+
+    def _hide(self, _event=None):
+        if self.pending:
+            self.widget.after_cancel(self.pending)
+            self.pending = None
+        if self.window:
+            self.window.destroy()
+            self.window = None
+
+
+def lane_height(lane):
+    return STRUCTURE_HEIGHT if lane == "STRUCTURE" else LANE_HEIGHT
+
+
+def lane_top(lane_index):
+    return RULER_HEIGHT + sum(lane_height(lane) for lane in LANES[:lane_index])
 
 
 class ReapcaseEditor(tk.Tk):
@@ -39,6 +85,7 @@ class ReapcaseEditor(tk.Tk):
         self.marquee_base: set[int] = set()
         self.marquee_mode = "replace"
         self.event_bounds: dict[int, tuple[float, float, float, float]] = {}
+        self.semantic_sources: dict[int, tuple[int, ...]] = {}
         self.grid_choice = tk.StringVar(value="1 beat")
         self.info = tk.StringVar(value="Open a Stadium Song JSON to begin")
         self.status = tk.StringVar(value="No file loaded")
@@ -61,13 +108,18 @@ class ReapcaseEditor(tk.Tk):
 
     def _build(self):
         toolbar = ttk.Frame(self, padding=6); toolbar.pack(fill="x")
-        for text, command in (("Open JSON", self.open_json), ("Save As JSON", self.save_as),
-                              ("Locate Audio Folder", self.locate_audio),
+        for icon, tip, command in (("▣", "Open Song JSON", self.open_json),
+                                   ("▤", "Save Song JSON As...", self.save_as),
+                                   ("⌕+", "Zoom In", lambda: self.zoom_step(1.25)),
+                                   ("⌕−", "Zoom Out", lambda: self.zoom_step(1 / 1.25))):
+            button = ttk.Button(toolbar, text=icon, width=3, command=command)
+            button.pack(side="left", padx=2)
+            Tooltip(button, tip)
+        for text, command in (("Locate Audio Folder", self.locate_audio),
                               ("Analyze Grid Sync", self.analyze_sync),
                               ("Select All", self.select_all), ("Select All After Cursor", self.select_after),
                               ("Select Lane", self.select_lane), ("Shift Selected", self.shift_dialog),
-                              ("Undo", self.undo), ("Zoom Out", lambda: self.zoom_step(1 / 1.25)),
-                              ("Zoom In", lambda: self.zoom_step(1.25)), ("Fit Song", self.fit_song)):
+                              ("Undo", self.undo), ("Fit Song", self.fit_song)):
             ttk.Button(toolbar, text=text, command=command).pack(side="left", padx=2)
         ttk.Label(toolbar, text=" Grid:").pack(side="left")
         ttk.Combobox(toolbar, textvariable=self.grid_choice, state="readonly", width=12,
@@ -186,14 +238,22 @@ class ReapcaseEditor(tk.Tk):
         total_beats = m.song_end_units / m.song.ppqn + 2
         width = HEADER_WIDTH + total_beats * self.pixels_per_beat
         all_lanes = list(LANES) + [f"AUDIO {track.number}" for track in m.audio_tracks]
-        height = RULER_HEIGHT + len(all_lanes) * LANE_HEIGHT
+        editor_height = sum(lane_height(lane) for lane in LANES)
+        height = RULER_HEIGHT + editor_height + len(m.audio_tracks) * LANE_HEIGHT
         # The ruler is a dedicated seek surface, deliberately separate from
         # both the transport above and the editable lanes below.
         self.canvas.create_rectangle(HEADER_WIDTH, 0, width, RULER_HEIGHT,
                                      fill="#252d38", outline="#465363", tags=("ruler",))
+        lane_tops = []
+        y = RULER_HEIGHT
         for lane_index, lane in enumerate(all_lanes):
-            y = RULER_HEIGHT + lane_index * LANE_HEIGHT
-            self.canvas.create_rectangle(0, y, width, y + LANE_HEIGHT, fill="#202631" if lane_index % 2 else "#1c222c", outline="#394250")
+            current_height = lane_height(lane) if lane in LANES else LANE_HEIGHT
+            lane_tops.append(y)
+            self.canvas.create_rectangle(0, y, width, y + current_height, fill="#202631" if lane_index % 2 else "#1c222c", outline="#394250")
+            if lane == "STRUCTURE":
+                for boundary in (y + MARKERS_HEIGHT, y + MARKERS_HEIGHT + PAUSES_HEIGHT):
+                    self.canvas.create_line(0, boundary, width, boundary, fill="#394b61")
+            y += current_height
         grid_end = m.song_end_units + 2 * m.song.ppqn
         for point in m.timing_map.iter_beats(0, grid_end):
             bar, beat = point.position.bar, point.position.beat
@@ -211,21 +271,59 @@ class ReapcaseEditor(tk.Tk):
                     self.canvas.create_line(qx, 0, qx, height, fill="#29333f", dash=(1, 3))
         preview_selection = self._marquee_selection()
         self.event_bounds = {}
+        self.semantic_sources = {}
+        structure_layout = derive_structure_layout(m.timeline.events, m._units, m.song_end_units)
+        region_sources = {i for region in structure_layout.regions for i in region.source_event_indices}
+        view_left = self.canvas.canvasx(0) + HEADER_WIDTH
+        colors = lane_colors("STRUCTURE")
+        for region in structure_layout.regions:
+            x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
+            x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
+            sub_y = lane_tops[0] if region.kind == "marker" else lane_tops[0] + MARKERS_HEIGHT + PAUSES_HEIGHT
+            source = region.source_event_indices[0]
+            selected = any(index in m.selected for index in region.source_event_indices)
+            fill = colors.selected if selected else colors.normal
+            tags = (f"event:{source}",)
+            self.semantic_sources[source] = region.source_event_indices
+            self.canvas.create_rectangle(x1, sub_y + 3, max(x1 + 1, x2),
+                                         sub_y + (MARKERS_HEIGHT if region.kind == "marker" else CYCLES_HEIGHT) - 3,
+                                         fill=fill, outline=colors.outline, width=2 if selected else 1,
+                                         tags=tags)
+            bounds = (x1, sub_y + 3, max(x1 + 1, x2),
+                      sub_y + (MARKERS_HEIGHT if region.kind == "marker" else CYCLES_HEIGHT) - 3)
+            for region_index in region.source_event_indices:
+                self.event_bounds[region_index] = bounds
+            label_width = max(1, len(region.label) * 7)
+            label_x = sticky_label_x(x1, x2, view_left, label_width)
+            if label_x is not None:
+                self.canvas.create_text(label_x, sub_y + (MARKERS_HEIGHT if region.kind == "marker" else CYCLES_HEIGHT) / 2,
+                                        text=region.label, anchor="w", fill=colors.text, tags=tags)
         for i, event in enumerate(m.timeline.events):
+            if i in region_sources:
+                continue
             lane = LANES.index(m.lane(event)); x = timeline_x(m._units(event.position), m.song.ppqn, self.pixels_per_beat)
-            y = RULER_HEIGHT + lane * LANE_HEIGHT + 27; selected = i in m.selected
+            y = lane_tops[lane] + 27
+            if lane == 0:
+                sublane = structure_sublane(event)
+                y = lane_tops[0] + {"markers": 3, "pauses": MARKERS_HEIGHT + 1,
+                                    "cycles": MARKERS_HEIGHT + PAUSES_HEIGHT + 3}[sublane]
+            selected = i in m.selected
             previewed = preview_selection is not None and i in preview_selection
             text = m.label(event)
-            item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w", fill="#101318", tags=(f"event:{i}",))
+            item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w",
+                                           fill=lane_colors(m.lane(event)).text,
+                                           tags=(f"event:{i}",))
             box = self.canvas.bbox(item)
+            palette = lane_colors(m.lane(event))
             rect = self.canvas.create_rectangle(box[0]-4, box[1]-3, box[2]+4, box[3]+3,
-                                                fill="#ffe49a" if previewed else ("#ffd166" if selected else "#8fd3c7"),
-                                                outline="#ffffff" if selected or previewed else "#4d8f88",
+                                                fill=palette.selected if selected or previewed else palette.normal,
+                                                outline=palette.outline,
+                                                width=2 if selected or previewed else 1,
                                                 tags=(f"event:{i}",))
             self.event_bounds[i] = (box[0]-4, box[1]-3, box[2]+4, box[3]+3)
             self.canvas.tag_raise(item)
         for lane_offset, track in enumerate(m.audio_tracks):
-            y = RULER_HEIGHT + (len(LANES) + lane_offset) * LANE_HEIGHT
+            y = RULER_HEIGHT + editor_height + lane_offset * LANE_HEIGHT
             flags = " ".join(word for enabled, word in ((track.source.get("mute"), "MUTE"),
                                                           (track.source.get("solo"), "SOLO")) if enabled)
             levels = f"trim {track.source.get('trim', '?')}  gain {track.source.get('gain', '?')}"
@@ -296,13 +394,20 @@ class ReapcaseEditor(tk.Tk):
                                      fill="#171b22", outline="#394250",
                                      tags=("fixed-header",))
         for lane_index, lane in enumerate(all_lanes):
-            y = RULER_HEIGHT + lane_index * LANE_HEIGHT
-            self.canvas.create_rectangle(view_left, y, view_left + HEADER_WIDTH, y + LANE_HEIGHT,
+            y = lane_tops[lane_index]
+            current_height = lane_height(lane) if lane in LANES else LANE_HEIGHT
+            self.canvas.create_rectangle(view_left, y, view_left + HEADER_WIDTH, y + current_height,
                                          fill="#202631" if lane_index % 2 else "#1c222c",
                                          outline="#394250", tags=("fixed-header",))
             self.canvas.create_text(view_left + 8, y + 12, text=lane, anchor="nw",
                                     fill="#9ec8ff", font=("TkDefaultFont", 9, "bold"),
                                     tags=("fixed-header",))
+            if lane == "STRUCTURE":
+                for label, offset in (("MARKERS", 17), ("PAUSES", MARKERS_HEIGHT + 5),
+                                      ("CYCLES", MARKERS_HEIGHT + PAUSES_HEIGHT + 5)):
+                    self.canvas.create_text(view_left + 72, y + offset, text=label, anchor="nw",
+                                            fill="#7793b2", font=("TkDefaultFont", 7),
+                                            tags=("fixed-header",))
             if lane_index >= len(LANES):
                 audio_index = lane_index - len(LANES)
                 track = m.audio_tracks[audio_index]
@@ -348,7 +453,11 @@ class ReapcaseEditor(tk.Tk):
                            self.pixels_per_beat)
             if not preview.valid:
                 x += preview.delta_units / self.model.song.ppqn * self.pixels_per_beat
-            y = RULER_HEIGHT + LANES.index(self.model.lane(event)) * LANE_HEIGHT + 27
+            lane_index = LANES.index(self.model.lane(event))
+            y = lane_top(lane_index) + 27
+            if lane_index == 0:
+                y = lane_top(0) + {"markers": 3, "pauses": MARKERS_HEIGHT + 1,
+                                   "cycles": MARKERS_HEIGHT + PAUSES_HEIGHT + 3}[structure_sublane(event)]
             text = self.model.label(event)
             item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w",
                                            fill="#381b1b" if not preview.valid else "#263241",
@@ -397,7 +506,12 @@ class ReapcaseEditor(tk.Tk):
                 event.x >= HEADER_WIDTH):
             self.seek_units(units); self.redraw(); return
         if index is not None:
-            self.model.select_for_drag(index, toggle=bool(event.state & 0x4))
+            sources = self.semantic_sources.get(index, (index,))
+            if len(sources) > 1 and not event.state & 0x4:
+                if not set(sources).issubset(self.model.selected):
+                    self.model.selected = set(sources)
+            else:
+                self.model.select_for_drag(index, toggle=bool(event.state & 0x4))
             self.drag_x = x
             self.drag_preview = self.model.preview_shift(0)
         else:
@@ -423,7 +537,8 @@ class ReapcaseEditor(tk.Tk):
         if not self.model or event.x < HEADER_WIDTH:
             return
         y = self.canvas.canvasy(event.y)
-        lane_index = int((y - RULER_HEIGHT) // LANE_HEIGHT)
+        lane_index = next((i for i, lane in enumerate(LANES)
+                           if lane_top(i) <= y < lane_top(i) + lane_height(lane)), -1)
         if lane_index < 0 or lane_index >= len(LANES):
             return  # Ruler and audio lanes deliberately have no creation menu.
         lane = LANES[lane_index]
@@ -434,9 +549,22 @@ class ReapcaseEditor(tk.Tk):
         position = self.model._position(units)
         menu = tk.Menu(self, tearoff=False)
         add = tk.Menu(menu, tearoff=False)
+        clicked = self._event_index(event)
+        if clicked is not None:
+            sources = set(self.semantic_sources.get(clicked, (clicked,)))
+            if not sources.issubset(self.model.selected):
+                self.model.selected = sources
+                self.redraw()
+            editable = self.model.selection_is_editable()
+            menu.add_command(label="Duplicate", command=self.duplicate_selected,
+                             state="normal" if editable else "disabled")
+            menu.add_command(label="Delete", command=self.delete_selected,
+                             state="normal" if editable else "disabled")
+            menu.add_separator()
         menu.add_cascade(label="ADD NEW", menu=add)
         if lane == "STRUCTURE":
-            add.add_command(label="Marker...", command=lambda: self._marker_dialog(position))
+            pause_default = y >= lane_top(0) + MARKERS_HEIGHT and y < lane_top(0) + MARKERS_HEIGHT + PAUSES_HEIGHT
+            add.add_command(label="Marker...", command=lambda: self._marker_dialog(position, pause_default))
             cycle = tk.Menu(add, tearoff=False)
             cycle.add_command(label="Cycle Start", command=lambda: self._create(create_cycle_start, position))
             cycle.add_command(label="Cycle End", command=lambda: self._create(
@@ -498,14 +626,14 @@ class ReapcaseEditor(tk.Tk):
             return
         self.redraw()
 
-    def _marker_dialog(self, position):
+    def _marker_dialog(self, position, pause_default=False):
         dialog = tk.Toplevel(self)
         dialog.title("Add Structure Marker"); dialog.transient(self); dialog.grab_set()
         frame = ttk.Frame(dialog, padding=12); frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="Marker name").grid(row=0, column=0, sticky="w")
         name = tk.StringVar(); entry = ttk.Entry(frame, textvariable=name, width=34)
         entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 10))
-        pause = tk.BooleanVar(value=False)
+        pause = tk.BooleanVar(value=pause_default)
         ttk.Checkbutton(frame, text="Pause at Marker", variable=pause).grid(row=2, column=0,
                                                                             columnspan=2, sticky="w")
         ttk.Button(frame, text="Cancel", command=dialog.destroy).grid(row=3, column=0, pady=(14, 0))
@@ -658,6 +786,16 @@ class ReapcaseEditor(tk.Tk):
         ttk.Button(win, text="Shift", command=apply).grid(row=3, columnspan=2, pady=8)
     def undo(self):
         if self.model: self.model.undo(); self.redraw()
+
+    def delete_selected(self):
+        if self.model:
+            self.model.delete_selected()
+            self.redraw()
+
+    def duplicate_selected(self):
+        if self.model:
+            self.model.duplicate_selected()
+            self.redraw()
 
     def seek_units(self, units):
         if self.model and self.model.tempo_map:
