@@ -26,23 +26,29 @@ class SequenceClickPoint:
     position: MusicalPosition
     units: int
     kind: SequenceClickKind
+    end_units: int
 
     @property
     def identity(self) -> str:
         return f"{self.position.render()}:{self.kind.value}"
 
 
-@dataclass(frozen=True)
+@dataclass
 class SequenceInstructionClip:
-    """A derived placeholder for a future editable instruction sample clip."""
+    """An editable, Reapcase-owned instruction sample clip."""
 
+    id: str
     position: MusicalPosition
     units: int
     label: str
+    muted: bool = False
+    origin: str = "generated_count"
+    sample_id: str | None = None
 
-    @property
-    def identity(self) -> str:
-        return f"COUNT:{self.position.render()}:{self.label}"
+    def to_dict(self) -> dict:
+        return {"id": self.id, "position": self.position.render(), "label": self.label,
+                "muted": self.muted, "origin": self.origin,
+                "sample_id": self.sample_id or self.label.casefold()}
 
 
 @dataclass(frozen=True)
@@ -67,7 +73,9 @@ def derive_seq_clicks(timing_map: TimingMap, end_units: int, *, start_bar: int =
     for beat in timing_map.iter_beats(timing_map.bar_start_units(start_bar), end_units):
         kind = (SequenceClickKind.ACCENT if beat.position.beat == 1
                 else SequenceClickKind.TICKSECOND)
-        points.append(SequenceClickPoint(beat.position, beat.units, kind))
+        next_position = timing_map.shift_position(beat.position, beats=1)
+        points.append(SequenceClickPoint(beat.position, beat.units, kind,
+                                         timing_map.position_to_units(next_position)))
     return tuple(points)
 
 
@@ -79,14 +87,19 @@ def derive_count_in(timing_map: TimingMap, *, bar: int = 3
         raise ValueError(f"COUNT vocabulary supports 1-{len(COUNT_LABELS)} beats; bar {bar} has {beats}")
     return tuple(
         SequenceInstructionClip(
+            f"count_{bar}_{beat}",
             MusicalPosition(bar, beat, 1),
             timing_map.position_to_units(MusicalPosition(bar, beat, 1)),
             COUNT_LABELS[beat - 1],
+            sample_id=COUNT_LABELS[beat - 1].casefold(),
         )
         for beat in range(1, beats + 1)
     )
 
 
-def derive_sequence_layout(timing_map: TimingMap, end_units: int) -> SequenceLayout:
-    instructions = tuple(clip for clip in derive_count_in(timing_map) if clip.units <= end_units)
+def derive_sequence_layout(timing_map: TimingMap, end_units: int,
+                           instructions=None) -> SequenceLayout:
+    if instructions is None:
+        instructions = derive_count_in(timing_map)
+    instructions = tuple(clip for clip in instructions if clip.units <= end_units)
     return SequenceLayout(derive_seq_clicks(timing_map, end_units), instructions, end_units)

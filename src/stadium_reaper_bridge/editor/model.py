@@ -76,6 +76,11 @@ class EditorModel:
                            TimingMap(song.ppqn, [(MusicalPosition(1, 1, 1), 120, 4, 4)]))
         # Compatibility alias: all callers now receive the canonical map.
         self.tempo_map = self.timing_map if has_start else None
+        self.click_mutes: set[str] = set()
+        self.instructions = []
+        self.sequence_selected: set[str] = set()
+        self._sequence_edits = 0
+        self._load_sequence_layer()
         self.resolve_audio()
 
     @classmethod
@@ -108,9 +113,36 @@ class EditorModel:
             self.timeline.events.append(create_lighting_event(
                 position, item["name"], item["kind"], item["id"]))
 
+    def _load_sequence_layer(self) -> None:
+        from .sequence import SequenceInstructionClip, derive_count_in
+        root = self._show_document.get("reapcase", {})
+        sequence_present = isinstance(root, dict) and "sequence" in root
+        raw = root.get("sequence", {}) if isinstance(root, dict) else {}
+        if not isinstance(raw, dict):
+            raise ValueError("Invalid Reapcase sequence sidecar")
+        mutes = raw.get("click_mutes", [])
+        if not isinstance(mutes, list) or not all(isinstance(item, str) for item in mutes):
+            raise ValueError("Invalid Reapcase click mute overrides")
+        self.click_mutes = set(mutes)
+        if not sequence_present:
+            self.instructions = list(derive_count_in(self.timing_map))
+            return
+        items = raw.get("instructions", [])
+        if not isinstance(items, list):
+            raise ValueError("Invalid Reapcase sequence instructions")
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("Invalid sequence instruction")
+            position = MusicalPosition.parse(str(item["position"]), ppqn=self.song.ppqn)
+            self.instructions.append(SequenceInstructionClip(
+                str(item["id"]), position, self._units(position), str(item["label"]),
+                bool(item.get("muted", False)), str(item.get("origin", "user")),
+                str(item.get("sample_id", str(item["label"]).casefold()))))
+
     @property
     def modified(self) -> bool:
         return (self._created > 0 or self._structural_edits > 0
+                or self._sequence_edits > 0
                 or len(self.timeline.events) != len(self._original_positions)
                 or any(e.position != p for e, p in zip(self.timeline.events, self._original_positions)))
 
@@ -289,9 +321,41 @@ class EditorModel:
 
     @property
     def sequence_layout(self):
-        """Fresh derived state: it is deliberately absent from source and sidecar JSON."""
+        """Fresh click geometry combined with editable show-layer instructions."""
         from .sequence import derive_sequence_layout
-        return derive_sequence_layout(self.timing_map, self.sequence_end_units)
+        return derive_sequence_layout(self.timing_map, self.sequence_end_units, self.instructions)
+
+    def toggle_click_mute(self, identity: str) -> bool:
+        previous = identity in self.click_mutes
+        self._undo.append(("click_mute", identity, previous))
+        self.click_mutes.symmetric_difference_update({identity})
+        self._sequence_edits += 1
+        return not previous
+
+    def toggle_instruction_mute(self, identity: str) -> bool:
+        item = next(item for item in self.instructions if item.id == identity)
+        self._undo.append(("instruction_mute", identity, item.muted))
+        item.muted = not item.muted
+        self._sequence_edits += 1
+        return item.muted
+
+    def preview_instruction_shift(self, identities: Iterable[str], delta_units: int):
+        ids = tuple(identities)
+        items = [next(item for item in self.instructions if item.id == identity) for identity in ids]
+        targets = tuple(self._position(item.units + delta_units) for item in items) if all(
+            item.units + delta_units >= 0 for item in items) else ()
+        return ids, tuple(item.position for item in items), targets, delta_units, bool(targets)
+
+    def move_instructions(self, identities: Iterable[str], delta_units: int) -> int:
+        ids, originals, targets, delta, valid = self.preview_instruction_shift(identities, delta_units)
+        if not valid or not delta:
+            return 0
+        self._undo.append(("instruction_move", ids, originals))
+        for identity, target in zip(ids, targets):
+            item = next(item for item in self.instructions if item.id == identity)
+            item.position, item.units = target, self._units(target)
+        self._sequence_edits += 1
+        return len(ids)
 
     def apply_marquee(self, indices: Iterable[int], mode: str = "replace") -> None:
         indices = set(indices)
@@ -376,6 +440,24 @@ class EditorModel:
         if not self._undo:
             return False
         operation = self._undo.pop()
+        if operation[0] == "click_mute":
+            _, identity, muted = operation
+            if muted: self.click_mutes.add(identity)
+            else: self.click_mutes.discard(identity)
+            self._sequence_edits -= 1
+            return True
+        if operation[0] == "instruction_mute":
+            _, identity, muted = operation
+            next(item for item in self.instructions if item.id == identity).muted = muted
+            self._sequence_edits -= 1
+            return True
+        if operation[0] == "instruction_move":
+            _, identities, positions = operation
+            for identity, position in zip(identities, positions):
+                item = next(item for item in self.instructions if item.id == identity)
+                item.position, item.units = position, self._units(position)
+            self._sequence_edits -= 1
+            return True
         if operation[0] == "audio_tracks":
             self.song.tracks = operation[1]
             self._structural_edits -= 1
@@ -469,12 +551,17 @@ class EditorModel:
         ]
         sidecar = self.show_path(path)
         show_document = copy.deepcopy(self._show_document)
-        if lights or show_document:
+        if lights or show_document or self.instructions or self.click_mutes:
             reapcase = show_document.setdefault("reapcase", {})
             if not isinstance(reapcase, dict):
                 raise ValueError("Invalid Reapcase namespace in show sidecar")
             reapcase.setdefault("version", 1)
             reapcase["lights"] = lights
+            reapcase["sequence"] = {
+                "version": 1,
+                "click_mutes": sorted(self.click_mutes),
+                "instructions": [item.to_dict() for item in self.instructions],
+            }
             sidecar.write_text(json.dumps(show_document, ensure_ascii=False, indent=2) + "\n",
                                encoding="utf-8")
         elif sidecar.exists():

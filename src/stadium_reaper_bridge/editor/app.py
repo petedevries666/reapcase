@@ -92,6 +92,9 @@ class ReapcaseEditor(tk.Tk):
         self.marquee_base: set[int] = set()
         self.marquee_mode = "replace"
         self.event_bounds: dict[int, tuple[float, float, float, float]] = {}
+        self.sequence_bounds: dict[str, tuple[float, float, float, float]] = {}
+        self.sequence_drag: tuple[float, tuple[str, ...]] | None = None
+        self.sequence_drag_delta = 0
         self.semantic_sources: dict[int, tuple[int, ...]] = {}
         self.grid_choice = tk.StringVar(value="1 beat")
         self.info = tk.StringVar(value="Open a Stadium Song JSON to begin")
@@ -469,6 +472,7 @@ class ReapcaseEditor(tk.Tk):
                     self.canvas.create_line(qx, 0, qx, height, fill="#29333f", dash=(1, 3))
         preview_selection = self._marquee_selection()
         self.event_bounds = {}
+        self.sequence_bounds = {}
         self.semantic_sources = {}
         structure_layout = derive_structure_layout(m.timeline.events, m._units, m.song_end_units)
         region_sources = {i for region in structure_layout.regions for i in region.source_event_indices}
@@ -544,8 +548,7 @@ class ReapcaseEditor(tk.Tk):
             if label_x is not None:
                 self.canvas.create_text(label_x, (y1 + y2) / 2, text=region.label,
                     anchor="w", fill=palette.text, tags=tags)
-        # Sequence points are lightweight, locked Canvas primitives.  Cull them
-        # to the viewport rather than creating a widget/object per visible beat.
+        # Clicks are locked beat clips; only their small M control is editable.
         sequence = m.sequence_layout
         visible_left = self.canvas.canvasx(0)
         visible_right = visible_left + max(1, self.canvas.winfo_width())
@@ -553,29 +556,67 @@ class ReapcaseEditor(tk.Tk):
         click_palette = lane_colors("SEQCLICK")
         for point in sequence.clicks:
             x = timeline_x(point.units, m.song.ppqn, self.pixels_per_beat)
-            if x < visible_left - 3 or x > visible_right + 3:
+            x2 = timeline_x(point.end_units, m.song.ppqn, self.pixels_per_beat)
+            if x2 < visible_left or x > visible_right:
                 continue
             accent = point.kind is SequenceClickKind.ACCENT
-            half_height = 22 if accent else 11
-            center = click_y + LANE_HEIGHT / 2
-            self.canvas.create_line(x, center - half_height, x, center + half_height,
-                                    fill=click_palette.outline if accent else click_palette.normal,
-                                    width=4 if accent else 2)
-            self.canvas.create_line(x - 3, center, x + 3, center,
-                                    fill=click_palette.selected if accent else click_palette.outline)
+            muted = point.identity in m.click_mutes
+            y1, y2 = click_y + 5, click_y + LANE_HEIGHT - 5
+            tags = (f"seqclick:{point.identity}",)
+            self.canvas.create_rectangle(x + 1, y1, max(x + 2, x2 - 1), y2,
+                fill="#39434c" if muted else click_palette.normal,
+                outline=click_palette.outline, stipple="gray50" if muted else "", tags=tags)
+            center = (y1 + y2) / 2
+            spike = 18 if accent else 10
+            self.canvas.create_line(x + 8, center - spike, x + 8, center + spike,
+                fill="#77818b" if muted else click_palette.selected, width=3, tags=tags)
+            if x2 - x >= 46:
+                self.canvas.create_text(x + 14, y1 + 7, text="ACCENT" if accent else "TICK",
+                    anchor="nw", fill="#929aa2" if muted else click_palette.text,
+                    font=("TkDefaultFont", 7, "bold"), tags=tags)
+            button_left = max(x + 1, x2 - 21)
+            mute_tags = (f"seqmute:{point.identity}",)
+            self.canvas.create_rectangle(button_left, y1 + 2, x2 - 2, y1 + 20,
+                fill="#b55252" if muted else "#33404c", outline=click_palette.outline,
+                tags=mute_tags)
+            self.canvas.create_text((button_left + x2 - 2) / 2, y1 + 11, text="M",
+                fill="white", font=("TkDefaultFont", 7, "bold"), tags=mute_tags)
         instruction_y = lane_tops[LANES.index("SEQ INSTRUCTIONS")]
         instruction_palette = lane_colors("SEQ INSTRUCTIONS")
-        clip_width = max(24, min(82, self.pixels_per_beat * .78))
         for clip in sequence.instructions:
             x = timeline_x(clip.units, m.song.ppqn, self.pixels_per_beat)
-            if x + clip_width < visible_left or x > visible_right:
+            next_position = m.timing_map.shift_position(clip.position, beats=1)
+            x2 = timeline_x(m._units(next_position), m.song.ppqn, self.pixels_per_beat)
+            if x2 < visible_left or x > visible_right:
                 continue
-            self.canvas.create_rectangle(x + 2, instruction_y + 18, x + clip_width,
-                                         instruction_y + 54, fill=instruction_palette.normal,
-                                         outline=instruction_palette.outline)
-            self.canvas.create_text(x + clip_width / 2 + 1, instruction_y + 36,
-                                    text=clip.label, fill=instruction_palette.text,
-                                    font=("TkDefaultFont", 8, "bold"))
+            y1, y2 = instruction_y + 5, instruction_y + LANE_HEIGHT - 5
+            selected = clip.id in m.sequence_selected
+            tags = (f"seqinstruction:{clip.id}",)
+            self.canvas.create_rectangle(x + 1, y1, max(x + 2, x2 - 1), y2,
+                fill="#41464d" if clip.muted else instruction_palette.normal,
+                outline=instruction_palette.selected if selected else instruction_palette.outline,
+                width=2 if selected else 1, stipple="gray50" if clip.muted else "", tags=tags)
+            self.sequence_bounds[clip.id] = (x + 1, y1, max(x + 2, x2 - 1), y2)
+            if x2 - x >= 38:
+                self.canvas.create_text(x + 7, (y1 + y2) / 2, text=clip.label, anchor="w",
+                    fill="#929aa2" if clip.muted else instruction_palette.text,
+                    font=("TkDefaultFont", 8, "bold"), tags=tags)
+            button_left = max(x + 1, x2 - 21)
+            mute_tags = (f"instructionmute:{clip.id}",)
+            self.canvas.create_rectangle(button_left, y1 + 2, x2 - 2, y1 + 20,
+                fill="#b55252" if clip.muted else "#33404c", outline=instruction_palette.outline,
+                tags=mute_tags)
+            self.canvas.create_text((button_left + x2 - 2) / 2, y1 + 11, text="M",
+                fill="white", font=("TkDefaultFont", 7, "bold"), tags=mute_tags)
+        if self.sequence_drag and self.sequence_drag_delta:
+            _, identities = self.sequence_drag
+            dx = self.sequence_drag_delta / m.song.ppqn * self.pixels_per_beat
+            for identity in identities:
+                bounds = self.sequence_bounds.get(identity)
+                if bounds:
+                    self.canvas.create_rectangle(bounds[0] + dx, bounds[1], bounds[2] + dx,
+                        bounds[3], fill="#d8e7f5", outline="#8fb8dc", stipple="gray50",
+                        width=2, tags=("sequence-drag-preview",))
         for i, event in enumerate(m.timeline.events):
             if i in region_sources or i in looper_sources or i in lighting_sources:
                 continue
@@ -783,6 +824,23 @@ class ReapcaseEditor(tk.Tk):
         index = self._event_index(event); x = self.canvas.canvasx(event.x)
         units = units_at_x(x, self.model.song.ppqn, self.pixels_per_beat)
         self.model.cursor = self.model._position(units)
+        tags = self.canvas.gettags("current")
+        click_mute = next((tag.split(":", 1)[1] for tag in tags if tag.startswith("seqmute:")), None)
+        instruction_mute = next((tag.split(":", 1)[1] for tag in tags if tag.startswith("instructionmute:")), None)
+        instruction = next((tag.split(":", 1)[1] for tag in tags if tag.startswith("seqinstruction:")), None)
+        if click_mute:
+            self.model.toggle_click_mute(click_mute); self.redraw(); return
+        if instruction_mute:
+            self.model.toggle_instruction_mute(instruction_mute); self.redraw(); return
+        if instruction:
+            if event.state & 0x4:
+                self.model.sequence_selected.symmetric_difference_update({instruction})
+            elif instruction not in self.model.sequence_selected:
+                self.model.sequence_selected = {instruction}
+            self.model.selected.clear()
+            self.sequence_drag = (x, tuple(self.model.sequence_selected))
+            self.sequence_drag_delta = 0
+            self.redraw(); return
         monitor = next((tag for tag in self.canvas.gettags("current") if tag.startswith("monitor:")), None)
         if monitor:
             _, raw_index, kind = monitor.split(":"); lane_index = int(raw_index)
@@ -1026,6 +1084,16 @@ class ReapcaseEditor(tk.Tk):
         if self.app_mode.get() == "LIVE": return
         if not self.model:
             return
+        if self.sequence_drag:
+            start_x, identities = self.sequence_drag
+            raw = drag_units(self.canvas.canvasx(event.x) - start_x,
+                             self.pixels_per_beat, self.model.song.ppqn)
+            anchor = min(next(item.units for item in self.model.instructions if item.id == identity)
+                         for identity in identities)
+            self.sequence_drag_delta = snap_drag_delta(
+                anchor, raw, self.grid_choice.get(), self.model.song.ppqn,
+                self.model.numerator, self.model.timing_map)
+            self.redraw(); return
         if self.audio_drag:
             source, _ = self.audio_drag
             y = self.canvas.canvasy(event.y)
@@ -1056,6 +1124,11 @@ class ReapcaseEditor(tk.Tk):
     def drop(self, event):
         if self.app_mode.get() == "LIVE": return
         if not self.model: return
+        if self.sequence_drag:
+            _, identities = self.sequence_drag
+            self.model.move_instructions(identities, self.sequence_drag_delta)
+            self.sequence_drag = None; self.sequence_drag_delta = 0
+            self.redraw(); return
         if self.audio_drag:
             source, target = self.audio_drag; self.audio_drag = None
             if self.model.move_audio_track(source, target): self._configure_audio()
@@ -1063,6 +1136,14 @@ class ReapcaseEditor(tk.Tk):
         if self.marquee_anchor:
             selection = self._marquee_selection()
             self.model.selected = selection or set()
+            sequence_selection = marquee_candidates(
+                (*self.marquee_anchor, *self.marquee_point), self.sequence_bounds)
+            if self.marquee_mode == "replace":
+                self.model.sequence_selected = sequence_selection
+            elif self.marquee_mode == "add":
+                self.model.sequence_selected.update(sequence_selection)
+            else:
+                self.model.sequence_selected.symmetric_difference_update(sequence_selection)
             self.marquee_anchor = self.marquee_point = None
             self.marquee_base = set()
             self.redraw()
