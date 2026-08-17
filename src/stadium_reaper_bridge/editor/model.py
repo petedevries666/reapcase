@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 from pathlib import Path
 from typing import Iterable
 
@@ -53,6 +54,7 @@ class EditorModel:
         self._original_positions = [event.position for event in self.timeline.events]
         self._undo: list[tuple] = []
         self._created = 0
+        self._structural_edits = 0
         start = next((e for e in self.timeline.events if e.source.type == "START"), None)
         self.tempo = start.data.get("tempo") if start else None
         self.numerator = start.data.get("time_signature_numerator", 4) if start else 4
@@ -74,7 +76,8 @@ class EditorModel:
 
     @property
     def modified(self) -> bool:
-        return (self._created > 0 or len(self.timeline.events) != len(self._original_positions)
+        return (self._created > 0 or self._structural_edits > 0
+                or len(self.timeline.events) != len(self._original_positions)
                 or any(e.position != p for e, p in zip(self.timeline.events, self._original_positions)))
 
     @property
@@ -213,11 +216,56 @@ class EditorModel:
             self.selected = previous_selection
             self._created -= 1
             return True
+        if operation[0] == "replace":
+            _, events, selection = operation
+            self.timeline.events = events
+            self.selected = selection
+            self._structural_edits -= 1
+            return True
         _, indices, positions, previous_selection = operation
         for index, position in zip(indices, positions):
             self.timeline.events[index].position = position
         self.selected = previous_selection
         return True
+
+    def selection_is_editable(self) -> bool:
+        return bool(self.selected) and not any(
+            self.timeline.events[i].source.type in {"START", "END"} for i in self.selected)
+
+    def delete_selected(self) -> int:
+        """Delete a safe selection as one undoable, lossless operation."""
+        indices = sorted(i for i in self.selected if 0 <= i < len(self.timeline.events))
+        if not indices or not self.selection_is_editable():
+            return 0
+        before = list(self.timeline.events)
+        previous_selection = set(self.selected)
+        self._undo.append(("replace", before, previous_selection))
+        remove = set(indices)
+        self.timeline.events = [event for i, event in enumerate(before) if i not in remove]
+        self.selected = set()
+        self._structural_edits += 1
+        return len(indices)
+
+    def duplicate_selected(self) -> int:
+        """Append independent lossless copies, preserving group offsets and order."""
+        indices = sorted(i for i in self.selected if 0 <= i < len(self.timeline.events))
+        if not indices or not self.selection_is_editable():
+            return 0
+        before = list(self.timeline.events)
+        previous_selection = set(self.selected)
+        self._undo.append(("replace", before, previous_selection))
+        next_source = max((event.source_index for event in before
+                           if event.source_index is not None), default=-1) + 1
+        copies = []
+        for offset, index in enumerate(indices):
+            duplicate = copy.deepcopy(before[index])
+            duplicate.source_index = next_source + offset
+            copies.append(duplicate)
+        first = len(self.timeline.events)
+        self.timeline.events.extend(copies)
+        self.selected = set(range(first, first + len(copies)))
+        self._structural_edits += 1
+        return len(copies)
 
     def insert_event(self, event: TimelineEvent) -> int:
         """Append a created event with stable source order as one undo operation."""
