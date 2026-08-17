@@ -42,10 +42,26 @@ par glisser-déposer ou avec **Shift Selected**. **Save As JSON** exige une
 nouvelle destination et affiche le bilan lossless avant export. Le panneau du
 bas indique sélection, curseur, modifications et types non pris en charge.
 
+Glisser depuis un espace vide trace une sélection rectangulaire : sans
+modificateur elle remplace la sélection, **Ctrl** bascule les flags touchés et
+**Shift** les ajoute. Glisser un flag déjà sélectionné continue de déplacer le
+groupe. La molette fait défiler le temps horizontalement (Shift est également
+accepté), Ctrl+molette zoome et le bouton central déplace toujours la vue.
+
+Jusqu'à huit pistes audio JSON sont affichées, en lecture seule, sous les flags.
+**Locate Audio Folder** recherche les WAV manquants par suffixe relatif puis par
+nom de fichier uniquement lorsque le résultat est unique. Un WAV résolu affiche
+sa durée réelle à partir de son en-tête ; un WAV absent reste affiché comme
+`FILE NOT FOUND`. `Fit Song` inclut la fin des WAV résolus via une tempo map
+dérivée des flags START/TIME.
+
 ### Limites du MVP
 
 - la géométrie des déplacements utilise la signature initiale (les changements
   de signature restent visibles mais ne redéfinissent pas encore la grille) ;
+- toutes les fixtures connues ont un offset audio nul. Les offsets non nuls sont
+  conservés et signalés, mais restent dessinés au début tant que leur unité
+  Stadium n'est pas établie ; une recherche audio ambiguë reste non résolue ;
 - pas de suppression ni d'édition de payload, d'audio ou de fichiers `.peak` ;
 - pas d'intégration REAPER ni de reconstruction de backup Stadium ;
 - zoom et édition détaillée des familles vendor-only sont reportés.
