@@ -80,6 +80,7 @@ class ReapcaseEditor(tk.Tk):
         self.pixels_per_beat = DEFAULT_PIXELS_PER_BEAT
         self.drag_x: float | None = None
         self.drag_preview: MovePreview | None = None
+        self.audio_drag: tuple[int, int] | None = None
         self.marquee_anchor: tuple[float, float] | None = None
         self.marquee_point: tuple[float, float] | None = None
         self.marquee_base: set[int] = set()
@@ -116,6 +117,8 @@ class ReapcaseEditor(tk.Tk):
             button.pack(side="left", padx=2)
             Tooltip(button, tip)
         for text, command in (("Locate Audio Folder", self.locate_audio),
+                              ("Refresh Audio", self.refresh_audio),
+                              ("Add Audio Track...", self.add_audio_track_dialog),
                               ("Analyze Grid Sync", self.analyze_sync),
                               ("Select All", self.select_all), ("Select All After Cursor", self.select_after),
                               ("Select Lane", self.select_lane), ("Shift Selected", self.shift_dialog),
@@ -176,7 +179,9 @@ class ReapcaseEditor(tk.Tk):
             messagebox.showerror("Choose a new file", "Save As never overwrites the original source file."); return
         if path:
             summary = self.model.save_as(path)
-            messagebox.showinfo("Export complete", f"{summary.events_moved} events moved\n0 payloads changed\n0 tracks changed")
+            messagebox.showinfo("Export complete", f"{summary.events_moved} events moved\n"
+                                f"{summary.payloads_changed} payloads changed\n"
+                                f"{summary.tracks_changed} track operations")
             self.redraw()
 
     def locate_audio(self):
@@ -203,8 +208,10 @@ class ReapcaseEditor(tk.Tk):
         messagebox.showinfo(f"Grid Sync — {track.name}",
                             format_grid_sync(results) if results else "CLICK SYNC\n\nNo strong transients found.")
 
-    def _configure_audio(self):
-        self.audio_engine.close(); self.waveforms.clear(); self._waveform_pending.clear()
+    def _configure_audio(self, preserve_waveforms=False):
+        self.audio_engine.close()
+        if not preserve_waveforms:
+            self.waveforms.clear(); self._waveform_pending.clear()
         tracks = list(self.model.audio_tracks) if self.model else []
         self.monitor_muted = [False] * len(tracks); self.monitor_solo = [False] * len(tracks)
         resolved = [PlaybackTrack(t.resolved_path, t.name, t.offset) for t in tracks if t.resolved_path]
@@ -214,6 +221,37 @@ class ReapcaseEditor(tk.Tk):
             self.audio_engine.diagnostic = str(exc)
         for track in tracks:
             if track.resolved_path: self._request_waveform(track.resolved_path)
+
+    def refresh_audio(self):
+        if not self.model: return
+        changed = self.model.refresh_audio()
+        for path in changed:
+            self.waveforms.pop(str(path), None)
+        self._configure_audio(preserve_waveforms=True)
+        self.redraw()
+
+    def add_audio_track_dialog(self):
+        if not self.model: return
+        if len(self.model.song.tracks) >= 8:
+            messagebox.showerror("Cannot add track", "A Song can contain at most 8 audio tracks")
+            return
+        source = filedialog.askopenfilename(title="Add Audio Track",
+                                            filetypes=(("WAV audio", "*.wav"),))
+        if not source: return
+        from pathlib import Path
+        name = simpledialog.askstring("Add Audio Track", "Track display name:", parent=self,
+                                      initialvalue=Path(source).stem)
+        if name is None: return
+        destination = None
+        from .audio import stadium_backup_audio_paths
+        if stadium_backup_audio_paths(self.model.path) is None:
+            destination = filedialog.askdirectory(title="Choose this Song's audio destination")
+            if not destination: return
+        try:
+            self.model.add_audio_track(source, name.strip() or Path(source).stem, destination)
+        except Exception as exc:
+            messagebox.showerror("Cannot add audio track", str(exc)); return
+        self._configure_audio(); self.redraw()
 
     def _request_waveform(self, path):
         path = str(path)
@@ -427,6 +465,20 @@ class ReapcaseEditor(tk.Tk):
                         fill="#d36b62" if enabled and label == "M" else
                              ("#e3bf58" if enabled else "#394552"), tags=tags)
                     self.canvas.create_text(x0 + 11, y + 14, text=label, fill="white", tags=tags)
+        if self.audio_drag:
+            source, target = self.audio_drag
+            top = RULER_HEIGHT + editor_height
+            insert_y = top + target * LANE_HEIGHT
+            self.canvas.create_line(view_left, insert_y, view_left + HEADER_WIDTH, insert_y,
+                                    fill="#69b7ff", width=3, tags=("track-drag",))
+            track = m.audio_tracks[source]
+            ghost_y = top + source * LANE_HEIGHT + 8
+            self.canvas.create_rectangle(view_left + 3, ghost_y, view_left + HEADER_WIDTH - 3,
+                                         ghost_y + 38, fill="#45617d", outline="#9ed0ff",
+                                         stipple="gray50", tags=("track-drag",))
+            self.canvas.create_text(view_left + 10, ghost_y + 19, anchor="w",
+                                    text=f"AUDIO {source + 1}  {track.name}", fill="white",
+                                    tags=("track-drag",))
         unsupported = ", ".join(m.unsupported_types) or "none"
         overflow = f" | WARNING: {m.audio_overflow} tracks above display limit preserved" if m.audio_overflow else ""
         tempo = f"{m.tempo:g} BPM" if m.tempo is not None else "tempo unavailable"
@@ -502,6 +554,10 @@ class ReapcaseEditor(tk.Tk):
                 self.audio_engine.set_monitor(resolved_index,
                     muted=self.monitor_muted[lane_index], solo=self.monitor_solo[lane_index])
             self.redraw(); return
+        audio_index = self._audio_index_at_y(self.canvas.canvasy(event.y))
+        if event.x < HEADER_WIDTH and audio_index is not None:
+            self.audio_drag = (audio_index, audio_index)
+            self.redraw(); return
         if (self.canvas.canvasy(event.y) < RULER_HEIGHT and
                 event.x >= HEADER_WIDTH):
             self.seek_units(units); self.redraw(); return
@@ -534,9 +590,24 @@ class ReapcaseEditor(tk.Tk):
 
     def context_menu(self, event):
         """Open a compact lane-specific creation menu at the clicked position."""
-        if not self.model or event.x < HEADER_WIDTH:
+        if not self.model:
             return
         y = self.canvas.canvasy(event.y)
+        audio_index = self._audio_index_at_y(y)
+        if event.x < HEADER_WIDTH and audio_index is not None:
+            menu = tk.Menu(self, tearoff=False)
+            menu.add_command(label="Move Track Up", state="normal" if audio_index else "disabled",
+                             command=lambda: self.move_audio_track(audio_index, audio_index - 1))
+            menu.add_command(label="Move Track Down",
+                             state="normal" if audio_index < len(self.model.audio_tracks) - 1 else "disabled",
+                             command=lambda: self.move_audio_track(audio_index, audio_index + 1))
+            menu.add_separator()
+            menu.add_command(label="Delete Track", command=lambda: self.delete_audio_track(audio_index))
+            try: menu.tk_popup(event.x_root, event.y_root)
+            finally: menu.grab_release()
+            return
+        if event.x < HEADER_WIDTH:
+            return
         lane_index = next((i for i, lane in enumerate(LANES)
                            if lane_top(i) <= y < lane_top(i) + lane_height(lane)), -1)
         if lane_index < 0 or lane_index >= len(LANES):
@@ -694,6 +765,14 @@ class ReapcaseEditor(tk.Tk):
     def drag(self, event):
         if not self.model:
             return
+        if self.audio_drag:
+            source, _ = self.audio_drag
+            y = self.canvas.canvasy(event.y)
+            top = RULER_HEIGHT + sum(lane_height(lane) for lane in LANES)
+            target = max(0, min(len(self.model.audio_tracks) - 1,
+                                int((y - top + LANE_HEIGHT / 2) // LANE_HEIGHT)))
+            self.audio_drag = (source, target)
+            self.redraw(); return
         if self.marquee_anchor:
             self.marquee_point = (self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
             self.redraw()
@@ -715,6 +794,10 @@ class ReapcaseEditor(tk.Tk):
 
     def drop(self, event):
         if not self.model: return
+        if self.audio_drag:
+            source, target = self.audio_drag; self.audio_drag = None
+            if self.model.move_audio_track(source, target): self._configure_audio()
+            self.redraw(); return
         if self.marquee_anchor:
             selection = self._marquee_selection()
             self.model.selected = selection or set()
@@ -794,7 +877,31 @@ class ReapcaseEditor(tk.Tk):
             win.destroy(); self.redraw()
         ttk.Button(win, text="Shift", command=apply).grid(row=3, columnspan=2, pady=8)
     def undo(self):
-        if self.model: self.model.undo(); self.redraw()
+        if self.model:
+            before = tuple(track.source for track in self.model.audio_tracks)
+            changed = self.model.undo()
+            if changed and before != tuple(track.source for track in self.model.audio_tracks):
+                self._configure_audio()
+            self.redraw()
+
+    def _audio_index_at_y(self, y):
+        if not self.model: return None
+        top = RULER_HEIGHT + sum(lane_height(lane) for lane in LANES)
+        index = int((y - top) // LANE_HEIGHT)
+        return index if top <= y and 0 <= index < len(self.model.audio_tracks) else None
+
+    def move_audio_track(self, old_index, new_index):
+        if self.model and self.model.move_audio_track(old_index, new_index):
+            self._configure_audio(); self.redraw()
+
+    def delete_audio_track(self, index):
+        if not self.model: return
+        name = self.model.audio_tracks[index].name
+        if not messagebox.askyesno("Delete Audio Track",
+                                   f'Remove track "{name}" from this Song?\n\nThe WAV file will remain on disk.'):
+            return
+        self.model.delete_audio_track(index)
+        self._configure_audio(); self.redraw()
 
     def delete_selected(self):
         if self.model:
