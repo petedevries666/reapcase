@@ -9,8 +9,9 @@ from typing import Iterable
 from ..midi import RigMidiDecoder
 from ..stadium import MusicalPosition, StadiumSong
 from ..timeline import Timeline, TimelineEvent, stadium_to_timeline, timeline_source_flags
-from .audio import (AudioResolver, TempoChange, TempoMap, audio_track_views,
+from .audio import (AudioResolver, audio_track_views,
                     stadium_backup_audio_paths)
+from ..timing import TimingMap
 from .display import badge_text
 
 LANES = ("STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "MIDI / OTHER")
@@ -58,11 +59,11 @@ class EditorModel:
         self.denominator = start.data.get("time_signature_denominator", 4) if start else 4
         self.audio_root: Path | None = None
         self.audio_tracks = ()
-        changes = [TempoChange(self._units(e.position), float(e.data["tempo"]))
-                   for e in self.timeline.events
-                   if e.source.type in {"START", "TIME"} and e.data.get("tempo")]
-        self.tempo_map = (TempoMap(self.song.ppqn, changes, self._units, self._position)
-                          if changes and changes[0].units == 0 else None)
+        has_start = any(flag.type == "START" for flag in song.flags)
+        self.timing_map = (TimingMap.from_song(song) if has_start else
+                           TimingMap(song.ppqn, [(MusicalPosition(1, 1, 1), 120, 4, 4)]))
+        # Compatibility alias: all callers now receive the canonical map.
+        self.tempo_map = self.timing_map if has_start else None
         self.resolve_audio()
 
     @classmethod
@@ -160,21 +161,18 @@ class EditorModel:
             self.selected = {index}
 
     def _units(self, position: MusicalPosition) -> int:
-        return ((position.bar - 1) * self.numerator + position.beat - 1) * self.song.ppqn + position.tick - 1
+        return self.timing_map.position_to_units(position)
 
     def _position(self, units: int) -> MusicalPosition:
-        if units < 0:
-            raise ValueError("Movement would place an event before 001-01.001")
-        beat, tick = divmod(units, self.song.ppqn)
-        bar, beat = divmod(beat, self.numerator)
-        return MusicalPosition(bar + 1, beat + 1, tick + 1)
+        return self.timing_map.units_to_position(units)
 
     def shift_selected(self, bars: int = 0, beats: int = 0, ticks: int = 0) -> int:
         indices = sorted(self.selected)
         if not indices:
             return 0
-        delta = (bars * self.numerator + beats) * self.song.ppqn + ticks
-        targets = [self._position(self._units(self.timeline.events[i].position) + delta) for i in indices]
+        targets = [self.timing_map.shift_position(self.timeline.events[i].position,
+                                                  bars=bars, beats=beats, ticks=ticks)
+                   for i in indices]
         previous = [self.timeline.events[i].position for i in indices]
         self._undo.append(("move", indices, previous, set(self.selected)))
         for index, target in zip(indices, targets):

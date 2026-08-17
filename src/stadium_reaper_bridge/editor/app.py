@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_HEIGHT,
                      drag_units, fit_song_scale, horizontal_wheel_units,
                      marquee_candidates, normalized_rectangle, snap_drag_delta,
-                     snapped_units_at_x, timeline_x, units_at_x, x_for_position,
+                     snapped_units_at_x, timeline_x, units_at_x,
                      zoom_about_cursor)
 from .model import EditorModel, LANES, MovePreview
 from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
@@ -194,25 +194,25 @@ class ReapcaseEditor(tk.Tk):
         for lane_index, lane in enumerate(all_lanes):
             y = RULER_HEIGHT + lane_index * LANE_HEIGHT
             self.canvas.create_rectangle(0, y, width, y + LANE_HEIGHT, fill="#202631" if lane_index % 2 else "#1c222c", outline="#394250")
-        max_bar = max(1, int(total_beats / m.numerator) + 2)
-        for bar in range(1, max_bar + 1):
-            for beat in range(1, m.numerator + 1):
-                x = HEADER_WIDTH + ((bar - 1) * m.numerator + beat - 1) * self.pixels_per_beat
-                prominent = beat == 1
-                if not prominent and self.pixels_per_beat < 28:
-                    continue
-                self.canvas.create_line(x, RULER_HEIGHT, x, height, fill="#708096" if prominent else "#343f4d", width=2 if prominent else 1)
-                self.canvas.create_line(x, 17 if prominent else 21, x, RULER_HEIGHT,
-                                        fill="#9aa9bb" if prominent else "#667487")
-                if prominent: self.canvas.create_text(x + 4, 2, text=f"{bar:03d}", anchor="nw", fill="#c2ccd8")
-                if self.pixels_per_beat >= 100:
-                    for quarter in range(1, 4):
-                        qx = x + quarter * self.pixels_per_beat / 4
-                        self.canvas.create_line(qx, 0, qx, height, fill="#29333f", dash=(1, 3))
+        grid_end = m.song_end_units + 2 * m.song.ppqn
+        for point in m.timing_map.iter_beats(0, grid_end):
+            bar, beat = point.position.bar, point.position.beat
+            x = timeline_x(point.units, m.song.ppqn, self.pixels_per_beat)
+            prominent = beat == 1
+            if not prominent and self.pixels_per_beat < 28:
+                continue
+            self.canvas.create_line(x, RULER_HEIGHT, x, height, fill="#708096" if prominent else "#343f4d", width=2 if prominent else 1)
+            self.canvas.create_line(x, 17 if prominent else 21, x, RULER_HEIGHT,
+                                    fill="#9aa9bb" if prominent else "#667487")
+            if prominent: self.canvas.create_text(x + 4, 2, text=f"{bar:03d}", anchor="nw", fill="#c2ccd8")
+            if self.pixels_per_beat >= 100:
+                for quarter in range(1, 4):
+                    qx = x + quarter * self.pixels_per_beat / 4
+                    self.canvas.create_line(qx, 0, qx, height, fill="#29333f", dash=(1, 3))
         preview_selection = self._marquee_selection()
         self.event_bounds = {}
         for i, event in enumerate(m.timeline.events):
-            lane = LANES.index(m.lane(event)); x = x_for_position(event.position, m.song.ppqn, m.numerator, self.pixels_per_beat)
+            lane = LANES.index(m.lane(event)); x = timeline_x(m._units(event.position), m.song.ppqn, self.pixels_per_beat)
             y = RULER_HEIGHT + lane * LANE_HEIGHT + 27; selected = i in m.selected
             previewed = preview_selection is not None and i in preview_selection
             text = m.label(event)
@@ -267,11 +267,13 @@ class ReapcaseEditor(tk.Tk):
                                         fill="#7891aa", width=1)
                 self.canvas.tag_raise(clip_label)
             if self.audio_grid_overlay and self.pixels_per_beat >= 40:
+                bar_starts = {point.units for point in
+                              m.timing_map.iter_bars(0, m.song_end_units)}
                 for unit in range(0, m.song_end_units + 1, max(1, m.song.ppqn // 4)):
                     x = timeline_units_to_x(unit, m.song.ppqn, self.pixels_per_beat,
                                             HEADER_WIDTH)
                     beat = unit % m.song.ppqn == 0
-                    bar = unit % (m.song.ppqn * m.numerator) == 0
+                    bar = unit in bar_starts
                     self.canvas.create_line(x, y + 22, x, y + 62,
                         fill="#d5e6fa" if bar else ("#90a9c5" if beat else "#53657a"),
                         width=2 if bar else 1, dash=() if beat else (1, 3))
@@ -342,7 +344,8 @@ class ReapcaseEditor(tk.Tk):
         targets = preview.targets if preview.valid else preview.original
         for index, position in zip(preview.indices, targets):
             event = self.model.timeline.events[index]
-            x = x_for_position(position, self.model.song.ppqn, self.model.numerator, self.pixels_per_beat)
+            x = timeline_x(self.model._units(position), self.model.song.ppqn,
+                           self.pixels_per_beat)
             if not preview.valid:
                 x += preview.delta_units / self.model.song.ppqn * self.pixels_per_beat
             y = RULER_HEIGHT + LANES.index(self.model.lane(event)) * LANE_HEIGHT + 27
@@ -426,7 +429,8 @@ class ReapcaseEditor(tk.Tk):
         lane = LANES[lane_index]
         x = self.canvas.canvasx(event.x)
         units = snapped_units_at_x(x, self.model.song.ppqn, self.pixels_per_beat,
-                                   self.grid_choice.get(), self.model.numerator)
+                                   self.grid_choice.get(), self.model.numerator,
+                                   self.model.timing_map)
         position = self.model._position(units)
         menu = tk.Menu(self, tearoff=False)
         add = tk.Menu(menu, tearoff=False)
@@ -562,7 +566,7 @@ class ReapcaseEditor(tk.Tk):
         raw = drag_units(dx, self.pixels_per_beat, self.model.song.ppqn)
         anchor = min(self.model._units(self.model.timeline.events[i].position) for i in self.model.selected)
         delta = snap_drag_delta(anchor, raw, self.grid_choice.get(), self.model.song.ppqn,
-                                self.model.numerator)
+                                self.model.numerator, self.model.timing_map)
         self.drag_preview = self.model.preview_shift(delta)
         self.redraw()
         count = len(self.drag_preview.indices)

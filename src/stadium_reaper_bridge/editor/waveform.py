@@ -301,7 +301,9 @@ def analyze_grid_sync(path: str | Path, tempo_map: _TempoMap, ppqn: int,
     for frame in candidates:
         seconds = frame / rate
         units = tempo_map.seconds_to_units(seconds)
-        beat_units = round(units / ppqn) * ppqn
+        beat_units = (tempo_map.nearest_beat_units(units)
+                      if hasattr(tempo_map, "nearest_beat_units")
+                      else round(units / ppqn) * ppqn)
         beat_seconds = tempo_map.units_to_seconds(beat_units)
         delta_seconds = seconds - beat_seconds
         results.append(SyncTransient(frame, seconds,

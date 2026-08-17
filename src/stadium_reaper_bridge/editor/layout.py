@@ -34,14 +34,14 @@ def units_at_x(x: float, ppqn: int, pixels_per_beat: float) -> int:
 
 
 def snapped_units_at_x(x: float, ppqn: int, pixels_per_beat: float, mode: str,
-                       beats_per_bar: int) -> int:
+                       beats_per_bar: int, timing_map=None) -> int:
     """Convert a canvas coordinate to a grid-aligned timeline unit.
 
     This is the canonical pointer-to-timeline path used by creation.  Canvas
     scrolling is intentionally handled by the caller via ``canvasx``.
     """
     units = units_at_x(x, ppqn, pixels_per_beat)
-    return snap_drag_delta(0, units, mode, ppqn, beats_per_bar)
+    return snap_drag_delta(0, units, mode, ppqn, beats_per_bar, timing_map)
 
 
 def track_header_rect(lane_top: float) -> tuple[float, float, float, float]:
@@ -60,14 +60,15 @@ def drag_units(pixel_delta: float, pixels_per_beat: float, ppqn: int) -> int:
 
 
 def snap_drag_delta(anchor_units: int, raw_delta: int, mode: str,
-                    ppqn: int, beats_per_bar: int) -> int:
+                    ppqn: int, beats_per_bar: int, timing_map=None) -> int:
     """Snap the destination of the earliest selected event and return a delta."""
-    grids = {
-        "1 bar": ppqn * beats_per_bar,
-        "1 beat": ppqn,
-        "quarter beat": max(1, round(ppqn / 4)),
-        "no snap": 1,
-    }
+    destination = max(0, anchor_units + raw_delta)
+    if timing_map and mode == "1 bar":
+        return timing_map.nearest_bar_units(destination) - anchor_units
+    if timing_map and mode == "1 beat":
+        return timing_map.nearest_beat_units(destination) - anchor_units
+    grids = {"1 bar": ppqn * beats_per_bar, "1 beat": ppqn,
+             "quarter beat": max(1, round(ppqn / 4)), "no snap": 1}
     if mode not in grids:
         raise ValueError(f"Unknown snap mode: {mode}")
     grid = grids[mode]
