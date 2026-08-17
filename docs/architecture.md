@@ -47,10 +47,16 @@ Elle contient deux systèmes existants : `second_helix` pour le second Helix et
 `video` pour la vidéo.
 
 Le **contrôle distant du Stadium à l'exécution** constitue un troisième système,
-`stadium_transport`. Il décrit les commandes externes de transport et de
-navigation dans les songs, markers et playlists. Son canal est volontairement
-optionnel dans la configuration : la source ne prescrit pas de canal et un canal
-pourra être ajouté ultérieurement sans modifier le schéma des commandes. Cette
+`stadium_transport`. Il décrit les commandes externes de transport, de looper,
+de snapshots et de navigation dans les songs, markers, setlists et playlists.
+Ces fonctions globales utilisent le **Global MIDI Channel** configurable du
+Stadium ; la configuration fournit sa valeur par défaut, le canal 1, et peut être
+modifiée sans changer le codec.
+
+Pour CC48, la documentation fournisseur décrit une action contextuelle : la
+plage 0–63 efface ou crée le Cycle, tandis que 64–127 agit comme commutateur
+d'activation/désactivation. L'alias stable `cycle_toggle` évite donc de prétendre
+que le codec connaît l'état courant ou la frontière de Cycle concernée. Cette
 infrastructure est facultative et n'est ni consultée ni nécessaire pour le
 round-trip lossless du JSON Song.
 

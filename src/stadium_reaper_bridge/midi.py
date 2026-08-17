@@ -51,14 +51,26 @@ class RigMidiDecoder:
                 return result
 
         stadium = self.config["stadium_transport"]
-        if stadium.get("channel") in (None, channel):
-            mapping = stadium["cc"].get(str(cc))
+        if channel == stadium["channel"]:
+            mapping = self._stadium_mappings(stadium).get(str(cc))
             if mapping:
                 if mapping["type"] == "trigger":
                     return {"system": "stadium_transport", "action": mapping["action"]}
                 if mapping["type"] == "range":
                     key = "high" if value >= 64 else "low"
-                    return {"system": "stadium_transport", "action": mapping[key]}
+                    action = mapping.get(key)
+                    if action:
+                        return {"system": "stadium_transport", "action": action}
+                    return None
+                if mapping["type"] == "snapshot":
+                    if mapping["value_min"] <= value <= mapping["value_max"]:
+                        return {"system": "stadium_transport", "action": "snapshot",
+                                "snapshot": value + mapping["offset"]}
+                    if value == mapping["next_value"]:
+                        return {"system": "stadium_transport", "action": "next_snapshot"}
+                    if value == mapping["previous_value"]:
+                        return {"system": "stadium_transport", "action": "previous_snapshot"}
+                    return None
                 result = {
                     "system": "stadium_transport",
                     "action": mapping["action"],
@@ -86,11 +98,9 @@ class RigMidiDecoder:
 
     def _encode_stadium(self, action: str, command: dict[str, Any]) -> dict[str, int]:
         stadium = self.config["stadium_transport"]
-        channel = command.get("channel", stadium.get("channel"))
-        if channel is not None:
-            channel = _midi_int("channel", channel, 1, 16)
+        channel = _midi_int("channel", stadium.get("channel"), 1, 16)
         matches: list[tuple[int, int]] = []
-        for cc_text, mapping in stadium["cc"].items():
+        for cc_text, mapping in self._stadium_mappings(stadium).items():
             if mapping.get("type") == "selector" and mapping.get("action") == action:
                 field = mapping.get("field")
                 if field not in command:
@@ -99,11 +109,32 @@ class RigMidiDecoder:
             if mapping.get("type") == "trigger" and mapping["action"] == action:
                 matches.append((int(cc_text), mapping.get("canonical_value", 0)))
             if mapping.get("type") == "range":
-                if mapping["low"] == action:
+                if mapping.get("low") == action:
                     matches.append((int(cc_text), mapping.get("low_value", 0)))
-                if mapping["high"] == action:
+                if mapping.get("high") == action:
                     matches.append((int(cc_text), mapping.get("high_value", 127)))
+            if mapping.get("type") == "snapshot":
+                if action == "snapshot":
+                    snapshot = _midi_int("snapshot", command.get("snapshot"), 1, 128)
+                    value = snapshot - mapping["offset"]
+                    if not mapping["value_min"] <= value <= mapping["value_max"]:
+                        raise ValueError("snapshot is outside the configured range")
+                    matches.append((int(cc_text), value))
+                if action == "next_snapshot":
+                    matches.append((int(cc_text), mapping["next_value"]))
+                if action == "previous_snapshot":
+                    matches.append((int(cc_text), mapping["previous_value"]))
         return self._one_match(matches, channel, action)
+
+    @staticmethod
+    def _stadium_mappings(stadium: dict[str, Any]) -> dict[str, Any]:
+        """Combine global and looper CC subsections without changing their schema."""
+        mappings = dict(stadium["cc"])
+        for cc, mapping in stadium.get("looper", {}).get("cc", {}).items():
+            if cc in mappings:
+                raise ValueError(f"duplicate stadium_transport CC: {cc}")
+            mappings[cc] = mapping
+        return mappings
 
     def _encode_second_helix(self, action: str, command: dict[str, Any]) -> dict[str, int]:
         second = self.config["second_helix"]
