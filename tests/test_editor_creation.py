@@ -1,0 +1,112 @@
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from stadium_reaper_bridge.editor.creation import (
+    create_second_helix_looper, create_second_helix_snapshot,
+    create_structure_marker, create_video_command,
+)
+from stadium_reaper_bridge.editor.layout import HEADER_WIDTH, snapped_units_at_x, timeline_x
+from stadium_reaper_bridge.editor.model import EditorModel
+from stadium_reaper_bridge.midi import RigMidiDecoder
+from stadium_reaper_bridge.stadium import MusicalPosition, StadiumSong
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+DECODER = RigMidiDecoder.from_file("config/rig_midi.json")
+
+
+class CreationTests(unittest.TestCase):
+    def model(self):
+        path = FIXTURES / "monzter_332.json"
+        return EditorModel(StadiumSong.from_json_text(path.read_text()), path, DECODER)
+
+    def test_pointer_position_snaps_at_scales_scroll_independent_canvas_x(self):
+        ppqn, beats = 240, 4
+        cases = [
+            (0, 90, "1 beat", 0),
+            (56 * 4 * ppqn + 2 * ppqn + 86, 30, "1 bar", 57 * 4 * ppqn),
+            (56 * 4 * ppqn + 2 * ppqn + 86, 180, "1 beat", 56 * 4 * ppqn + 2 * ppqn),
+            (12 * ppqn + 61, 45, "quarter beat", 12 * ppqn + 60),
+            (12 * ppqn + 87, 360, "no snap", 12 * ppqn + 87),
+        ]
+        for units, scale, grid, expected in cases:
+            with self.subTest(grid=grid, scale=scale):
+                canvas_x = timeline_x(units, ppqn, scale)
+                # canvas_x already includes any viewport scrolling conversion.
+                self.assertEqual(snapped_units_at_x(canvas_x, ppqn, scale, grid, beats), expected)
+        self.assertEqual(snapped_units_at_x(HEADER_WIDTH - 500, ppqn, 90, "1 bar", beats), 0)
+
+    def test_structure_marker_creation(self):
+        event = create_structure_marker(MusicalPosition(57, 3, 1), "BREAKDOWN")
+        self.assertEqual(event.source.render(),
+                         "057-03.001|MARKER;BREAKDOWN;7;Off;Off;Off;false;[Current];[Current];[Current]")
+        self.assertEqual(event.data["name"], "BREAKDOWN")
+        for invalid in ("", "bad;name", "bad|name"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                create_structure_marker(MusicalPosition(1, 1, 1), invalid)
+
+    def test_second_helix_snapshots_use_rig_mapping(self):
+        for snapshot, value in ((1, 0), (3, 2), (8, 7)):
+            event = create_second_helix_snapshot(MusicalPosition(57, 1, 1), snapshot, DECODER)
+            self.assertEqual((event.data["channel"], event.data["cc"], event.data["value"]),
+                             (3, 69, value))
+            self.assertEqual(event.data["rig_alias"]["snapshot"], snapshot)
+
+    def test_second_helix_proven_looper_actions(self):
+        expected = {"Play": (61, 127), "Stop": (61, 0), "Play Once": (62, 127)}
+        for action, (cc, value) in expected.items():
+            event = create_second_helix_looper(MusicalPosition(2, 1, 1), action, DECODER)
+            self.assertEqual((event.data["channel"], event.data["cc"], event.data["value"]),
+                             (3, cc, value))
+
+    def test_video_commands_and_validation(self):
+        expected = {"stop": 0, "preload": 10, "play_one_shot": 11, "play_loop": 12}
+        for action, value in expected.items():
+            event = create_video_command(MusicalPosition(3, 6, 1), 6, action, DECODER)
+            self.assertEqual((event.data["channel"], event.data["cc"], event.data["value"]),
+                             (16, 6, value))
+        rescan = create_video_command(MusicalPosition(1, 1, 1), None,
+                                      "rescan_playlist", DECODER)
+        self.assertEqual((rescan.data["channel"], rescan.data["cc"], rescan.data["value"]),
+                         (16, 0, 127))
+        for number in (-1, 128, 999):
+            with self.subTest(number=number), self.assertRaises(ValueError):
+                create_video_command(MusicalPosition(1, 1, 1), number, "stop", DECODER)
+
+    def test_insert_save_reopen_is_lossless_ordered_and_undoable(self):
+        model = self.model()
+        original = model.song.to_dict()
+        original_flags = list(original["flags"])
+        original_selection = {2, 4}
+        model.selected = set(original_selection)
+        event = create_second_helix_snapshot(MusicalPosition(57, 1, 1), 3, DECODER)
+        index = model.insert_event(event)
+        self.assertEqual(len(model.timeline.events), len(original_flags) + 1)
+        self.assertEqual(model.selected, {index})
+        self.assertTrue(model.modified)
+        self.assertEqual(event.source_index, len(original_flags))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "created.json"
+            model.save_as(path)
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["flags"][:-1], original_flags)
+            self.assertEqual({key: value for key, value in saved.items() if key != "flags"},
+                             {key: value for key, value in original.items() if key != "flags"})
+            reopened = EditorModel.open(path)
+            new = reopened.timeline.events[-1]
+            self.assertEqual(new.position, MusicalPosition(57, 1, 1))
+            self.assertEqual(new.data["rig_alias"]["snapshot"], 3)
+            second = Path(directory) / "second.json"
+            reopened.save_as(second)
+            self.assertEqual(json.loads(second.read_text())["flags"], saved["flags"])
+        self.assertTrue(model.undo())
+        self.assertEqual(len(model.timeline.events), len(original_flags))
+        self.assertEqual(model.selected, original_selection)
+        self.assertFalse(model.modified)
+        self.assertEqual([flag.render() for flag in model.song.flags], original_flags)
+
+
+if __name__ == "__main__":
+    unittest.main()

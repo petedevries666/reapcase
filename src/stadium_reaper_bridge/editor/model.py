@@ -45,10 +45,12 @@ class EditorModel:
     def __init__(self, song: StadiumSong, path: Path, decoder: RigMidiDecoder):
         self.song, self.path = song, path
         self.timeline: Timeline = stadium_to_timeline(song, midi_decoder=decoder)
+        self.decoder = decoder
         self.selected: set[int] = set()
         self.cursor = MusicalPosition(1, 1, 1)
         self._original_positions = [event.position for event in self.timeline.events]
-        self._undo: list[tuple[list[int], list[MusicalPosition]]] = []
+        self._undo: list[tuple] = []
+        self._created = 0
         start = next((e for e in self.timeline.events if e.source.type == "START"), None)
         self.tempo = start.data.get("tempo") if start else None
         self.numerator = start.data.get("time_signature_numerator", 4) if start else 4
@@ -70,7 +72,8 @@ class EditorModel:
 
     @property
     def modified(self) -> bool:
-        return any(e.position != p for e, p in zip(self.timeline.events, self._original_positions))
+        return (self._created > 0 or len(self.timeline.events) != len(self._original_positions)
+                or any(e.position != p for e, p in zip(self.timeline.events, self._original_positions)))
 
     @property
     def unsupported_types(self) -> tuple[str, ...]:
@@ -187,7 +190,7 @@ class EditorModel:
         delta = (bars * self.numerator + beats) * self.song.ppqn + ticks
         targets = [self._position(self._units(self.timeline.events[i].position) + delta) for i in indices]
         previous = [self.timeline.events[i].position for i in indices]
-        self._undo.append((indices, previous))
+        self._undo.append(("move", indices, previous, set(self.selected)))
         for index, target in zip(indices, targets):
             self.timeline.events[index].position = target
         return len(indices)
@@ -211,7 +214,7 @@ class EditorModel:
             raise ValueError("Timeline changed since the drag began")
         if not preview.indices or preview.delta_units == 0:
             return 0
-        self._undo.append((list(preview.indices), list(preview.original)))
+        self._undo.append(("move", list(preview.indices), list(preview.original), set(self.selected)))
         for index, target in zip(preview.indices, preview.targets):
             self.timeline.events[index].position = target
         return len(preview.indices)
@@ -219,12 +222,40 @@ class EditorModel:
     def undo(self) -> bool:
         if not self._undo:
             return False
-        indices, positions = self._undo.pop()
+        operation = self._undo.pop()
+        if operation[0] == "create":
+            _, event, previous_selection = operation
+            self.timeline.events.remove(event)
+            self.selected = previous_selection
+            self._created -= 1
+            return True
+        _, indices, positions, previous_selection = operation
         for index, position in zip(indices, positions):
             self.timeline.events[index].position = position
+        self.selected = previous_selection
         return True
 
+    def insert_event(self, event: TimelineEvent) -> int:
+        """Append a created event with stable source order as one undo operation."""
+        previous_selection = set(self.selected)
+        next_index = max((e.source_index for e in self.timeline.events
+                          if e.source_index is not None), default=-1) + 1
+        event.source_index = next_index
+        self.timeline.events.append(event)
+        index = len(self.timeline.events) - 1
+        self.selected = {index}
+        self._undo.append(("create", event, previous_selection))
+        self._created += 1
+        return index
+
     def save_as(self, path: str | Path) -> SaveSummary:
-        self.song.flags = timeline_source_flags(self.timeline)
-        Path(path).write_text(self.song.to_json_text(), encoding="utf-8")
+        # Serialize a timeline projection without turning it into new source
+        # state.  This keeps Undo after Save As capable of restoring the exact
+        # opened document.
+        source_flags = self.song.flags
+        try:
+            self.song.flags = timeline_source_flags(self.timeline)
+            Path(path).write_text(self.song.to_json_text(), encoding="utf-8")
+        finally:
+            self.song.flags = source_flags
         return SaveSummary(sum(e.position != p for e, p in zip(self.timeline.events, self._original_positions)))
