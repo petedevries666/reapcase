@@ -21,6 +21,7 @@ from .lighting import (HIT_PRESETS, STATE_PRESETS, LightingKind,
                        create_lighting_event, derive_lighting_regions)
 from .model import EditorModel, LANES, MovePreview
 from .style import lane_colors
+from .sequence import SequenceClickKind
 from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
                         STRUCTURE_HEIGHT, derive_structure_layout,
                         sticky_label_x, structure_sublane)
@@ -543,6 +544,38 @@ class ReapcaseEditor(tk.Tk):
             if label_x is not None:
                 self.canvas.create_text(label_x, (y1 + y2) / 2, text=region.label,
                     anchor="w", fill=palette.text, tags=tags)
+        # Sequence points are lightweight, locked Canvas primitives.  Cull them
+        # to the viewport rather than creating a widget/object per visible beat.
+        sequence = m.sequence_layout
+        visible_left = self.canvas.canvasx(0)
+        visible_right = visible_left + max(1, self.canvas.winfo_width())
+        click_y = lane_tops[LANES.index("SEQCLICK")]
+        click_palette = lane_colors("SEQCLICK")
+        for point in sequence.clicks:
+            x = timeline_x(point.units, m.song.ppqn, self.pixels_per_beat)
+            if x < visible_left - 3 or x > visible_right + 3:
+                continue
+            accent = point.kind is SequenceClickKind.ACCENT
+            half_height = 22 if accent else 11
+            center = click_y + LANE_HEIGHT / 2
+            self.canvas.create_line(x, center - half_height, x, center + half_height,
+                                    fill=click_palette.outline if accent else click_palette.normal,
+                                    width=4 if accent else 2)
+            self.canvas.create_line(x - 3, center, x + 3, center,
+                                    fill=click_palette.selected if accent else click_palette.outline)
+        instruction_y = lane_tops[LANES.index("SEQ INSTRUCTIONS")]
+        instruction_palette = lane_colors("SEQ INSTRUCTIONS")
+        clip_width = max(24, min(82, self.pixels_per_beat * .78))
+        for clip in sequence.instructions:
+            x = timeline_x(clip.units, m.song.ppqn, self.pixels_per_beat)
+            if x + clip_width < visible_left or x > visible_right:
+                continue
+            self.canvas.create_rectangle(x + 2, instruction_y + 18, x + clip_width,
+                                         instruction_y + 54, fill=instruction_palette.normal,
+                                         outline=instruction_palette.outline)
+            self.canvas.create_text(x + clip_width / 2 + 1, instruction_y + 36,
+                                    text=clip.label, fill=instruction_palette.text,
+                                    font=("TkDefaultFont", 8, "bold"))
         for i, event in enumerate(m.timeline.events):
             if i in region_sources or i in looper_sources or i in lighting_sources:
                 continue

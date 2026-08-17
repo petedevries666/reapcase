@@ -20,7 +20,8 @@ from .display import badge_text
 from .lighting import (LightingEventSource, create_lighting_event,
                        normalized_cue_id)
 
-LANES = ("STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER")
+EVENT_LANES = ("STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER")
+LANES = EVENT_LANES + ("SEQCLICK", "SEQ INSTRUCTIONS")
 STRUCTURE = {"START", "END", "TIME", "MARKER", "CYCLE_START", "CYCLE_END"}
 KNOWN = STRUCTURE | {"PRESETSNAP", "LOOPER", "MIDI_CC", "MIDI_BANK_PROGRAM", "LIGHTS"}
 
@@ -144,7 +145,7 @@ class EditorModel:
         return candidate
 
     def lane_counts(self) -> dict[str, int]:
-        return {lane: sum(self.lane(e) == lane for e in self.timeline.events) for lane in LANES}
+        return {lane: sum(self.lane(e) == lane for e in self.timeline.events) for lane in EVENT_LANES}
 
     def resolve_audio(self, root: str | Path | None = None) -> set[Path]:
         """Resolve audio and return files whose identity changed since the last scan."""
@@ -276,6 +277,21 @@ class EditorModel:
     def song_end_units(self) -> int:
         return max(max((self._units(e.position) for e in self.timeline.events), default=0),
                    self.audio_end_units)
+
+    @property
+    def sequence_end_units(self) -> int:
+        """Use longest resolved audio, falling back conservatively to END/song extent."""
+        if self.audio_end_units:
+            return self.audio_end_units
+        end = next((self._units(e.position) for e in self.timeline.events
+                    if e.source.type == "END"), None)
+        return end if end is not None else self.song_end_units
+
+    @property
+    def sequence_layout(self):
+        """Fresh derived state: it is deliberately absent from source and sidecar JSON."""
+        from .sequence import derive_sequence_layout
+        return derive_sequence_layout(self.timing_map, self.sequence_end_units)
 
     def apply_marquee(self, indices: Iterable[int], mode: str = "replace") -> None:
         indices = set(indices)
