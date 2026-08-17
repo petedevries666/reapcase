@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "aliases": {
+    "VB SNAP 3": {
+      "type": "MIDI_CC",
+      "channel": 3,
+      "cc": 69,
+      "value": 2
+    }
+  }
+}
