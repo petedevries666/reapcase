@@ -24,9 +24,11 @@ Stadium JSON -> modèle Stadium lossless -> timeline neutre -> adaptateur REAPER
 
 ## Démarrage
 
-Python 3.11+ suffit, sans dépendance d'exécution :
+Python 3.11+ suffit pour le modèle et les tests. La lecture desktop utilise la
+petite API callback `sounddevice` (PortAudio) :
 
 ```bash
+python -m pip install -e '.[desktop-audio]'
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
@@ -55,13 +57,32 @@ sa durée réelle à partir de son en-tête ; un WAV absent reste affiché comme
 `FILE NOT FOUND`. `Fit Song` inclut la fin des WAV résolus via une tempo map
 dérivée des flags START/TIME.
 
+La barre transport **|<< / Play-Pause / Stop** pilote un unique flux de mixage
+et affiche simultanément `MM:SS.mmm` et `BAR-BEAT.TICK`. Cliquez dans la règle
+supérieure pour déplacer la tête de lecture. Les boutons **M** et **S** de chaque
+lane sont des contrôles de monitoring locaux : ils ne changent jamais le JSON.
+Les enveloppes sont calculées par deux workers, par petits blocs, puis conservées
+en mémoire pour la session. L'éditeur reste utilisable si `sounddevice` ou le
+périphérique audio est indisponible ; le diagnostic en bas en donne la raison.
+
 ### Limites du MVP
 
 - la géométrie des déplacements utilise la signature initiale (les changements
   de signature restent visibles mais ne redéfinissent pas encore la grille) ;
+- les changements de tempo START/TIME pilotent exactement la conversion entre
+  secondes et ticks. Les changements de signature rythmique ne sont en revanche
+  pas encore intégrés à l'affichage BAR-BEAT.TICK ; celui-ci utilise la signature
+  START, sans modifier les événements TIME ;
 - toutes les fixtures connues ont un offset audio nul. Les offsets non nuls sont
   conservés et signalés, mais restent dessinés au début tant que leur unité
   Stadium n'est pas établie ; une recherche audio ambiguë reste non résolue ;
+- la lecture accepte des WAV PCM mono/stéréo 16 ou 24 bits de même fréquence
+  d'échantillonnage, sans rééchantillonnage. Une piste à offset non nul rend le
+  jeu résolu impropre à la lecture plutôt que d'en deviner l'unité ;
+- huit pistes 48 kHz sont lues bloc par bloc : seuls un buffer par piste et au
+  plus 2 000 couples de pics par waveform restent en mémoire. Le mixage PCM pur
+  Python privilégie cette étape MVP lisible ; une extension native/vectorisée
+  serait la prochaine optimisation à mesurer sur les machines Windows cibles ;
 - pas de suppression ni d'édition de payload, d'audio ou de fichiers `.peak` ;
 - pas d'intégration REAPER ni de reconstruction de backup Stadium ;
 - zoom et édition détaillée des familles vendor-only sont reportés.

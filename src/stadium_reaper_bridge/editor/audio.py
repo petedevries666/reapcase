@@ -17,6 +17,7 @@ class AudioFileInfo:
     path: Path
     sample_rate: int
     channels: int
+    sample_width: int
     frames: int
     duration_seconds: float
 
@@ -26,7 +27,9 @@ def read_wav_info(path: str | Path) -> AudioFileInfo:
     path = Path(path)
     with wave.open(str(path), "rb") as source:
         frames, rate = source.getnframes(), source.getframerate()
-        return AudioFileInfo(path, rate, source.getnchannels(), frames,
+        if source.getcomptype() != "NONE":
+            raise wave.Error(f"Unsupported compressed WAV: {source.getcomptype()}")
+        return AudioFileInfo(path, rate, source.getnchannels(), source.getsampwidth(), frames,
                              frames / rate if rate else 0.0)
 
 
