@@ -53,6 +53,13 @@ def sublane_content_bounds(lanes: tuple[str, ...], lane: str, sublane: str,
     return top + padding, bottom - padding
 
 
+def looper_item_bounds(lanes: tuple[str, ...], lane: str, x1: float,
+                       x2: float) -> tuple[float, int, float, int]:
+    """Give every looper item canonical Y bounds while preserving its X semantics."""
+    y1, y2 = sublane_content_bounds(lanes, lane, "looper")
+    return x1, y1, max(x1 + 1, x2), y2
+
+
 def event_sublane(event: TimelineEvent, lane: str) -> str:
     """Classify by source/decoded rig semantics, never by the displayed badge."""
     if lane == "STADIUM":

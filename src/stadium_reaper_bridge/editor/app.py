@@ -16,7 +16,7 @@ from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_H
                      marquee_candidates, normalized_rectangle, snap_drag_delta,
                      snapped_units_at_x, timeline_x, units_at_x,
                      zoom_about_cursor)
-from .looper import derive_looper_regions
+from .looper import derive_looper_regions, looper_display_label
 from .lighting import (HIT_PRESETS, STATE_PRESETS, LightingKind,
                        create_lighting_event, derive_lighting_regions)
 from .model import EditorModel, LANES, MovePreview
@@ -26,6 +26,7 @@ from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
                         derive_structure_layout, sticky_label_x,
                         structure_sublane)
 from .composite import (COMMANDS_HEIGHT, COMPOSITE_LANES, event_sublane,
+                        looper_item_bounds,
                         lane_height, lane_top as composite_lane_top,
                         sublane_bounds, sublane_content_bounds)
 from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
@@ -514,16 +515,17 @@ class ReapcaseEditor(tk.Tk):
             lane = LANES.index(region.system)
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
-            y1, y2 = sublane_content_bounds(LANES, region.system, "looper")
+            bounds = looper_item_bounds(LANES, region.system, x1, x2)
+            _, y1, _, y2 = bounds
             source = region.source_event_indices[0]
             selected = source in m.selected
             palette = lane_colors(region.system)
             tags = (f"event:{source}",)
             fill = palette.selected if selected else state_fill[region.system][region.state]
-            self.canvas.create_rectangle(x1, y1, max(x1 + 1, x2), y2, fill=fill,
+            self.canvas.create_rectangle(*bounds, fill=fill,
                                          outline=palette.outline, width=2 if selected else 1,
                                          tags=tags)
-            self.event_bounds[source] = (x1, y1, max(x1 + 1, x2), y2)
+            self.event_bounds[source] = bounds
             self.semantic_sources[source] = region.source_event_indices
             label_x = sticky_label_x(x1, x2, view_left, len(region.state) * 7)
             if label_x is not None:
@@ -634,18 +636,31 @@ class ReapcaseEditor(tk.Tk):
                 y = row_top + 3
             selected = i in m.selected
             previewed = preview_selection is not None and i in preview_selection
-            text = m.label(event)
-            item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w",
+            event_lane = m.lane(event)
+            is_looper_point = (event_lane in COMPOSITE_LANES and
+                                event_sublane(event, event_lane) == "looper")
+            text = (looper_display_label(event, event_lane) if is_looper_point
+                    else m.label(event))
+            if is_looper_point:
+                looper_y1, looper_y2 = sublane_content_bounds(
+                    LANES, event_lane, "looper")
+                text_y = (looper_y1 + looper_y2) / 2
+            else:
+                text_y = y + 10
+            item = self.canvas.create_text(x + 5, text_y, text=text, anchor="w",
                                            fill=lane_colors(m.lane(event)).text,
                                            tags=(f"event:{i}",))
             box = self.canvas.bbox(item)
             palette = lane_colors(m.lane(event))
-            rect = self.canvas.create_rectangle(box[0]-4, box[1]-3, box[2]+4, box[3]+3,
+            bounds = (looper_item_bounds(LANES, event_lane, x, box[2] + 4)
+                      if is_looper_point else
+                      (box[0]-4, box[1]-3, box[2]+4, box[3]+3))
+            rect = self.canvas.create_rectangle(*bounds,
                                                 fill=palette.selected if selected or previewed else palette.normal,
                                                 outline=palette.outline,
                                                 width=2 if selected or previewed else 1,
                                                 tags=(f"event:{i}",))
-            self.event_bounds[i] = (box[0]-4, box[1]-3, box[2]+4, box[3]+3)
+            self.event_bounds[i] = bounds
             self.canvas.tag_raise(item)
         for lane_offset, track in enumerate(m.audio_tracks):
             y = RULER_HEIGHT + editor_height + lane_offset * LANE_HEIGHT
