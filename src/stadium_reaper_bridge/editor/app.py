@@ -154,8 +154,7 @@ class ReapcaseEditor(tk.Tk):
         units = max(0, round((x - HEADER_WIDTH) / self.pixels_per_beat * self.model.song.ppqn))
         self.model.cursor = self.model._position(units)
         if index is not None:
-            if event.state & 0x4: self.model.selected.symmetric_difference_update({index})
-            else: self.model.selected = {index}
+            self.model.select_for_drag(index, toggle=bool(event.state & 0x4))
             self.drag_x = x
             self.drag_preview = self.model.preview_shift(0)
         self.redraw()

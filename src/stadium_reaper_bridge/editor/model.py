@@ -110,6 +110,18 @@ class EditorModel:
         cutoff = self._units(self.cursor)
         self.selected = {i for i, event in enumerate(self.timeline.events) if self._units(event.position) >= cutoff}
 
+    def select_for_drag(self, index: int, toggle: bool = False) -> None:
+        """Apply pointer-down selection rules before constructing a drag preview.
+
+        A plain click only replaces the selection when it lands outside the
+        current selection.  This lets an already-selected event act as the drag
+        handle for the entire selection.
+        """
+        if toggle:
+            self.selected.symmetric_difference_update({index})
+        elif index not in self.selected:
+            self.selected = {index}
+
     def _units(self, position: MusicalPosition) -> int:
         return ((position.bar - 1) * self.numerator + position.beat - 1) * self.song.ppqn + position.tick - 1
 
