@@ -109,6 +109,38 @@ class EditorModelTests(unittest.TestCase):
         self.assertEqual(model.commit_preview(invalid), 0)
         self.assertEqual([event.position for event in model.timeline.events], before)
 
+    def test_pointer_down_on_selected_event_preserves_multi_selection(self):
+        model = self.load("monzter_332.json")
+        model.selected = {1, 2, 3}
+        model.select_for_drag(2)
+        self.assertEqual(model.selected, {1, 2, 3})
+
+    def test_dragging_selected_member_moves_entire_selection(self):
+        model = self.load("monzter_332.json")
+        model.selected = {1, 2, 3}
+        before = {i: model._units(model.timeline.events[i].position) for i in model.selected}
+        model.select_for_drag(2)
+        preview = model.preview_shift(60)
+        self.assertEqual(preview.indices, tuple(sorted(before,
+                         key=lambda i: before[i])))
+        self.assertEqual(model.commit_preview(preview), 3)
+        self.assertEqual({i: model._units(model.timeline.events[i].position) - before[i]
+                          for i in before}, {1: 60, 2: 60, 3: 60})
+
+    def test_pointer_down_on_unselected_event_replaces_selection(self):
+        model = self.load("monzter_332.json")
+        model.selected = {1, 2, 3}
+        model.select_for_drag(4)
+        self.assertEqual(model.selected, {4})
+
+    def test_control_pointer_down_toggles_selection(self):
+        model = self.load("monzter_332.json")
+        model.selected = {1, 2}
+        model.select_for_drag(2, toggle=True)
+        self.assertEqual(model.selected, {1})
+        model.select_for_drag(3, toggle=True)
+        self.assertEqual(model.selected, {1, 3})
+
     def test_zoom_anchor_limits_and_fit(self):
         result = zoom_about_cursor(90, 180, 400, 200)
         old_beat = (400 + 200 - 140) / 90
@@ -122,6 +154,13 @@ class EditorModelTests(unittest.TestCase):
         self.assertGreaterEqual(scale, MIN_PIXELS_PER_BEAT)
         self.assertLessEqual(scale, MAX_PIXELS_PER_BEAT)
         self.assertLessEqual(140 + (32 + 1) * scale, 1000)
+
+    def test_fit_song_fits_longest_fixture_in_standard_editor_width(self):
+        model = self.load("clocksick_453.json")
+        end = max(model._units(event.position) for event in model.timeline.events)
+        scale = fit_song_scale(end, model.song.ppqn, 1180)
+        self.assertGreater(scale, MIN_PIXELS_PER_BEAT)
+        self.assertLessEqual(140 + (end / model.song.ppqn + 1) * scale + 16, 1180)
 
 
 if __name__ == "__main__": unittest.main()

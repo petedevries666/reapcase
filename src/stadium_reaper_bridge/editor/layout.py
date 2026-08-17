@@ -11,7 +11,9 @@ from dataclasses import dataclass
 LANE_HEIGHT = 72
 HEADER_WIDTH = 140
 DEFAULT_PIXELS_PER_BEAT = 90.0
-MIN_PIXELS_PER_BEAT = 12.0
+# CLOCKSICK reaches beat 993; a roughly one-pixel minimum allows its complete
+# timeline (plus breathing room) to fit in the editor's standard 1180px window.
+MIN_PIXELS_PER_BEAT = 1.0
 MAX_PIXELS_PER_BEAT = 360.0
 
 
