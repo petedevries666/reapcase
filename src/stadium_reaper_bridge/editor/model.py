@@ -11,6 +11,7 @@ from ..stadium import MusicalPosition, StadiumSong
 from ..timeline import Timeline, TimelineEvent, stadium_to_timeline, timeline_source_flags
 from .audio import (AudioResolver, TempoChange, TempoMap, audio_track_views,
                     stadium_backup_audio_paths)
+from .display import badge_text
 
 LANES = ("STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "MIDI / OTHER")
 STRUCTURE = {"START", "END", "TIME", "MARKER", "CYCLE_START", "CYCLE_END"}
@@ -134,22 +135,7 @@ class EditorModel:
             raise ValueError(f"Unknown marquee mode: {mode}")
 
     def label(self, event: TimelineEvent) -> str:
-        source, data = event.source, event.data
-        alias = data.get("rig_alias", {})
-        if alias.get("system") == "video":
-            return f"VIDEO {alias.get('video', '')} {alias['action'].replace('_', ' ').upper()}".replace("  ", " ")
-        if alias.get("system") == "second_helix":
-            if alias.get("action") == "snapshot":
-                return f"BASS SNAP {alias['snapshot']}"
-            return f"BASS {alias['action'].upper()}"
-        if source.type == "TIME":
-            return f"TIME {data.get('tempo', '?'):g} BPM {data.get('time_signature_numerator', '?')}/{data.get('time_signature_denominator', '?')}"
-        if source.type == "LOOPER":
-            return f"LOOPER {data.get('action', '').upper()}".strip()
-        human = data.get("name") or data.get("label")
-        if source.type == "PRESETSNAP" and data.get("snapshot"):
-            human = human or f"SNAP {data['snapshot']}"
-        return str(human or source.type).strip()
+        return badge_text(event)
 
     def select_all(self) -> None:
         self.selected = set(range(len(self.timeline.events)))

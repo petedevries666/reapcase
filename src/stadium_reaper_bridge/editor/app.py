@@ -15,9 +15,10 @@ from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_H
                      snapped_units_at_x, timeline_x, units_at_x, x_for_position,
                      zoom_about_cursor)
 from .model import EditorModel, LANES, MovePreview
-from .creation import (create_generic_midi_cc, create_second_helix_looper,
+from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
+                       create_generic_midi_cc, create_second_helix_looper,
                        create_second_helix_preset, create_second_helix_snapshot,
-                       create_stadium_looper, create_structure_marker,
+                       create_stadium_looper, create_stadium_snapshot, create_structure_marker,
                        create_video_command)
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
@@ -214,7 +215,7 @@ class ReapcaseEditor(tk.Tk):
             lane = LANES.index(m.lane(event)); x = x_for_position(event.position, m.song.ppqn, m.numerator, self.pixels_per_beat)
             y = RULER_HEIGHT + lane * LANE_HEIGHT + 27; selected = i in m.selected
             previewed = preview_selection is not None and i in preview_selection
-            text = f"{m.label(event)}  {event.position.render()}"
+            text = m.label(event)
             item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w", fill="#101318", tags=(f"event:{i}",))
             box = self.canvas.bbox(item)
             rect = self.canvas.create_rectangle(box[0]-4, box[1]-3, box[2]+4, box[3]+3,
@@ -345,7 +346,7 @@ class ReapcaseEditor(tk.Tk):
             if not preview.valid:
                 x += preview.delta_units / self.model.song.ppqn * self.pixels_per_beat
             y = RULER_HEIGHT + LANES.index(self.model.lane(event)) * LANE_HEIGHT + 27
-            text = f"{self.model.label(event)}  {position.render()}"
+            text = self.model.label(event)
             item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w",
                                            fill="#381b1b" if not preview.valid else "#263241",
                                            tags=("drag-preview",))
@@ -432,7 +433,18 @@ class ReapcaseEditor(tk.Tk):
         menu.add_cascade(label="ADD NEW", menu=add)
         if lane == "STRUCTURE":
             add.add_command(label="Marker...", command=lambda: self._marker_dialog(position))
+            cycle = tk.Menu(add, tearoff=False)
+            cycle.add_command(label="Cycle Start", command=lambda: self._create(create_cycle_start, position))
+            cycle.add_command(label="Cycle End", command=lambda: self._create(
+                create_cycle_end, position, self.model.timeline.events))
+            add.add_cascade(label="Cycle", menu=cycle)
         elif lane == "STADIUM":
+            snapshots = tk.Menu(add, tearoff=False)
+            for snapshot in range(1, 9):
+                snapshots.add_command(label=f"Snapshot {snapshot}", command=lambda value=snapshot:
+                    self._create(create_stadium_snapshot, position, value,
+                                 self.model.timeline.events))
+            add.add_cascade(label="Snapshot Change", menu=snapshots)
             looper = tk.Menu(add, tearoff=False)
             for action in ("Clear Loop", "Record", "Stop", "Play", "Play Once"):
                 looper.add_command(label=action,
@@ -483,9 +495,23 @@ class ReapcaseEditor(tk.Tk):
         self.redraw()
 
     def _marker_dialog(self, position):
-        name = simpledialog.askstring("Add Structure Marker", "Marker name:", parent=self)
-        if name is not None:
-            self._create(create_structure_marker, position, name)
+        dialog = tk.Toplevel(self)
+        dialog.title("Add Structure Marker"); dialog.transient(self); dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=12); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Marker name").grid(row=0, column=0, sticky="w")
+        name = tk.StringVar(); entry = ttk.Entry(frame, textvariable=name, width=34)
+        entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 10))
+        pause = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text="Pause at Marker", variable=pause).grid(row=2, column=0,
+                                                                            columnspan=2, sticky="w")
+        ttk.Button(frame, text="Cancel", command=dialog.destroy).grid(row=3, column=0, pady=(14, 0))
+        def create():
+            before = len(self.model.timeline.events)
+            self._create(create_structure_marker, position, MarkerOptions(name.get(), pause.get()))
+            if len(self.model.timeline.events) > before:
+                dialog.destroy()
+        ttk.Button(frame, text="Create", command=create).grid(row=3, column=1, pady=(14, 0))
+        entry.focus_set()
 
     def _video_dialog(self, position, action):
         if action == "rescan_playlist":

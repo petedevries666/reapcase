@@ -21,6 +21,14 @@ Fields below are zero-based after splitting the exact payload at `;`. Empty fiel
 
 Marker option tuples observed are `Off/Off/Off/false` and `Off/On/Off/false`; preset targets include `[Current]` and explicit values. Native looper actions are **Clear Loop**, **Record**, **Stop**, **Play**, and **Play Once**, while labels vary in case (`Clear`, `CLEAR`, `REC`, `RECORD`). Bank fields are `Off` throughout this corpus. `TIME` occurs only in PERFECT PICTURE; cycle boundaries only in CLOCKSICK.
 
+Across the fixtures, MARKER field 4 is the only changing option in examples
+created with the vendor's **Pause at Marker** control (`Off`/`On`); it is the
+only advanced marker option Reapcase authors. PRESETSNAP field 3 is the setlist,
+field 4 the preset, and field 5 the `Snap 1`–`Snap 8` selection. Snapshot
+authoring therefore inherits fields 3–4 from the active, explicit START or
+PRESETSNAP context and changes only field 5. The fixture corpus does not provide
+a safe arbitrary preset-selection representation, so Preset Change is omitted.
+
 Rig decoding is external configuration, not Stadium syntax. CLOCKSICK contains second-Helix CC60 Record/Overdub and CC61 Play/Stop alongside no native `LOOPER`. PERFECT PICTURE has no CC60 Record and its CC61 values 66, 127, 0 decode to Play, Play, Stop; this suspicious but valid sequence is preserved in its report. Video examples include Ch16 video 4/6/8 one-shot or loop commands.
 
 ## Per-fixture reports

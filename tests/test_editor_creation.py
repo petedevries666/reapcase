@@ -4,9 +4,12 @@ import tempfile
 import unittest
 
 from stadium_reaper_bridge.editor.creation import (
+    FLAG_CAPABILITIES, MarkerOptions, create_cycle_end, create_cycle_start,
     create_second_helix_looper, create_second_helix_snapshot,
-    create_structure_marker, create_video_command,
+    create_stadium_snapshot, create_structure_marker, create_video_command,
+    parse_marker, stadium_context_at,
 )
+from stadium_reaper_bridge.editor.display import badge_text
 from stadium_reaper_bridge.editor.layout import HEADER_WIDTH, snapped_units_at_x, timeline_x
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.midi import RigMidiDecoder
@@ -46,6 +49,82 @@ class CreationTests(unittest.TestCase):
         for invalid in ("", "bad;name", "bad|name"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 create_structure_marker(MusicalPosition(1, 1, 1), invalid)
+
+    def test_marker_pause_options_round_trip_without_unproven_fields(self):
+        position = MusicalPosition(57, 3, 1)
+        for enabled, value in ((False, "Off"), (True, "On")):
+            with self.subTest(enabled=enabled):
+                event = create_structure_marker(position, MarkerOptions("BREAK", enabled))
+                self.assertEqual(event.source.fields,
+                    ("MARKER", "BREAK", "7", "Off", value, "Off", "false",
+                     "[Current]", "[Current]", "[Current]"))
+                self.assertEqual(parse_marker(event.source), MarkerOptions("BREAK", enabled))
+
+    def test_stadium_snapshot_uses_active_fixture_context_for_all_snapshots(self):
+        model = self.model()
+        position = MusicalPosition(57, 1, 1)
+        context = stadium_context_at(model.timeline.events, position)
+        self.assertEqual((context.setlist, context.preset), ("2 USER", "MONZTER GOOD WIP"))
+        original = [flag.render() for flag in model.song.flags]
+        for snapshot in range(1, 9):
+            event = create_stadium_snapshot(position, snapshot, model.timeline.events)
+            self.assertEqual(event.source.render(),
+                f"057-01.001|PRESETSNAP;;3;2 USER;MONZTER GOOD WIP;Snap {snapshot}")
+            self.assertEqual(event.data["snapshot"], f"Snap {snapshot}")
+        self.assertEqual([flag.render() for flag in model.song.flags], original)
+
+    def test_stadium_snapshot_save_reopen_and_unresolved_context(self):
+        model = self.model()
+        event = create_stadium_snapshot(MusicalPosition(57, 3, 1), 4,
+                                         model.timeline.events)
+        model.insert_event(event)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshot.json"
+            model.save_as(path)
+            reopened = EditorModel.open(path)
+            created = reopened.timeline.events[-1]
+            self.assertEqual(created.position, MusicalPosition(57, 3, 1))
+            self.assertEqual(created.data, {"setlist": "2 USER",
+                                            "preset": "MONZTER GOOD WIP",
+                                            "snapshot": "Snap 4"})
+        orphan = StadiumSong.from_dict({"name": "x", "ppqn": 240, "params": "",
+                                        "flags": [], "tracks": []})
+        orphan_model = EditorModel(orphan, Path("orphan.json"), DECODER)
+        with self.assertRaisesRegex(ValueError, "No proven Stadium preset context"):
+            create_stadium_snapshot(MusicalPosition(1, 1, 1), 1,
+                                     orphan_model.timeline.events)
+
+    def test_cycle_templates_pair_conservatively_and_round_trip(self):
+        model = self.model()
+        start = create_cycle_start(MusicalPosition(100, 1, 1))
+        with self.assertRaisesRegex(ValueError, "requires an unmatched Cycle Start"):
+            create_cycle_end(MusicalPosition(99, 1, 1), model.timeline.events)
+        model.insert_event(start)
+        end = create_cycle_end(MusicalPosition(104, 1, 1), model.timeline.events)
+        model.insert_event(end)
+        self.assertEqual(start.source.payload, "CYCLE_START;;2;Infinite;Off")
+        self.assertEqual(end.source.payload, "CYCLE_END;;0")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cycle.json"; model.save_as(path)
+            reopened = EditorModel.open(path)
+            types = [(event.source.type, event.position) for event in reopened.timeline.events]
+            self.assertIn(("CYCLE_START", MusicalPosition(100, 1, 1)), types)
+            self.assertIn(("CYCLE_END", MusicalPosition(104, 1, 1)), types)
+
+    def test_badges_are_semantic_and_capabilities_are_explicit(self):
+        model = self.model()
+        bass = create_second_helix_snapshot(MusicalPosition(57, 1, 1), 3, DECODER)
+        stadium = create_stadium_snapshot(MusicalPosition(57, 1, 1), 4,
+                                           model.timeline.events)
+        marker = create_structure_marker(MusicalPosition(13, 1, 1), "VERSE 1")
+        video = create_video_command(MusicalPosition(3, 1, 1), 6,
+                                     "play_one_shot", DECODER)
+        self.assertEqual([badge_text(item) for item in (bass, stadium, marker, video)],
+                         ["BASS SNAP 3", "SNAP 4", "VERSE 1", "VIDEO 6 PLAY ONE SHOT"])
+        for item in (bass, stadium, marker, video):
+            self.assertNotIn(item.position.render(), badge_text(item))
+        self.assertEqual(FLAG_CAPABILITIES["PRESETSNAP"],
+                         {"parseable": True, "creatable": True, "editable": False})
 
     def test_second_helix_snapshots_use_rig_mapping(self):
         for snapshot, value in ((1, 0), (3, 2), (8, 7)):

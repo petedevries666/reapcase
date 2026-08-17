@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Iterable
 
 from ..midi import RigMidiDecoder
 from ..stadium import MusicalPosition, StadiumFlag
@@ -20,14 +21,112 @@ def _event(position: MusicalPosition, payload: str, decoder: RigMidiDecoder | No
     return TimelineEvent(kind, position, data, flag)
 
 
-def create_structure_marker(position: MusicalPosition, name: str) -> TimelineEvent:
-    name = name.strip() if isinstance(name, str) else ""
+@dataclass(frozen=True)
+class MarkerOptions:
+    """The fixture-proven, authorable subset of a Stadium MARKER.
+
+    The remaining fields deliberately stay at the sole observed safe template;
+    callers do not manipulate semicolon offsets directly.
+    """
+
+    name: str
+    pause_at_marker: bool = False
+
+
+def serialize_marker(options: MarkerOptions) -> str:
+    name = options.name.strip() if isinstance(options.name, str) else ""
     if not name:
         raise ValueError("Marker name is required")
     if any(character in name for character in ";|\r\n"):
         raise ValueError("Marker name cannot contain semicolons, pipes, or line breaks")
-    # This exact ten-field MARKER variant is proven by the fixture inventory.
-    return _event(position, f"MARKER;{name};7;Off;Off;Off;false;[Current];[Current];[Current]")
+    pause = "On" if options.pause_at_marker else "Off"
+    return f"MARKER;{name};7;Off;{pause};Off;false;[Current];[Current];[Current]"
+
+
+def parse_marker(flag: StadiumFlag) -> MarkerOptions:
+    fields = flag.fields
+    if flag.type != "MARKER" or len(fields) != 10 or fields[4] not in {"On", "Off"}:
+        raise ValueError("Marker does not use the proven ten-field option layout")
+    return MarkerOptions(fields[1], fields[4] == "On")
+
+
+def create_structure_marker(position: MusicalPosition, name: str | MarkerOptions,
+                            pause_at_marker: bool = False) -> TimelineEvent:
+    options = name if isinstance(name, MarkerOptions) else MarkerOptions(name, pause_at_marker)
+    return _event(position, serialize_marker(options))
+
+
+@dataclass(frozen=True)
+class StadiumContext:
+    setlist: str
+    preset: str
+
+
+def stadium_context_at(events: Iterable[TimelineEvent], position: MusicalPosition) -> StadiumContext | None:
+    """Return the last explicit preset context at or before *position*.
+
+    START and PRESETSNAP share the fixture-proven setlist/preset fields. A
+    ``[Current]`` value preserves an already-known component but cannot create
+    knowledge where none exists.
+    """
+    context: StadiumContext | None = None
+    for event in sorted(events, key=lambda item: item.position):
+        if event.position > position:
+            break
+        if event.source.type not in {"START", "PRESETSNAP"}:
+            continue
+        setlist, preset = event.data.get("setlist"), event.data.get("preset")
+        previous_setlist = context.setlist if context else None
+        previous_preset = context.preset if context else None
+        resolved_setlist = previous_setlist if setlist == "[Current]" else setlist
+        resolved_preset = previous_preset if preset == "[Current]" else preset
+        if resolved_setlist and resolved_preset:
+            context = StadiumContext(str(resolved_setlist), str(resolved_preset))
+    return context
+
+
+def create_stadium_snapshot(position: MusicalPosition, snapshot: int,
+                            events: Iterable[TimelineEvent]) -> TimelineEvent:
+    if isinstance(snapshot, bool) or not isinstance(snapshot, int) or not 1 <= snapshot <= 8:
+        raise ValueError("Snapshot must be between 1 and 8")
+    context = stadium_context_at(events, position)
+    if context is None:
+        raise ValueError("No proven Stadium preset context is active at this position")
+    return _event(position,
+                  f"PRESETSNAP;;3;{context.setlist};{context.preset};Snap {snapshot}")
+
+
+def create_cycle_start(position: MusicalPosition) -> TimelineEvent:
+    return _event(position, "CYCLE_START;;2;Infinite;Off")
+
+
+def create_cycle_end(position: MusicalPosition, events: Iterable[TimelineEvent]) -> TimelineEvent:
+    depth = 0
+    for event in sorted(events, key=lambda item: item.position):
+        if event.position > position:
+            break
+        if event.source.type == "CYCLE_START":
+            depth += 1
+        elif event.source.type == "CYCLE_END" and depth:
+            depth -= 1
+    if depth == 0:
+        raise ValueError("Cycle End requires an unmatched Cycle Start before this position")
+    return _event(position, "CYCLE_END;;0")
+
+
+# Parseability is intentionally distinct from safe authoring capability.
+FLAG_CAPABILITIES = {
+    "MARKER": {"parseable": True, "creatable": True, "editable": False},
+    "PRESETSNAP": {"parseable": True, "creatable": True, "editable": False},
+    "CYCLE_START": {"parseable": True, "creatable": True, "editable": False},
+    "CYCLE_END": {"parseable": True, "creatable": True, "editable": False},
+    "START": {"parseable": True, "creatable": False, "editable": False},
+    "TIME": {"parseable": True, "creatable": False, "editable": False},
+    "END": {"parseable": True, "creatable": False, "editable": False},
+    "LOOPER": {"parseable": True, "creatable": True, "editable": False},
+    "MIDI_CC": {"parseable": True, "creatable": True, "editable": False},
+    "MIDI_BANK_PROGRAM": {"parseable": True, "creatable": True, "editable": False},
+}
 
 
 def create_stadium_looper(position: MusicalPosition, action: str) -> TimelineEvent:
