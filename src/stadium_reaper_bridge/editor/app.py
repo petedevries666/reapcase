@@ -23,8 +23,11 @@ from .model import EditorModel, LANES, MovePreview
 from .style import lane_colors
 from .sequence import SequenceClickKind
 from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
-                        STRUCTURE_HEIGHT, derive_structure_layout,
-                        sticky_label_x, structure_sublane)
+                        derive_structure_layout, sticky_label_x,
+                        structure_sublane)
+from .composite import (COMMANDS_HEIGHT, COMPOSITE_LANES, event_sublane,
+                        lane_height, lane_top as composite_lane_top,
+                        sublane_bounds, sublane_content_bounds)
 from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
                        create_generic_midi_cc, create_second_helix_expression, create_second_helix_looper,
                        create_second_helix_preset, create_second_helix_snapshot,
@@ -69,12 +72,8 @@ class Tooltip:
             self.window = None
 
 
-def lane_height(lane):
-    return STRUCTURE_HEIGHT if lane == "STRUCTURE" else LANE_HEIGHT
-
-
 def lane_top(lane_index):
-    return RULER_HEIGHT + sum(lane_height(lane) for lane in LANES[:lane_index])
+    return composite_lane_top(LANES, lane_index)
 
 
 class ReapcaseEditor(tk.Tk):
@@ -454,6 +453,9 @@ class ReapcaseEditor(tk.Tk):
             if lane == "STRUCTURE":
                 for boundary in (y + MARKERS_HEIGHT, y + MARKERS_HEIGHT + PAUSES_HEIGHT):
                     self.canvas.create_line(0, boundary, width, boundary, fill="#394b61")
+            elif lane in COMPOSITE_LANES:
+                self.canvas.create_line(0, y + COMMANDS_HEIGHT, width, y + COMMANDS_HEIGHT,
+                                        fill="#394b61")
             y += current_height
         grid_end = m.song_end_units + 2 * m.song.ppqn
         for point in m.timing_map.iter_beats(0, grid_end):
@@ -512,7 +514,7 @@ class ReapcaseEditor(tk.Tk):
             lane = LANES.index(region.system)
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
-            y1, y2 = lane_tops[lane] + 5, lane_tops[lane] + LANE_HEIGHT - 5
+            y1, y2 = sublane_content_bounds(LANES, region.system, "looper")
             source = region.source_event_indices[0]
             selected = source in m.selected
             palette = lane_colors(region.system)
@@ -626,6 +628,10 @@ class ReapcaseEditor(tk.Tk):
                 sublane = structure_sublane(event)
                 y = lane_tops[0] + {"markers": 3, "pauses": MARKERS_HEIGHT + 1,
                                     "cycles": MARKERS_HEIGHT + PAUSES_HEIGHT + 3}[sublane]
+            elif m.lane(event) in COMPOSITE_LANES:
+                row_top, _ = sublane_bounds(LANES, m.lane(event),
+                                             event_sublane(event, m.lane(event)))
+                y = row_top + 3
             selected = i in m.selected
             previewed = preview_selection is not None and i in preview_selection
             text = m.label(event)
@@ -718,7 +724,8 @@ class ReapcaseEditor(tk.Tk):
             self.canvas.create_rectangle(view_left, y, view_left + HEADER_WIDTH, y + current_height,
                                          fill="#202631" if lane_index % 2 else "#1c222c",
                                          outline="#394250", tags=("fixed-header",))
-            self.canvas.create_text(view_left + 8, y + 12, text=lane, anchor="nw",
+            title_offset = 4 if lane in COMPOSITE_LANES else 12
+            self.canvas.create_text(view_left + 8, y + title_offset, text=lane, anchor="nw",
                                     fill="#9ec8ff", font=("TkDefaultFont", 9, "bold"),
                                     tags=("fixed-header",))
             if lane == "STRUCTURE":
@@ -726,6 +733,13 @@ class ReapcaseEditor(tk.Tk):
                                       ("CYCLES", MARKERS_HEIGHT + PAUSES_HEIGHT + 5)):
                     self.canvas.create_text(view_left + 72, y + offset, text=label, anchor="nw",
                                             fill="#7793b2", font=("TkDefaultFont", 7),
+                                            tags=("fixed-header",))
+            elif lane in COMPOSITE_LANES:
+                for label, offset in (("COMMANDS", 20),
+                                      ("LOOPER", COMMANDS_HEIGHT + 8)):
+                    self.canvas.create_text(view_left + 28, y + offset, text=label,
+                                            anchor="nw", fill="#7793b2",
+                                            font=("TkDefaultFont", 7),
                                             tags=("fixed-header",))
             if lane_index >= len(LANES):
                 audio_index = lane_index - len(LANES)
@@ -1165,7 +1179,14 @@ class ReapcaseEditor(tk.Tk):
         return "break"
 
     def zoom_step(self, factor):
-        self._zoom_at(factor, self.canvas.winfo_width() / 2)
+        if self.model and self.model.tempo_map:
+            play_units = self.model.tempo_map.seconds_to_units(self.audio_engine.current_time)
+            playhead_x = timeline_x(play_units, self.model.song.ppqn,
+                                    self.pixels_per_beat)
+            cursor_x = playhead_x - self.canvas.canvasx(0)
+        else:
+            cursor_x = self.canvas.winfo_width() / 2
+        self._zoom_at(factor, cursor_x)
 
     def _zoom_at(self, factor, cursor_x):
         old_scroll = self.canvas.canvasx(0)
