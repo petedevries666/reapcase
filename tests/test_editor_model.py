@@ -23,7 +23,8 @@ class EditorModelTests(unittest.TestCase):
     def test_real_song_lane_inventory(self):
         monzter = self.load("monzter_332.json")
         self.assertEqual(monzter.lane_counts(), {"STRUCTURE": 4, "STADIUM": 4,
-                         "SECOND HELIX": 12, "VIDEO": 1, "MIDI / OTHER": 0})
+                         "SECOND HELIX": 12, "VIDEO": 1, "LIGHTS": 0,
+                         "MIDI / OTHER": 0})
         clocksick = self.load("clocksick_453.json")
         self.assertEqual(clocksick.lane_counts()["STRUCTURE"], 10)
         self.assertGreater(clocksick.lane_counts()["SECOND HELIX"], 0)

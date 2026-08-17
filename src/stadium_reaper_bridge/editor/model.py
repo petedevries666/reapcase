@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import copy
+import json
 from pathlib import Path
 import shutil
 import wave
@@ -16,10 +17,12 @@ from .audio import (MAX_AUDIO_TRACKS, AudioResolver, audio_track_views, read_wav
                     stadium_backup_audio_paths)
 from ..timing import TimingMap
 from .display import badge_text
+from .lighting import (LightingEventSource, create_lighting_event,
+                       normalized_cue_id)
 
-LANES = ("STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "MIDI / OTHER")
+LANES = ("STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER")
 STRUCTURE = {"START", "END", "TIME", "MARKER", "CYCLE_START", "CYCLE_END"}
-KNOWN = STRUCTURE | {"PRESETSNAP", "LOOPER", "MIDI_CC", "MIDI_BANK_PROGRAM"}
+KNOWN = STRUCTURE | {"PRESETSNAP", "LOOPER", "MIDI_CC", "MIDI_BANK_PROGRAM", "LIGHTS"}
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,8 @@ class EditorModel:
     def __init__(self, song: StadiumSong, path: Path, decoder: RigMidiDecoder):
         self.song, self.path = song, path
         self.timeline: Timeline = stadium_to_timeline(song, midi_decoder=decoder)
+        self._show_document: dict = {}
+        self._load_show_layer()
         self.decoder = decoder
         self.selected: set[int] = set()
         self.cursor = MusicalPosition(1, 1, 1)
@@ -78,6 +83,30 @@ class EditorModel:
         return cls(StadiumSong.from_json_text(path.read_text(encoding="utf-8")), path,
                    RigMidiDecoder.from_file(decoder_path))
 
+    @staticmethod
+    def show_path(path: str | Path) -> Path:
+        """Return the namespaced Reapcase sidecar beside a native Song."""
+        path = Path(path)
+        return path.with_name(path.name + ".reapcase.json")
+
+    def _load_show_layer(self) -> None:
+        sidecar = self.show_path(self.path)
+        if not sidecar.exists():
+            return
+        document = json.loads(sidecar.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError("A Reapcase show sidecar must be an object")
+        self._show_document = copy.deepcopy(document)
+        lights = document.get("reapcase", {}).get("lights", [])
+        if not isinstance(lights, list):
+            raise ValueError("Invalid Reapcase LIGHTS sidecar")
+        for item in lights:
+            if not isinstance(item, dict):
+                raise ValueError("Invalid lighting cue in Reapcase sidecar")
+            position = MusicalPosition.parse(item["position"], ppqn=self.song.ppqn)
+            self.timeline.events.append(create_lighting_event(
+                position, item["name"], item["kind"], item["id"]))
+
     @property
     def modified(self) -> bool:
         return (self._created > 0 or self._structural_edits > 0
@@ -99,7 +128,20 @@ class EditorModel:
             return "SECOND HELIX"
         if alias.get("system") == "video":
             return "VIDEO"
+        if isinstance(event.source, LightingEventSource):
+            return "LIGHTS"
         return "MIDI / OTHER"
+
+    def unique_lighting_id(self, name: str) -> str:
+        """Allocate a custom semantic ID without changing existing identities."""
+        base = normalized_cue_id(name)
+        used = {event.data.get("cue_id") for event in self.timeline.events
+                if isinstance(event.source, LightingEventSource)}
+        candidate, suffix = base, 2
+        while candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        return candidate
 
     def lane_counts(self) -> dict[str, int]:
         return {lane: sum(self.lane(e) == lane for e in self.timeline.events) for lane in LANES}
@@ -404,5 +446,22 @@ class EditorModel:
             Path(path).write_text(self.song.to_json_text(), encoding="utf-8")
         finally:
             self.song.flags = source_flags
+        lights = [
+            {"position": event.position.render(), "id": event.source.cue.id,
+             "name": event.source.cue.name, "kind": event.source.cue.kind.value}
+            for event in self.timeline.events if isinstance(event.source, LightingEventSource)
+        ]
+        sidecar = self.show_path(path)
+        show_document = copy.deepcopy(self._show_document)
+        if lights or show_document:
+            reapcase = show_document.setdefault("reapcase", {})
+            if not isinstance(reapcase, dict):
+                raise ValueError("Invalid Reapcase namespace in show sidecar")
+            reapcase.setdefault("version", 1)
+            reapcase["lights"] = lights
+            sidecar.write_text(json.dumps(show_document, ensure_ascii=False, indent=2) + "\n",
+                               encoding="utf-8")
+        elif sidecar.exists():
+            sidecar.unlink()
         return SaveSummary(sum(e.position != p for e, p in zip(self.timeline.events, self._original_positions)),
                            tracks_changed=self._audio_edits)

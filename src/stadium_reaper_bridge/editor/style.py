@@ -18,6 +18,7 @@ LANE_PALETTE = {
     "STADIUM": LaneColors("#d77a2c", "#f5a253", "#ffc88d"),
     "SECOND HELIX": LaneColors("#8d62b5", "#b38add", "#d8b9f5", "#faf7ff"),
     "VIDEO": LaneColors("#7b8795", "#a9b4c0", "#d5dce3"),
+    "LIGHTS": LaneColors("#d5a11e", "#ffd45c", "#ffe49a", "#17130a"),
     "MIDI / OTHER": LaneColors("#4a9b67", "#70c78e", "#a6e1b9"),
 }
 
