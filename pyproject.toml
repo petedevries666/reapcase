@@ -8,5 +8,8 @@ version = "0.1.0"
 description = "Lossless foundation for Helix Stadium Song and REAPER conversion"
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+desktop-audio = ["sounddevice>=0.5,<1"]
+
 [tool.setuptools.packages.find]
 where = ["src"]

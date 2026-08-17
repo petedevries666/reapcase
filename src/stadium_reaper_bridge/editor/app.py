@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from concurrent.futures import ThreadPoolExecutor
 
 from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT,
                      drag_units, fit_song_scale, horizontal_wheel_units,
                      marquee_candidates, normalized_rectangle, snap_drag_delta,
                      x_for_position, zoom_about_cursor)
 from .model import EditorModel, LANES, MovePreview
+from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
+from .waveform import display_peaks, extract_waveform
 
 
 class ReapcaseEditor(tk.Tk):
@@ -33,7 +36,16 @@ class ReapcaseEditor(tk.Tk):
         self.info = tk.StringVar(value="Open a Stadium Song JSON to begin")
         self.status = tk.StringVar(value="No file loaded")
         self.zoom_label = tk.StringVar()
+        self.transport_position = tk.StringVar(value="00:00.000   |   001-01.001")
+        self.audio_engine = AudioEngine()
+        self.monitor_muted: list[bool] = []
+        self.monitor_solo: list[bool] = []
+        self.waveforms = {}
+        self._waveform_pending = set()
+        self._waveform_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="waveform")
         self._build()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.after(33, self._transport_tick)
 
     def _build(self):
         toolbar = ttk.Frame(self, padding=6); toolbar.pack(fill="x")
@@ -49,6 +61,11 @@ class ReapcaseEditor(tk.Tk):
                      values=("1 bar", "1 beat", "quarter beat", "no snap")).pack(side="left")
         ttk.Label(toolbar, textvariable=self.zoom_label, width=8, anchor="e").pack(side="left", padx=5)
         ttk.Label(self, textvariable=self.info, padding=(8, 3)).pack(fill="x")
+        transport = ttk.Frame(self, padding=(8, 3)); transport.pack(fill="x")
+        ttk.Button(transport, text="|<<", width=5, command=self.return_to_start).pack(side="left")
+        ttk.Button(transport, text="Play / Pause", command=self.play_pause).pack(side="left", padx=3)
+        ttk.Button(transport, text="Stop", command=self.stop_playback).pack(side="left")
+        ttk.Label(transport, textvariable=self.transport_position, font=("TkFixedFont", 10)).pack(side="left", padx=14)
         frame = ttk.Frame(self); frame.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(frame, background="#171b22", highlightthickness=0)
         xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.canvas.xview)
@@ -75,8 +92,10 @@ class ReapcaseEditor(tk.Tk):
     def open_json(self):
         path = filedialog.askopenfilename(filetypes=(("JSON", "*.json"), ("All files", "*")))
         if not path: return
+        self.audio_engine.close()
         try: self.model = EditorModel.open(path)
         except Exception as exc: messagebox.showerror("Cannot open Song", str(exc)); return
+        self._configure_audio()
         self.redraw()
 
     def save_as(self):
@@ -94,7 +113,33 @@ class ReapcaseEditor(tk.Tk):
         root = filedialog.askdirectory(title="Locate Audio Folder")
         if root:
             self.model.resolve_audio(root)
+            self._configure_audio()
             self.redraw()
+
+    def _configure_audio(self):
+        self.audio_engine.close(); self.waveforms.clear(); self._waveform_pending.clear()
+        tracks = list(self.model.audio_tracks) if self.model else []
+        self.monitor_muted = [False] * len(tracks); self.monitor_solo = [False] * len(tracks)
+        resolved = [PlaybackTrack(t.resolved_path, t.name, t.offset) for t in tracks if t.resolved_path]
+        try:
+            self.audio_engine.open(resolved)
+        except Exception as exc:
+            self.audio_engine.diagnostic = str(exc)
+        for track in tracks:
+            if track.resolved_path: self._request_waveform(track.resolved_path)
+
+    def _request_waveform(self, path):
+        path = str(path)
+        if path in self.waveforms or path in self._waveform_pending: return
+        self._waveform_pending.add(path)
+        future = self._waveform_pool.submit(extract_waveform, path)
+        def poll():
+            if not future.done(): self.after(40, poll); return
+            self._waveform_pending.discard(path)
+            try: self.waveforms[path] = future.result()
+            except Exception: pass
+            if self.winfo_exists(): self.redraw()
+        self.after(40, poll)
 
     def redraw(self):
         self.canvas.delete("all")
@@ -143,6 +188,13 @@ class ReapcaseEditor(tk.Tk):
             levels = f"trim {track.source.get('trim', '?')}  gain {track.source.get('gain', '?')}"
             self.canvas.create_text(8, y + 28, anchor="nw", fill="#c6d4e5",
                                     text=f"{track.name}\n{flags} {levels}".strip())
+            for column, (label, enabled) in enumerate((("M", self.monitor_muted[lane_offset]),
+                                                        ("S", self.monitor_solo[lane_offset]))):
+                self.canvas.create_rectangle(76 + column*27, y + 5, 99 + column*27, y + 23,
+                    fill="#d36b62" if enabled and label == "M" else ("#e3bf58" if enabled else "#394552"),
+                    tags=(f"monitor:{lane_offset}:{label}",))
+                self.canvas.create_text(87 + column*27, y + 14, text=label, fill="white",
+                    tags=(f"monitor:{lane_offset}:{label}",))
             start_x = HEADER_WIDTH  # Non-zero offset units are not established by fixtures.
             duration_units = (m.tempo_map.seconds_to_units(track.file_info.duration_seconds)
                               if track.file_info and m.tempo_map else m.song.ppqn * 2)
@@ -156,18 +208,30 @@ class ReapcaseEditor(tk.Tk):
                                          outline="#8cb8e8" if track.file_info else "#d28b9a")
             self.canvas.create_text(start_x + 6, y + 32, anchor="w", fill="#f0f5fa",
                                     text=f"{track.filename}  |  {state}")
+            summary = self.waveforms.get(str(track.resolved_path))
+            if summary:
+                center, amplitude = y + 42, 17
+                for dx, low, high in display_peaks(summary, end_x - start_x):
+                    self.canvas.create_line(start_x + dx, center - high*amplitude,
+                                            start_x + dx, center - low*amplitude,
+                                            fill="#b7dcff")
         if self.marquee_anchor and self.marquee_point:
             bounds = normalized_rectangle(*self.marquee_anchor, *self.marquee_point)
             self.canvas.create_rectangle(*bounds, fill="#527aa3", stipple="gray50",
                                          outline="#b9dcff", width=2, tags=("marquee",))
         if self.drag_preview:
             self._draw_drag_preview(self.drag_preview)
+        if m.tempo_map:
+            play_units = m.tempo_map.seconds_to_units(self.audio_engine.current_time)
+            play_x = HEADER_WIDTH + play_units / m.song.ppqn * self.pixels_per_beat
+            self.canvas.create_line(play_x, 0, play_x, height, fill="#ff5b57", width=2,
+                                    tags=("playhead",))
         unsupported = ", ".join(m.unsupported_types) or "none"
         overflow = f" | WARNING: {m.audio_overflow} tracks above display limit preserved" if m.audio_overflow else ""
         tempo = f"{m.tempo:g} BPM" if m.tempo is not None else "tempo unavailable"
         self.info.set(f"{m.song.name}  |  PPQN {m.song.ppqn}  |  {tempo}  |  {m.numerator}/{m.denominator}  |  {len(m.timeline.events)} flags  |  {m.path}{overflow}")
         resolved = sum(track.file_info is not None for track in m.audio_tracks)
-        self.status.set(f"{m.path.name}  |  flags {len(m.timeline.events)}  |  selected {len(m.selected)}  |  Audio: {len(m.audio_tracks)} tracks | {resolved} resolved | {len(m.audio_tracks)-resolved} missing  |  cursor {m.cursor.render()}  |  {'MODIFIED' if m.modified else 'unmodified'}  |  unsupported: {unsupported}")
+        self.status.set(f"{m.path.name}  |  flags {len(m.timeline.events)}  |  selected {len(m.selected)}  |  Audio: {resolved} resolved | {self.audio_engine.diagnostic}  |  cursor {m.cursor.render()}  |  {'MODIFIED' if m.modified else 'unmodified'}  |  unsupported: {unsupported}")
         self.canvas.configure(scrollregion=(0, 0, width, height))
         self._update_zoom_label()
 
@@ -214,6 +278,19 @@ class ReapcaseEditor(tk.Tk):
         index = self._event_index(event); x = self.canvas.canvasx(event.x)
         units = max(0, round((x - HEADER_WIDTH) / self.pixels_per_beat * self.model.song.ppqn))
         self.model.cursor = self.model._position(units)
+        monitor = next((tag for tag in self.canvas.gettags("current") if tag.startswith("monitor:")), None)
+        if monitor:
+            _, raw_index, kind = monitor.split(":"); lane_index = int(raw_index)
+            values = self.monitor_muted if kind == "M" else self.monitor_solo
+            values[lane_index] = not values[lane_index]
+            # Engine track indices correspond to resolved tracks only.
+            resolved_index = sum(t.resolved_path is not None for t in self.model.audio_tracks[:lane_index])
+            if self.model.audio_tracks[lane_index].resolved_path:
+                self.audio_engine.set_monitor(resolved_index,
+                    muted=self.monitor_muted[lane_index], solo=self.monitor_solo[lane_index])
+            self.redraw(); return
+        if self.canvas.canvasy(event.y) < 24:
+            self.seek_units(units); self.redraw(); return
         if index is not None:
             self.model.select_for_drag(index, toggle=bool(event.state & 0x4))
             self.drag_x = x
@@ -322,6 +399,32 @@ class ReapcaseEditor(tk.Tk):
         ttk.Button(win, text="Shift", command=apply).grid(row=3, columnspan=2, pady=8)
     def undo(self):
         if self.model: self.model.undo(); self.redraw()
+
+    def seek_units(self, units):
+        if self.model and self.model.tempo_map:
+            self.audio_engine.seek(self.model.tempo_map.units_to_seconds(units))
+            self.model.cursor = self.model._position(units)
+
+    def return_to_start(self): self.audio_engine.return_to_start(); self.redraw()
+    def stop_playback(self): self.audio_engine.stop(); self.redraw()
+    def play_pause(self):
+        try:
+            if self.audio_engine.state is PlaybackState.PLAYING: self.audio_engine.pause()
+            else: self.audio_engine.play()
+        except PlaybackError as exc: messagebox.showwarning("Audio unavailable", str(exc))
+
+    def _transport_tick(self):
+        if self.model and self.model.tempo_map:
+            seconds = self.audio_engine.current_time
+            minutes, remainder = divmod(seconds, 60)
+            position = self.model.tempo_map.seconds_to_musical_position(seconds)
+            self.transport_position.set(f"{int(minutes):02d}:{remainder:06.3f}   |   {position.render()}")
+            if self.audio_engine.state is PlaybackState.PLAYING: self.redraw()
+        self.after(33, self._transport_tick)
+
+    def destroy(self):
+        self.audio_engine.close(); self._waveform_pool.shutdown(wait=False, cancel_futures=True)
+        super().destroy()
 
 
 def main():
