@@ -220,7 +220,9 @@ def viewport_columns(summary: WaveformPyramid, tempo_map: _TempoMap, ppqn: int,
     extrema bucket is placed through the canonical tempo-aware mapping, rather
     than stretched across the clip's final width.
     """
-    left = max(0, int(viewport_left) - margin)
+    # Never allocate or paint clip pixels on the fixed track-header side of
+    # the canonical timeline origin, even when the viewport margin reaches it.
+    left = max(round(origin_x), int(viewport_left) - margin)
     right = max(left + 1, int(viewport_left + viewport_width) + margin)
     width = right - left
     columns: list[tuple[float, float] | None] = [None] * width
