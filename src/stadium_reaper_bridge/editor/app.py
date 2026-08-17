@@ -42,7 +42,9 @@ class ReapcaseEditor(tk.Tk):
         self.monitor_solo: list[bool] = []
         self.waveforms = {}
         self._waveform_pending = set()
-        self._waveform_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="waveform")
+        # A single low-duty analyzer avoids concurrent WAV scans competing with
+        # the playback stream for disk and CPU.
+        self._waveform_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="waveform")
         self._build()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.after(33, self._transport_tick)
@@ -132,7 +134,9 @@ class ReapcaseEditor(tk.Tk):
         path = str(path)
         if path in self.waveforms or path in self._waveform_pending: return
         self._waveform_pending.add(path)
-        future = self._waveform_pool.submit(extract_waveform, path)
+        future = self._waveform_pool.submit(
+            extract_waveform, path,
+            pause_requested=lambda: self.audio_engine.state is PlaybackState.PLAYING)
         def poll():
             if not future.done(): self.after(40, poll); return
             self._waveform_pending.discard(path)
@@ -206,15 +210,26 @@ class ReapcaseEditor(tk.Tk):
             self.canvas.create_rectangle(start_x, y + 22, end_x, y + 62,
                                          fill="#526b8a" if track.file_info else "#463f50",
                                          outline="#8cb8e8" if track.file_info else "#d28b9a")
-            self.canvas.create_text(start_x + 6, y + 32, anchor="w", fill="#f0f5fa",
-                                    text=f"{track.filename}  |  {state}")
+            clip_label = self.canvas.create_text(start_x + 6, y + 32, anchor="w",
+                                                 fill="#f0f5fa",
+                                                 text=f"{track.filename}  |  {state}")
             summary = self.waveforms.get(str(track.resolved_path))
             if summary:
-                center, amplitude = y + 42, 17
-                for dx, low, high in display_peaks(summary, end_x - start_x):
-                    self.canvas.create_line(start_x + dx, center - high*amplitude,
-                                            start_x + dx, center - low*amplitude,
-                                            fill="#b7dcff")
+                center, amplitude = y + 42, 18
+                peaks = display_peaks(summary, end_x - start_x)
+                # One filled polygon gives a continuous envelope without one
+                # Tk object per pixel. Min/max extrema keep narrow clicks tall.
+                upper = [(start_x + dx, center - high * amplitude)
+                         for dx, _low, high in peaks]
+                lower = [(start_x + dx, center - low * amplitude)
+                         for dx, low, _high in reversed(peaks)]
+                coordinates = [coordinate for point in upper + lower for coordinate in point]
+                if len(coordinates) >= 6:
+                    self.canvas.create_polygon(*coordinates, fill="#b7dcff",
+                                               outline="#d8ecff", width=1)
+                self.canvas.create_line(start_x, center, end_x, center,
+                                        fill="#7891aa", width=1)
+                self.canvas.tag_raise(clip_label)
         if self.marquee_anchor and self.marquee_point:
             bounds = normalized_rectangle(*self.marquee_anchor, *self.marquee_point)
             self.canvas.create_rectangle(*bounds, fill="#527aa3", stipple="gray50",
@@ -231,7 +246,14 @@ class ReapcaseEditor(tk.Tk):
         tempo = f"{m.tempo:g} BPM" if m.tempo is not None else "tempo unavailable"
         self.info.set(f"{m.song.name}  |  PPQN {m.song.ppqn}  |  {tempo}  |  {m.numerator}/{m.denominator}  |  {len(m.timeline.events)} flags  |  {m.path}{overflow}")
         resolved = sum(track.file_info is not None for track in m.audio_tracks)
-        self.status.set(f"{m.path.name}  |  flags {len(m.timeline.events)}  |  selected {len(m.selected)}  |  Audio: {resolved} resolved | {self.audio_engine.diagnostic}  |  cursor {m.cursor.render()}  |  {'MODIFIED' if m.modified else 'unmodified'}  |  unsupported: {unsupported}")
+        ready = sum(str(track.resolved_path) in self.waveforms for track in m.audio_tracks
+                    if track.resolved_path)
+        waveform_total = sum(track.resolved_path is not None for track in m.audio_tracks)
+        analysis_state = "paused for playback" if (self._waveform_pending and
+                         self.audio_engine.state is PlaybackState.PLAYING) else "analyzing"
+        waveform_progress = (f"Waveforms: {ready}/{waveform_total} ready"
+                             + (f" ({analysis_state})" if self._waveform_pending else ""))
+        self.status.set(f"{m.path.name}  |  flags {len(m.timeline.events)}  |  selected {len(m.selected)}  |  Audio: {resolved} resolved | {waveform_progress} | {self.audio_engine.diagnostic}  |  cursor {m.cursor.render()}  |  {'MODIFIED' if m.modified else 'unmodified'}  |  unsupported: {unsupported}")
         self.canvas.configure(scrollregion=(0, 0, width, height))
         self._update_zoom_label()
 
