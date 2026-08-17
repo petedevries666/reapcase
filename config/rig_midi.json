@@ -1,5 +1,18 @@
 {
   "second_helix": {"channel": 3, "snapshot": {"cc": 69, "value_min": 0, "value_max": 7, "offset": 1},
     "cc": {"60": {"low": "Overdub", "high": "Record"}, "61": {"low": "Stop", "high": "Play"}, "62": {"high": "Play Once"}, "63": {"high": "Undo/Redo"}, "65": {"low": "Forward", "high": "Reverse"}, "66": {"low": "Full Speed", "high": "Half Speed"}, "67": {"low": "Off", "high": "On"}, "68": {"low": "Tuner", "high": "Tuner"}, "64": {"low": "Noop", "high": "Tap Tempo"}}},
-  "video": {"channel": 16, "values": {"0": "stop", "10": "preload", "11": "play_one_shot", "12": "play_loop", "127": "rescan_playlist"}}
+  "video": {"channel": 16, "values": {"0": "stop", "10": "preload", "11": "play_one_shot", "12": "play_loop", "127": "rescan_playlist"}},
+  "stadium_transport": {
+    "channel": null,
+    "cc": {
+      "10": {"type": "selector", "action": "select_song", "field": "song"},
+      "46": {"type": "selector", "action": "select_marker", "field": "marker", "zero_name": "song_start"},
+      "47": {"type": "trigger", "action": "return_to_zero"},
+      "48": {"type": "range", "low": "cycle_clear", "high": "cycle_start_end_continue"},
+      "49": {"type": "range", "low": "previous_song", "high": "next_song"},
+      "50": {"type": "range", "low": "previous_marker", "high": "next_marker"},
+      "51": {"type": "trigger", "action": "play_pause"},
+      "63": {"type": "selector", "action": "select_playlist", "field": "playlist"}
+    }
+  }
 }
