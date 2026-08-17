@@ -14,6 +14,7 @@ from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_H
                      marquee_candidates, normalized_rectangle, snap_drag_delta,
                      snapped_units_at_x, timeline_x, units_at_x,
                      zoom_about_cursor)
+from .looper import derive_looper_regions
 from .model import EditorModel, LANES, MovePreview
 from .style import lane_colors
 from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
@@ -336,8 +337,35 @@ class ReapcaseEditor(tk.Tk):
             if label_x is not None:
                 self.canvas.create_text(label_x, sub_y + (MARKERS_HEIGHT if region.kind == "marker" else CYCLES_HEIGHT) / 2,
                                         text=region.label, anchor="w", fill=colors.text, tags=tags)
+        looper_regions = tuple(region for system in ("STADIUM", "SECOND HELIX")
+                               for region in derive_looper_regions(
+                                   m.timeline.events, m._units, system, m.song_end_units))
+        looper_sources = {region.source_event_indices[0] for region in looper_regions}
+        state_fill = {
+            "STADIUM": {"RECORD": "#a94f18", "PLAY": "#d77a2c", "OVERDUB": "#f5a253"},
+            "SECOND HELIX": {"RECORD": "#68428d", "PLAY": "#8d62b5", "OVERDUB": "#b38add"},
+        }
+        for region in looper_regions:
+            lane = LANES.index(region.system)
+            x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
+            x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
+            y1, y2 = lane_tops[lane] + 5, lane_tops[lane] + LANE_HEIGHT - 5
+            source = region.source_event_indices[0]
+            selected = source in m.selected
+            palette = lane_colors(region.system)
+            tags = (f"event:{source}",)
+            fill = palette.selected if selected else state_fill[region.system][region.state]
+            self.canvas.create_rectangle(x1, y1, max(x1 + 1, x2), y2, fill=fill,
+                                         outline=palette.outline, width=2 if selected else 1,
+                                         tags=tags)
+            self.event_bounds[source] = (x1, y1, max(x1 + 1, x2), y2)
+            self.semantic_sources[source] = region.source_event_indices
+            label_x = sticky_label_x(x1, x2, view_left, len(region.state) * 7)
+            if label_x is not None:
+                self.canvas.create_text(label_x, (y1 + y2) / 2, text=region.state,
+                                        anchor="w", fill=palette.text, tags=tags)
         for i, event in enumerate(m.timeline.events):
-            if i in region_sources:
+            if i in region_sources or i in looper_sources:
                 continue
             lane = LANES.index(m.lane(event)); x = timeline_x(m._units(event.position), m.song.ppqn, self.pixels_per_beat)
             y = lane_tops[lane] + 27
