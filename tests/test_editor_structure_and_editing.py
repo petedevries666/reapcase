@@ -64,7 +64,7 @@ class StructureLayoutTests(unittest.TestCase):
 
     def test_lane_palette_identity_and_selection(self):
         self.assertEqual(set(LANE_PALETTE), {"STRUCTURE", "STADIUM", "SECOND HELIX",
-                                             "VIDEO", "MIDI / OTHER"})
+                                             "VIDEO", "LIGHTS", "MIDI / OTHER"})
         for lane in LANE_PALETTE:
             self.assertNotEqual(lane_colors(lane).normal, lane_colors(lane).selected)
 

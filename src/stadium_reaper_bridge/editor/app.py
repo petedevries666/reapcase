@@ -15,6 +15,8 @@ from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_H
                      snapped_units_at_x, timeline_x, units_at_x,
                      zoom_about_cursor)
 from .looper import derive_looper_regions
+from .lighting import (HIT_PRESETS, STATE_PRESETS, LightingKind,
+                       create_lighting_event, derive_lighting_regions)
 from .model import EditorModel, LANES, MovePreview
 from .style import lane_colors
 from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
@@ -364,8 +366,29 @@ class ReapcaseEditor(tk.Tk):
             if label_x is not None:
                 self.canvas.create_text(label_x, (y1 + y2) / 2, text=region.state,
                                         anchor="w", fill=palette.text, tags=tags)
+        lighting_regions = derive_lighting_regions(
+            m.timeline.events, m._units, m.song_end_units)
+        lighting_sources = {region.source_event_index for region in lighting_regions}
+        lights_lane = LANES.index("LIGHTS")
+        palette = lane_colors("LIGHTS")
+        for region in lighting_regions:
+            x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
+            x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
+            y1, y2 = lane_tops[lights_lane] + 5, lane_tops[lights_lane] + LANE_HEIGHT - 5
+            source = region.source_event_index
+            selected = source in m.selected
+            tags = (f"event:{source}",)
+            self.canvas.create_rectangle(x1, y1, max(x1 + 1, x2), y2,
+                fill=palette.selected if selected else palette.normal,
+                outline=palette.outline, width=2 if selected else 1, tags=tags)
+            self.event_bounds[source] = (x1, y1, max(x1 + 1, x2), y2)
+            self.semantic_sources[source] = (source,)
+            label_x = sticky_label_x(x1, x2, view_left, len(region.label) * 7)
+            if label_x is not None:
+                self.canvas.create_text(label_x, (y1 + y2) / 2, text=region.label,
+                    anchor="w", fill=palette.text, tags=tags)
         for i, event in enumerate(m.timeline.events):
-            if i in region_sources or i in looper_sources:
+            if i in region_sources or i in looper_sources or i in lighting_sources:
                 continue
             lane = LANES.index(m.lane(event)); x = timeline_x(m._units(event.position), m.song.ppqn, self.pixels_per_beat)
             y = lane_tops[lane] + 27
@@ -716,6 +739,16 @@ class ReapcaseEditor(tk.Tk):
                 if action in labels:
                     callback = (lambda value=action: self._video_dialog(position, value))
                     add.add_command(label=labels[action], command=callback)
+        elif lane == "LIGHTS":
+            for kind, presets in ((LightingKind.STATE, STATE_PRESETS),
+                                  (LightingKind.HIT, HIT_PRESETS)):
+                submenu = tk.Menu(add, tearoff=False)
+                for cue_name in presets:
+                    submenu.add_command(label=cue_name, command=lambda name=cue_name, cue_kind=kind:
+                        self._create(create_lighting_event, position, name, cue_kind))
+                submenu.add_command(label="Custom...", command=lambda cue_kind=kind:
+                    self._lighting_dialog(position, cue_kind))
+                add.add_cascade(label=kind.value, menu=submenu)
         elif lane == "MIDI / OTHER":
             add.add_command(label="MIDI CC...", command=lambda: self._midi_cc_dialog(position))
         if add.index("end") is None:
@@ -761,6 +794,13 @@ class ReapcaseEditor(tk.Tk):
                                         initialvalue=6, minvalue=0, maxvalue=127)
         if video is not None:
             self._create(create_video_command, position, video, action, self.model.decoder)
+
+    def _lighting_dialog(self, position, kind):
+        title = f"New Lighting {'State' if kind is LightingKind.STATE else 'Hit'}"
+        name = simpledialog.askstring(title, "Name:", parent=self)
+        if name is not None:
+            cue_id = self.model.unique_lighting_id(name)
+            self._create(create_lighting_event, position, name, kind, cue_id)
 
     def _preset_dialog(self, position):
         values = []

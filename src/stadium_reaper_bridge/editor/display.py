@@ -4,6 +4,8 @@ from ..timeline import TimelineEvent
 
 
 def badge_text(event: TimelineEvent) -> str:
+    if event.source.type == "LIGHTS":
+        return event.data.get("name", "LIGHTS")
     source, data = event.source, event.data
     alias = data.get("rig_alias", {})
     if alias.get("system") == "video":
