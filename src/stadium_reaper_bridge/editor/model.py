@@ -9,6 +9,7 @@ from typing import Iterable
 from ..midi import RigMidiDecoder
 from ..stadium import MusicalPosition, StadiumSong
 from ..timeline import Timeline, TimelineEvent, stadium_to_timeline, timeline_source_flags
+from .audio import AudioResolver, TempoChange, TempoMap, audio_track_views
 
 LANES = ("STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "MIDI / OTHER")
 STRUCTURE = {"START", "END", "TIME", "MARKER", "CYCLE_START", "CYCLE_END"}
@@ -51,6 +52,14 @@ class EditorModel:
         self.tempo = start.data.get("tempo") if start else None
         self.numerator = start.data.get("time_signature_numerator", 4) if start else 4
         self.denominator = start.data.get("time_signature_denominator", 4) if start else 4
+        self.audio_root: Path | None = None
+        self.audio_tracks = ()
+        changes = [TempoChange(self._units(e.position), float(e.data["tempo"]))
+                   for e in self.timeline.events
+                   if e.source.type in {"START", "TIME"} and e.data.get("tempo")]
+        self.tempo_map = (TempoMap(self.song.ppqn, changes, self._units, self._position)
+                          if changes and changes[0].units == 0 else None)
+        self.resolve_audio()
 
     @classmethod
     def open(cls, path: str | Path, decoder_path: str | Path = "config/rig_midi.json") -> "EditorModel":
@@ -81,6 +90,41 @@ class EditorModel:
 
     def lane_counts(self) -> dict[str, int]:
         return {lane: sum(self.lane(e) == lane for e in self.timeline.events) for lane in LANES}
+
+    def resolve_audio(self, root: str | Path | None = None) -> None:
+        if root is not None:
+            self.audio_root = Path(root)
+        resolver = AudioResolver(self.path.parent, self.audio_root)
+        self.audio_tracks = audio_track_views(self.song.tracks, resolver)
+
+    @property
+    def audio_overflow(self) -> int:
+        return max(0, len(self.song.tracks) - 8) if isinstance(self.song.tracks, list) else 0
+
+    @property
+    def audio_end_units(self) -> int:
+        # All controlled fixtures use offset=0. Unknown non-zero offset units are
+        # deliberately not interpreted; such clips remain visible at Song start.
+        if not self.tempo_map:
+            return 0
+        return max((self.tempo_map.seconds_to_units(track.file_info.duration_seconds)
+                    for track in self.audio_tracks if track.file_info), default=0)
+
+    @property
+    def song_end_units(self) -> int:
+        return max(max((self._units(e.position) for e in self.timeline.events), default=0),
+                   self.audio_end_units)
+
+    def apply_marquee(self, indices: Iterable[int], mode: str = "replace") -> None:
+        indices = set(indices)
+        if mode == "replace":
+            self.selected = indices
+        elif mode == "add":
+            self.selected.update(indices)
+        elif mode == "toggle":
+            self.selected.symmetric_difference_update(indices)
+        else:
+            raise ValueError(f"Unknown marquee mode: {mode}")
 
     def label(self, event: TimelineEvent) -> str:
         source, data = event.source, event.data

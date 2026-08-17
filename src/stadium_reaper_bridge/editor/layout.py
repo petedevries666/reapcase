@@ -70,3 +70,25 @@ def fit_song_scale(song_end_units: int, ppqn: int, viewport_width: float,
     usable = max(1.0, viewport_width - HEADER_WIDTH - 16)
     beats = max(1.0, song_end_units / ppqn + 1.0)
     return clamp_zoom(usable / beats, minimum, maximum)
+
+
+def normalized_rectangle(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float]:
+    """Return direction-independent left, top, right, bottom bounds."""
+    return min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+
+
+def rectangles_intersect(first, second) -> bool:
+    a = normalized_rectangle(*first)
+    b = normalized_rectangle(*second)
+    return a[0] <= b[2] and a[2] >= b[0] and a[1] <= b[3] and a[3] >= b[1]
+
+
+def marquee_candidates(marquee, event_bounds) -> set[int]:
+    """Return event indices whose rendered blocks intersect a marquee."""
+    return {index for index, bounds in event_bounds.items()
+            if rectangles_intersect(marquee, bounds)}
+
+
+def horizontal_wheel_units(direction: int, amount: int = 3) -> int:
+    """Pure navigation policy: positive wheel direction scrolls left."""
+    return -direction * amount

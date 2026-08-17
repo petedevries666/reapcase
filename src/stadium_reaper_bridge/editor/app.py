@@ -9,7 +9,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT,
-                     drag_units, fit_song_scale, snap_drag_delta,
+                     drag_units, fit_song_scale, horizontal_wheel_units,
+                     marquee_candidates, normalized_rectangle, snap_drag_delta,
                      x_for_position, zoom_about_cursor)
 from .model import EditorModel, LANES, MovePreview
 
@@ -23,6 +24,11 @@ class ReapcaseEditor(tk.Tk):
         self.pixels_per_beat = DEFAULT_PIXELS_PER_BEAT
         self.drag_x: float | None = None
         self.drag_preview: MovePreview | None = None
+        self.marquee_anchor: tuple[float, float] | None = None
+        self.marquee_point: tuple[float, float] | None = None
+        self.marquee_base: set[int] = set()
+        self.marquee_mode = "replace"
+        self.event_bounds: dict[int, tuple[float, float, float, float]] = {}
         self.grid_choice = tk.StringVar(value="1 beat")
         self.info = tk.StringVar(value="Open a Stadium Song JSON to begin")
         self.status = tk.StringVar(value="No file loaded")
@@ -32,6 +38,7 @@ class ReapcaseEditor(tk.Tk):
     def _build(self):
         toolbar = ttk.Frame(self, padding=6); toolbar.pack(fill="x")
         for text, command in (("Open JSON", self.open_json), ("Save As JSON", self.save_as),
+                              ("Locate Audio Folder", self.locate_audio),
                               ("Select All", self.select_all), ("Select All After Cursor", self.select_after),
                               ("Select Lane", self.select_lane), ("Shift Selected", self.shift_dialog),
                               ("Undo", self.undo), ("Zoom Out", lambda: self.zoom_step(1 / 1.25)),
@@ -57,9 +64,9 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.bind("<Shift-MouseWheel>", self.horizontal_wheel)
         self.canvas.bind("<Shift-Button-4>", self.horizontal_wheel)
         self.canvas.bind("<Shift-Button-5>", self.horizontal_wheel)
-        self.canvas.bind("<MouseWheel>", self.vertical_wheel)
-        self.canvas.bind("<Button-4>", self.vertical_wheel)
-        self.canvas.bind("<Button-5>", self.vertical_wheel)
+        self.canvas.bind("<MouseWheel>", self.horizontal_wheel)
+        self.canvas.bind("<Button-4>", self.horizontal_wheel)
+        self.canvas.bind("<Button-5>", self.horizontal_wheel)
         self.canvas.bind("<Button-2>", lambda event: self.canvas.scan_mark(event.x, event.y))
         self.canvas.bind("<B2-Motion>", lambda event: self.canvas.scan_dragto(event.x, event.y, gain=1))
         self._update_zoom_label()
@@ -82,17 +89,26 @@ class ReapcaseEditor(tk.Tk):
             messagebox.showinfo("Export complete", f"{summary.events_moved} events moved\n0 payloads changed\n0 tracks changed")
             self.redraw()
 
+    def locate_audio(self):
+        if not self.model: return
+        root = filedialog.askdirectory(title="Locate Audio Folder")
+        if root:
+            self.model.resolve_audio(root)
+            self.redraw()
+
     def redraw(self):
         self.canvas.delete("all")
         if not self.model: return
         m = self.model
-        max_bar = max((e.position.bar for e in m.timeline.events), default=1) + 2
-        width = HEADER_WIDTH + max_bar * m.numerator * self.pixels_per_beat
-        height = len(LANES) * LANE_HEIGHT
-        for lane_index, lane in enumerate(LANES):
+        total_beats = m.song_end_units / m.song.ppqn + 2
+        width = HEADER_WIDTH + total_beats * self.pixels_per_beat
+        all_lanes = list(LANES) + [f"AUDIO {track.number}" for track in m.audio_tracks]
+        height = len(all_lanes) * LANE_HEIGHT
+        for lane_index, lane in enumerate(all_lanes):
             y = lane_index * LANE_HEIGHT
             self.canvas.create_rectangle(0, y, width, y + LANE_HEIGHT, fill="#202631" if lane_index % 2 else "#1c222c", outline="#394250")
             self.canvas.create_text(8, y + 12, text=lane, anchor="nw", fill="#9ec8ff", font=("TkDefaultFont", 9, "bold"))
+        max_bar = max(1, int(total_beats / m.numerator) + 2)
         for bar in range(1, max_bar + 1):
             for beat in range(1, m.numerator + 1):
                 x = HEADER_WIDTH + ((bar - 1) * m.numerator + beat - 1) * self.pixels_per_beat
@@ -105,21 +121,53 @@ class ReapcaseEditor(tk.Tk):
                     for quarter in range(1, 4):
                         qx = x + quarter * self.pixels_per_beat / 4
                         self.canvas.create_line(qx, 0, qx, height, fill="#29333f", dash=(1, 3))
+        preview_selection = self._marquee_selection()
+        self.event_bounds = {}
         for i, event in enumerate(m.timeline.events):
             lane = LANES.index(m.lane(event)); x = x_for_position(event.position, m.song.ppqn, m.numerator, self.pixels_per_beat)
             y = lane * LANE_HEIGHT + 27; selected = i in m.selected
+            previewed = preview_selection is not None and i in preview_selection
             text = f"{m.label(event)}  {event.position.render()}"
             item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w", fill="#101318", tags=(f"event:{i}",))
             box = self.canvas.bbox(item)
             rect = self.canvas.create_rectangle(box[0]-4, box[1]-3, box[2]+4, box[3]+3,
-                                                fill="#ffd166" if selected else "#8fd3c7", outline="#ffffff" if selected else "#4d8f88",
+                                                fill="#ffe49a" if previewed else ("#ffd166" if selected else "#8fd3c7"),
+                                                outline="#ffffff" if selected or previewed else "#4d8f88",
                                                 tags=(f"event:{i}",))
+            self.event_bounds[i] = (box[0]-4, box[1]-3, box[2]+4, box[3]+3)
             self.canvas.tag_raise(item)
+        for lane_offset, track in enumerate(m.audio_tracks):
+            y = (len(LANES) + lane_offset) * LANE_HEIGHT
+            flags = " ".join(word for enabled, word in ((track.source.get("mute"), "MUTE"),
+                                                          (track.source.get("solo"), "SOLO")) if enabled)
+            levels = f"trim {track.source.get('trim', '?')}  gain {track.source.get('gain', '?')}"
+            self.canvas.create_text(8, y + 28, anchor="nw", fill="#c6d4e5",
+                                    text=f"{track.name}\n{flags} {levels}".strip())
+            start_x = HEADER_WIDTH  # Non-zero offset units are not established by fixtures.
+            duration_units = (m.tempo_map.seconds_to_units(track.file_info.duration_seconds)
+                              if track.file_info and m.tempo_map else m.song.ppqn * 2)
+            end_x = start_x + max(12, duration_units / m.song.ppqn * self.pixels_per_beat)
+            state = (f"{track.file_info.duration_seconds:.2f}s | {track.file_info.sample_rate} Hz | "
+                     f"{track.file_info.channels} ch" if track.file_info else "FILE NOT FOUND / unresolved")
+            if track.offset != 0:
+                state += f" | raw offset {track.offset} (unit unknown)"
+            self.canvas.create_rectangle(start_x, y + 22, end_x, y + 62,
+                                         fill="#526b8a" if track.file_info else "#463f50",
+                                         outline="#8cb8e8" if track.file_info else "#d28b9a")
+            self.canvas.create_text(start_x + 6, y + 32, anchor="w", fill="#f0f5fa",
+                                    text=f"{track.filename}  |  {state}")
+        if self.marquee_anchor and self.marquee_point:
+            bounds = normalized_rectangle(*self.marquee_anchor, *self.marquee_point)
+            self.canvas.create_rectangle(*bounds, fill="#527aa3", stipple="gray50",
+                                         outline="#b9dcff", width=2, tags=("marquee",))
         if self.drag_preview:
             self._draw_drag_preview(self.drag_preview)
         unsupported = ", ".join(m.unsupported_types) or "none"
-        self.info.set(f"{m.song.name}  |  PPQN {m.song.ppqn}  |  {m.tempo:g} BPM  |  {m.numerator}/{m.denominator}  |  {len(m.timeline.events)} flags  |  {m.path}")
-        self.status.set(f"{m.path.name}  |  flags {len(m.timeline.events)}  |  selected {len(m.selected)}  |  cursor {m.cursor.render()}  |  {'MODIFIED' if m.modified else 'unmodified'}  |  unsupported: {unsupported}")
+        overflow = f" | WARNING: {m.audio_overflow} tracks above display limit preserved" if m.audio_overflow else ""
+        tempo = f"{m.tempo:g} BPM" if m.tempo is not None else "tempo unavailable"
+        self.info.set(f"{m.song.name}  |  PPQN {m.song.ppqn}  |  {tempo}  |  {m.numerator}/{m.denominator}  |  {len(m.timeline.events)} flags  |  {m.path}{overflow}")
+        resolved = sum(track.file_info is not None for track in m.audio_tracks)
+        self.status.set(f"{m.path.name}  |  flags {len(m.timeline.events)}  |  selected {len(m.selected)}  |  Audio: {len(m.audio_tracks)} tracks | {resolved} resolved | {len(m.audio_tracks)-resolved} missing  |  cursor {m.cursor.render()}  |  {'MODIFIED' if m.modified else 'unmodified'}  |  unsupported: {unsupported}")
         self.canvas.configure(scrollregion=(0, 0, width, height))
         self._update_zoom_label()
 
@@ -148,6 +196,19 @@ class ReapcaseEditor(tk.Tk):
         tags = self.canvas.gettags("current")
         return next((int(t.split(':')[1]) for t in tags if t.startswith("event:")), None)
 
+    def _marquee_hits(self):
+        if not self.marquee_anchor or not self.marquee_point:
+            return set()
+        return marquee_candidates((*self.marquee_anchor, *self.marquee_point), self.event_bounds)
+
+    def _marquee_selection(self):
+        if not self.marquee_anchor:
+            return None
+        hits = self._marquee_hits()
+        if self.marquee_mode == "replace": return hits
+        if self.marquee_mode == "add": return self.marquee_base | hits
+        return self.marquee_base ^ hits
+
     def click(self, event):
         if not self.model: return
         index = self._event_index(event); x = self.canvas.canvasx(event.x)
@@ -157,11 +218,21 @@ class ReapcaseEditor(tk.Tk):
             self.model.select_for_drag(index, toggle=bool(event.state & 0x4))
             self.drag_x = x
             self.drag_preview = self.model.preview_shift(0)
+        else:
+            y = self.canvas.canvasy(event.y)
+            self.marquee_anchor = self.marquee_point = (x, y)
+            self.marquee_base = set(self.model.selected)
+            self.marquee_mode = "toggle" if event.state & 0x4 else ("add" if event.state & 0x1 else "replace")
         self.redraw()
 
     def drag(self, event):
-        if not self.model or self.drag_x is None or not self.model.selected:
+        if not self.model:
             return
+        if self.marquee_anchor:
+            self.marquee_point = (self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+            self.redraw()
+            return
+        if self.drag_x is None or not self.model.selected: return
         dx = self.canvas.canvasx(event.x) - self.drag_x
         raw = drag_units(dx, self.pixels_per_beat, self.model.song.ppqn)
         anchor = min(self.model._units(self.model.timeline.events[i].position) for i in self.model.selected)
@@ -177,7 +248,15 @@ class ReapcaseEditor(tk.Tk):
             self.status.set("Invalid move: before Song start")
 
     def drop(self, event):
-        if not self.model or self.drag_x is None: return
+        if not self.model: return
+        if self.marquee_anchor:
+            selection = self._marquee_selection()
+            self.model.selected = selection or set()
+            self.marquee_anchor = self.marquee_point = None
+            self.marquee_base = set()
+            self.redraw()
+            return
+        if self.drag_x is None: return
         preview = self.drag_preview
         if preview and preview.valid:
             self.model.commit_preview(preview)
@@ -209,7 +288,7 @@ class ReapcaseEditor(tk.Tk):
     def fit_song(self):
         if not self.model:
             return
-        end = max((self.model._units(e.position) for e in self.model.timeline.events), default=0)
+        end = self.model.song_end_units
         self.pixels_per_beat = fit_song_scale(end, self.model.song.ppqn,
                                               self.canvas.winfo_width())
         self.redraw()
@@ -219,11 +298,7 @@ class ReapcaseEditor(tk.Tk):
         self.zoom_label.set(f"{self.pixels_per_beat / DEFAULT_PIXELS_PER_BEAT:.0%}")
 
     def horizontal_wheel(self, event):
-        self.canvas.xview_scroll(-self._wheel_direction(event) * 3, "units")
-        return "break"
-
-    def vertical_wheel(self, event):
-        self.canvas.yview_scroll(-self._wheel_direction(event) * 3, "units")
+        self.canvas.xview_scroll(horizontal_wheel_units(self._wheel_direction(event)), "units")
         return "break"
 
     def select_all(self):
