@@ -1,0 +1,709 @@
+{
+  "fixtures": [
+    "clocksick_453.json",
+    "late_night_party_431.json",
+    "monzter_332.json",
+    "perfect_picture_336.json",
+    "wanna_be_429.json"
+  ],
+  "types": {
+    "CYCLE_END": {
+      "field_counts": {
+        "3": 1
+      },
+      "variants": {
+        "text;empty;int": 1
+      },
+      "examples": [
+        {
+          "fixture": "clocksick_453.json",
+          "position": "134-01.001",
+          "payload": "CYCLE_END;;0"
+        }
+      ]
+    },
+    "CYCLE_START": {
+      "field_counts": {
+        "5": 1
+      },
+      "variants": {
+        "text;empty;int;text;text": 1
+      },
+      "examples": [
+        {
+          "fixture": "clocksick_453.json",
+          "position": "130-01.001",
+          "payload": "CYCLE_START;;2;Infinite;Off"
+        }
+      ]
+    },
+    "END": {
+      "field_counts": {
+        "8": 5
+      },
+      "variants": {
+        "text;empty;int;text;text;text;text;text": 5
+      },
+      "examples": [
+        {
+          "fixture": "clocksick_453.json",
+          "position": "249-01.001",
+          "payload": "END;;5;Off;8.0;Pause;Off;2.0"
+        },
+        {
+          "fixture": "late_night_party_431.json",
+          "position": "159-01.001",
+          "payload": "END;;5;Off;8.0;Pause;Off;2.0"
+        },
+        {
+          "fixture": "monzter_332.json",
+          "position": "125-03.085",
+          "payload": "END;;5;Off;8.0;Pause;Off;2.0"
+        }
+      ]
+    },
+    "LOOPER": {
+      "field_counts": {
+        "4": 14
+      },
+      "variants": {
+        "text;text;int;text": 14
+      },
+      "examples": [
+        {
+          "fixture": "late_night_party_431.json",
+          "position": "001-02.001",
+          "payload": "LOOPER;Clear;1;Clear Loop"
+        },
+        {
+          "fixture": "late_night_party_431.json",
+          "position": "024-01.001",
+          "payload": "LOOPER;RECORD;1;Record"
+        },
+        {
+          "fixture": "late_night_party_431.json",
+          "position": "028-01.001",
+          "payload": "LOOPER;STOP;1;Stop"
+        }
+      ]
+    },
+    "MARKER": {
+      "field_counts": {
+        "10": 45
+      },
+      "variants": {
+        "text;text;int;text;text;text;text;text;text;text": 45
+      },
+      "examples": [
+        {
+          "fixture": "clocksick_453.json",
+          "position": "134-04.120",
+          "payload": "MARKER;STOP;7;Off;On;Off;false;ANONYMALZ;[Current];[Current]"
+        },
+        {
+          "fixture": "clocksick_453.json",
+          "position": "151-04.230",
+          "payload": "MARKER;STOP 2;7;Off;On;Off;false;ANONYMALZ;[Current];[Current]"
+        },
+        {
+          "fixture": "clocksick_453.json",
+          "position": "154-01.001",
+          "payload": "MARKER;CHORUS INSTRU;7;Off;Off;Off;false;ANONYMALZ;[Current];[Current]"
+        }
+      ]
+    },
+    "MIDI_BANK_PROGRAM": {
+      "field_counts": {
+        "8": 10
+      },
+      "variants": {
+        "text;text;int;text;int;text;text;int": 10
+      },
+      "examples": [
+        {
+          "fixture": "clocksick_453.json",
+          "position": "001-02.001",
+          "payload": "MIDI_BANK_PROGRAM;BASS INIT;5;Bank/Prog;3;Off;Off;0"
+        },
+        {
+          "fixture": "clocksick_453.json",
+          "position": "001-03.001",
+          "payload": "MIDI_BANK_PROGRAM;BASS PRG;5;Bank/Prog;3;Off;Off;3"
+        },
+        {
+          "fixture": "monzter_332.json",
+          "position": "001-02.001",
+          "payload": "MIDI_BANK_PROGRAM;MIDInit;5;Bank/Prog;3;Off;Off;67"
+        }
+      ]
+    },
+    "MIDI_CC": {
+      "field_counts": {
+        "7": 41
+      },
+      "variants": {
+        "text;text;int;text;int;int;int": 41
+      },
+      "examples": [
+        {
+          "fixture": "clocksick_453.json",
+          "position": "001-04.001",
+          "payload": "MIDI_CC;BASS SNAP;4;CC;3;69;1"
+        },
+        {
+          "fixture": "clocksick_453.json",
+          "position": "012-01.001",
+          "payload": "MIDI_CC;MIDI 4;4;CC;3;69;0"
+        },
+        {
+          "fixture": "clocksick_453.json",
+          "position": "048-04.120",
+          "payload": "MIDI_CC;MIDI 5;4;CC;3;69;1"
+        }
+      ]
+    },
+    "PRESETSNAP": {
+      "field_counts": {
+        "6": 55
+      },
+      "variants": {
+        "text;empty;int;text;text;text": 55
+      },
+      "examples": [
+        {
+          "fixture": "clocksick_453.json",
+          "position": "115-01.001",
+          "payload": "PRESETSNAP;;3;ANONYMALZ;[Current];[Current]"
+        },
+        {
+          "fixture": "clocksick_453.json",
+          "position": "119-01.080",
+          "payload": "PRESETSNAP;;3;ANONYMALZ;[Current];[Current]"
+        },
+        {
+          "fixture": "clocksick_453.json",
+          "position": "123-01.048",
+          "payload": "PRESETSNAP;;3;ANONYMALZ;[Current];[Current]"
+        }
+      ]
+    },
+    "START": {
+      "field_counts": {
+        "12": 5
+      },
+      "variants": {
+        "text;empty;int;int;int;int;int;text;text;text;text;text": 5
+      },
+      "examples": [
+        {
+          "fixture": "clocksick_453.json",
+          "position": "001-01.001",
+          "payload": "START;;9;200;0;4;4;Off;true;ANONYMALZ;CLOCKSICK;Snap 1"
+        },
+        {
+          "fixture": "late_night_party_431.json",
+          "position": "001-01.001",
+          "payload": "START;;9;160;0;4;4;Off;true;ANONYMALZ;LATE NIGHT PARTY;Snap 1"
+        },
+        {
+          "fixture": "monzter_332.json",
+          "position": "001-01.001",
+          "payload": "START;;9;141;0;6;4;Off;true;2 USER;MONZTER GOOD WIP;Snap 1"
+        }
+      ]
+    },
+    "TIME": {
+      "field_counts": {
+        "7": 2
+      },
+      "variants": {
+        "text;text;int;int;int;int;int": 2
+      },
+      "examples": [
+        {
+          "fixture": "perfect_picture_336.json",
+          "position": "005-02.052",
+          "payload": "TIME;Time 2;4;123;0;4;4"
+        },
+        {
+          "fixture": "perfect_picture_336.json",
+          "position": "010-01.001",
+          "payload": "TIME;123 bpm;4;123;0;4;4"
+        }
+      ]
+    }
+  },
+  "reports": {
+    "clocksick_453.json": {
+      "flag_count": 32,
+      "flag_types": {
+        "CYCLE_END": 1,
+        "CYCLE_START": 1,
+        "END": 1,
+        "MARKER": 6,
+        "MIDI_BANK_PROGRAM": 2,
+        "MIDI_CC": 14,
+        "PRESETSNAP": 6,
+        "START": 1
+      },
+      "tempo_time_signature": [
+        {
+          "position": "001-01.001",
+          "tempo": "200",
+          "signature": "4/4",
+          "label": ""
+        }
+      ],
+      "marker_variants": {
+        "Off/On/Off/false": 2,
+        "Off/Off/Off/false": 4
+      },
+      "native_stadium_looper": [],
+      "external_helix_midi": [
+        {
+          "position": "001-04.001",
+          "label": "BASS SNAP",
+          "cc": 69,
+          "value": 1
+        },
+        {
+          "position": "012-01.001",
+          "label": "MIDI 4",
+          "cc": 69,
+          "value": 0
+        },
+        {
+          "position": "048-04.120",
+          "label": "MIDI 5",
+          "cc": 69,
+          "value": 1
+        },
+        {
+          "position": "058-01.001",
+          "label": "BASS SNAP 0",
+          "cc": 69,
+          "value": 0
+        },
+        {
+          "position": "092-04.120",
+          "label": "BASS CHORUS",
+          "cc": 69,
+          "value": 1
+        },
+        {
+          "position": "112-04.001",
+          "label": "MIDI 10",
+          "cc": 69,
+          "value": 0
+        },
+        {
+          "position": "135-01.001",
+          "label": "MIDI 16",
+          "cc": 69,
+          "value": 6
+        },
+        {
+          "position": "137-01.001",
+          "label": "VOICE LOOP",
+          "cc": 60,
+          "value": 127
+        },
+        {
+          "position": "141-01.178",
+          "label": "VOICE OVERDUB LOOP",
+          "cc": 60,
+          "value": 6
+        },
+        {
+          "position": "151-04.228",
+          "label": "VOICE PLAY ALL",
+          "cc": 61,
+          "value": 126
+        },
+        {
+          "position": "152-01.010",
+          "label": "BASS RISING",
+          "cc": 69,
+          "value": 1
+        },
+        {
+          "position": "152-02.001",
+          "label": "VOICE STOP",
+          "cc": 61,
+          "value": 1
+        },
+        {
+          "position": "206-01.001",
+          "label": "MIDI 7",
+          "cc": 69,
+          "value": 1
+        },
+        {
+          "position": "217-01.001",
+          "label": "BASS SOLO",
+          "cc": 69,
+          "value": 1
+        }
+      ],
+      "video_midi": []
+    },
+    "late_night_party_431.json": {
+      "flag_count": 47,
+      "flag_types": {
+        "END": 1,
+        "LOOPER": 6,
+        "MARKER": 21,
+        "MIDI_CC": 1,
+        "PRESETSNAP": 17,
+        "START": 1
+      },
+      "tempo_time_signature": [
+        {
+          "position": "001-01.001",
+          "tempo": "160",
+          "signature": "4/4",
+          "label": ""
+        }
+      ],
+      "marker_variants": {
+        "Off/Off/Off/false": 21
+      },
+      "native_stadium_looper": [
+        {
+          "position": "001-02.001",
+          "label": "Clear",
+          "action": "Clear Loop"
+        },
+        {
+          "position": "024-01.001",
+          "label": "RECORD",
+          "action": "Record"
+        },
+        {
+          "position": "028-01.001",
+          "label": "STOP",
+          "action": "Stop"
+        },
+        {
+          "position": "050-01.001",
+          "label": "PLAY ONCE",
+          "action": "Play Once"
+        },
+        {
+          "position": "057-01.001",
+          "label": "PLAY ONCE",
+          "action": "Play Once"
+        },
+        {
+          "position": "061-01.001",
+          "label": "CLEAR",
+          "action": "Clear Loop"
+        }
+      ],
+      "external_helix_midi": [],
+      "video_midi": [
+        {
+          "position": "002-03.001",
+          "label": "VIDEO START",
+          "video": 8,
+          "value": 12
+        }
+      ]
+    },
+    "monzter_332.json": {
+      "flag_count": 21,
+      "flag_types": {
+        "END": 1,
+        "MARKER": 2,
+        "MIDI_BANK_PROGRAM": 2,
+        "MIDI_CC": 11,
+        "PRESETSNAP": 4,
+        "START": 1
+      },
+      "tempo_time_signature": [
+        {
+          "position": "001-01.001",
+          "tempo": "141",
+          "signature": "6/4",
+          "label": ""
+        }
+      ],
+      "marker_variants": {
+        "Off/On/Off/false": 1,
+        "Off/Off/Off/false": 1
+      },
+      "native_stadium_looper": [],
+      "external_helix_midi": [
+        {
+          "position": "002-01.001",
+          "label": "pierre SNAPSHOT 1",
+          "cc": 69,
+          "value": 0
+        },
+        {
+          "position": "016-01.001",
+          "label": "Accent",
+          "cc": 69,
+          "value": 7
+        },
+        {
+          "position": "017-03.001",
+          "label": "MIDI 5",
+          "cc": 69,
+          "value": 0
+        },
+        {
+          "position": "026-06.200",
+          "label": "CHORUS",
+          "cc": 69,
+          "value": 1
+        },
+        {
+          "position": "035-01.001",
+          "label": "BASS FILL",
+          "cc": 69,
+          "value": 4
+        },
+        {
+          "position": "037-01.001",
+          "label": "VERSE",
+          "cc": 69,
+          "value": 0
+        },
+        {
+          "position": "057-01.001",
+          "label": "CHORUS",
+          "cc": 69,
+          "value": 1
+        },
+        {
+          "position": "065-01.097",
+          "label": "CLIFF SOLO BASS",
+          "cc": 69,
+          "value": 2
+        },
+        {
+          "position": "081-01.002",
+          "label": " BASS SOLO GUITAR",
+          "cc": 69,
+          "value": 5
+        },
+        {
+          "position": "090-04.001",
+          "label": "CHORUS",
+          "cc": 69,
+          "value": 1
+        }
+      ],
+      "video_midi": [
+        {
+          "position": "003-06.001",
+          "label": " Video start",
+          "video": 6,
+          "value": 11
+        }
+      ]
+    },
+    "perfect_picture_336.json": {
+      "flag_count": 33,
+      "flag_types": {
+        "END": 1,
+        "MARKER": 4,
+        "MIDI_BANK_PROGRAM": 2,
+        "MIDI_CC": 11,
+        "PRESETSNAP": 12,
+        "START": 1,
+        "TIME": 2
+      },
+      "tempo_time_signature": [
+        {
+          "position": "001-01.001",
+          "tempo": "102",
+          "signature": "4/4",
+          "label": ""
+        },
+        {
+          "position": "005-02.052",
+          "tempo": "123",
+          "signature": "4/4",
+          "label": "Time 2"
+        },
+        {
+          "position": "010-01.001",
+          "tempo": "123",
+          "signature": "4/4",
+          "label": "123 bpm"
+        }
+      ],
+      "marker_variants": {
+        "Off/On/Off/false": 1,
+        "Off/Off/Off/false": 3
+      },
+      "native_stadium_looper": [],
+      "external_helix_midi": [
+        {
+          "position": "001-04.001",
+          "label": "MIDI 2",
+          "cc": 69,
+          "value": 0
+        },
+        {
+          "position": "026-04.133",
+          "label": "MIDI 3",
+          "cc": 69,
+          "value": 1
+        },
+        {
+          "position": "043-01.002",
+          "label": "MIDI 4",
+          "cc": 69,
+          "value": 0
+        },
+        {
+          "position": "059-04.001",
+          "label": "MIDI 5",
+          "cc": 69,
+          "value": 1
+        },
+        {
+          "position": "075-04.120",
+          "label": "MIDI 6",
+          "cc": 69,
+          "value": 3
+        },
+        {
+          "position": "079-01.001",
+          "label": "DebutLooper",
+          "cc": 61,
+          "value": 66
+        },
+        {
+          "position": "081-02.001",
+          "label": "MIDI 7",
+          "cc": 69,
+          "value": 2
+        },
+        {
+          "position": "082-01.001",
+          "label": "Fin Looper",
+          "cc": 61,
+          "value": 127
+        },
+        {
+          "position": "097-02.002",
+          "label": "MIDI 8",
+          "cc": 69,
+          "value": 1
+        },
+        {
+          "position": "098-01.001",
+          "label": "FIN LOOP",
+          "cc": 61,
+          "value": 0
+        }
+      ],
+      "video_midi": [
+        {
+          "position": "011-01.002",
+          "label": "Video start",
+          "video": 4,
+          "value": 11
+        }
+      ]
+    },
+    "wanna_be_429.json": {
+      "flag_count": 46,
+      "flag_types": {
+        "END": 1,
+        "LOOPER": 8,
+        "MARKER": 12,
+        "MIDI_BANK_PROGRAM": 4,
+        "MIDI_CC": 4,
+        "PRESETSNAP": 16,
+        "START": 1
+      },
+      "tempo_time_signature": [
+        {
+          "position": "001-01.001",
+          "tempo": "89",
+          "signature": "4/4",
+          "label": ""
+        }
+      ],
+      "marker_variants": {
+        "Off/Off/Off/false": 11,
+        "Off/On/Off/false": 1
+      },
+      "native_stadium_looper": [
+        {
+          "position": "002-01.001",
+          "label": "CLEAR",
+          "action": "Clear Loop"
+        },
+        {
+          "position": "009-01.001",
+          "label": "REC",
+          "action": "Record"
+        },
+        {
+          "position": "011-01.001",
+          "label": "STOP",
+          "action": "Stop"
+        },
+        {
+          "position": "017-01.001",
+          "label": "PLAY",
+          "action": "Play"
+        },
+        {
+          "position": "018-02.060",
+          "label": "STOP",
+          "action": "Stop"
+        },
+        {
+          "position": "025-01.001",
+          "label": "PLAY",
+          "action": "Play"
+        },
+        {
+          "position": "027-01.030",
+          "label": "STOP",
+          "action": "Stop"
+        },
+        {
+          "position": "027-02.001",
+          "label": "CLEAR",
+          "action": "Clear Loop"
+        }
+      ],
+      "external_helix_midi": [
+        {
+          "position": "001-04.001",
+          "label": "BASS MAIN",
+          "cc": 69,
+          "value": 0
+        },
+        {
+          "position": "034-04.001",
+          "label": "BASS SOLO",
+          "cc": 69,
+          "value": 2
+        },
+        {
+          "position": "043-01.001",
+          "label": "BASS MAIN",
+          "cc": 69,
+          "value": 0
+        }
+      ],
+      "video_midi": [
+        {
+          "position": "002-04.001",
+          "label": "VIDEO START",
+          "video": 8,
+          "value": 12
+        }
+      ]
+    }
+  }
+}
