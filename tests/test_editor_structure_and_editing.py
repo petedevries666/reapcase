@@ -4,7 +4,10 @@ import tempfile
 import unittest
 
 from stadium_reaper_bridge.editor.looper import derive_looper_regions
-from stadium_reaper_bridge.editor.model import EditorModel
+from stadium_reaper_bridge.editor.model import EditorModel, LANES
+from stadium_reaper_bridge.editor.composite import (
+    COMMANDS_HEIGHT, COMPOSITE_HEIGHT, event_sublane, lane_height, lane_top,
+    sublane_bounds, sublane_content_bounds)
 from stadium_reaper_bridge.editor.structure import (derive_structure_layout,
                                                      sticky_label_x,
                                                      structure_sublane)
@@ -127,6 +130,48 @@ class LooperRegionTests(unittest.TestCase):
         self.assertEqual(len(regions), 2)
         self.assertEqual(regions[0].end_units, regions[1].start_units)
         self.assertTrue(regions[1].open_ended)
+
+
+class CompositeLaneTests(unittest.TestCase):
+    def test_composite_heights_bounds_and_following_lane_positions(self):
+        self.assertEqual(lane_height("STADIUM"), COMPOSITE_HEIGHT)
+        self.assertEqual(lane_height("SECOND HELIX"), COMPOSITE_HEIGHT)
+        for lane in ("STADIUM", "SECOND HELIX"):
+            commands = sublane_bounds(LANES, lane, "commands")
+            looper = sublane_bounds(LANES, lane, "looper")
+            self.assertEqual(commands[1], looper[0])
+            self.assertEqual(commands[1] - commands[0], COMMANDS_HEIGHT)
+            self.assertLess(commands[0], commands[1])
+            self.assertLessEqual(commands[1], looper[0])
+            self.assertEqual(looper[1], lane_top(LANES, lane) + lane_height(lane))
+        for previous, following in zip(LANES, LANES[1:]):
+            self.assertEqual(lane_top(LANES, following),
+                             lane_top(LANES, previous) + lane_height(previous))
+
+    def test_semantic_stadium_and_second_helix_classification(self):
+        model = model_for([
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "002-01.001|PRESETSNAP;A;1;7",
+            "003-01.001|LOOPER;REVERSE;1;Reverse",
+            "004-01.001|MIDI_CC;BASS SNAP;4;CC;3;69;6",
+            "005-01.001|MIDI_CC;BASS STOP;4;CC;3;61;0",
+            "006-01.001|MIDI_CC;BASS EXP;4;CC;3;1;127",
+            "007-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ])
+        expected = ("commands", "looper", "commands", "looper", "commands")
+        events = model.timeline.events[1:6]
+        self.assertEqual(tuple(event_sublane(event, model.lane(event)) for event in events),
+                         expected)
+
+    def test_looper_and_command_content_bounds_cannot_overlap(self):
+        for lane in ("STADIUM", "SECOND HELIX"):
+            commands = sublane_content_bounds(LANES, lane, "commands")
+            looper = sublane_content_bounds(LANES, lane, "looper")
+            self.assertLess(commands[1], looper[0])
+            lane_bounds = (lane_top(LANES, lane),
+                           lane_top(LANES, lane) + lane_height(lane))
+            self.assertGreaterEqual(commands[0], lane_bounds[0])
+            self.assertLessEqual(looper[1], lane_bounds[1])
 
 
 class EditingTests(unittest.TestCase):
