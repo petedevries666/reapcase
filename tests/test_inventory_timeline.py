@@ -69,6 +69,26 @@ class CorpusTests(unittest.TestCase):
         snapshots = {a["snapshot"] for a in aliases if a.get("action") == "snapshot"}
         self.assertTrue({1, 2, 3, 5, 6, 7, 8}.issubset(snapshots))
 
+    def test_second_helix_cc64_low_is_noop_and_high_is_tap_tempo(self):
+        song = StadiumSong.from_dict({
+            "name": "CC64 regression",
+            "ppqn": 240,
+            "params": "",
+            "flags": [
+                "001-01.001|MIDI_CC;Tap low;4;CC;3;64;0",
+                "001-02.001|MIDI_CC;Tap high;4;CC;3;64;127",
+            ],
+            "tracks": [],
+        })
+
+        low, high = stadium_to_timeline(song, midi_decoder=self.decoder).events
+
+        self.assertNotIn("rig_alias", low.data)
+        self.assertEqual(
+            high.data["rig_alias"],
+            {"system": "second_helix", "action": "Tap Tempo"},
+        )
+
     def test_perfect_picture_suspicious_sequence_is_diagnostic_not_invalid(self):
         report = self.inventory["reports"]["perfect_picture_336.json"]
         commands = [x for x in report["external_helix_midi"] if x["cc"] in (60, 61)]

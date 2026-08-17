@@ -18,7 +18,8 @@ class RigMidiDecoder:
             actions = self.config["second_helix"]["cc"].get(str(cc))
             if actions:
                 action = actions.get("high" if value >= 64 else "low")
-                if action: return {"system": "second_helix", "action": action}
+                if action and action != "Noop":
+                    return {"system": "second_helix", "action": action}
         if channel == self.config["video"]["channel"]:
             action = self.config["video"]["values"].get(str(value))
             if action:
