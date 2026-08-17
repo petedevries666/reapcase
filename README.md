@@ -38,6 +38,12 @@ Lancer l'éditeur desktop (bibliothèque standard Tkinter uniquement) :
 PYTHONPATH=src python -m stadium_reaper_bridge.editor.app
 ```
 
+Audio lanes can be refreshed after external file changes, reordered from their
+fixed headers, detached without deleting their WAVs, and supplemented with a
+managed copy through **Add Audio Track...**. Structural audio edits are undoable;
+undoing an add detaches the track but deliberately leaves the safely copied WAV
+on disk for recovery.
+
 Utilisez **Open JSON** pour charger une Song, sélectionnez les flags dans les
 lanes STRUCTURE, STADIUM, SECOND HELIX, VIDEO et MIDI / OTHER, puis déplacez-les
 par glisser-déposer ou avec **Shift Selected**. **Save As JSON** exige une

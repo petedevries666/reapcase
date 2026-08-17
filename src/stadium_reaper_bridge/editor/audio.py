@@ -120,7 +120,8 @@ class AudioTrackView:
         return self.source.get("offset", 0)
 
 
-def audio_track_views(tracks: Any, resolver: AudioResolver) -> tuple[AudioTrackView, ...]:
+def audio_track_views(tracks: Any, resolver: AudioResolver, *,
+                      inspect_files: bool = True) -> tuple[AudioTrackView, ...]:
     if not isinstance(tracks, list):
         return ()
     views = []
@@ -129,7 +130,7 @@ def audio_track_views(tracks: Any, resolver: AudioResolver) -> tuple[AudioTrackV
             source = {"name": str(source)}
         path = resolver.resolve(source.get("filename"))
         try:
-            info = read_wav_info(path) if path else None
+            info = read_wav_info(path) if path and inspect_files else None
         except (wave.Error, OSError, EOFError):
             info = None
         views.append(AudioTrackView(number, source, path, info))

@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import copy
 from pathlib import Path
+import shutil
+import wave
 from typing import Iterable
 
 from ..midi import RigMidiDecoder
 from ..stadium import MusicalPosition, StadiumSong
 from ..timeline import Timeline, TimelineEvent, stadium_to_timeline, timeline_source_flags
-from .audio import (AudioResolver, audio_track_views,
+from .audio import (MAX_AUDIO_TRACKS, AudioResolver, audio_track_views, read_wav_info,
                     stadium_backup_audio_paths)
 from ..timing import TimingMap
 from .display import badge_text
@@ -55,12 +57,14 @@ class EditorModel:
         self._undo: list[tuple] = []
         self._created = 0
         self._structural_edits = 0
+        self._audio_edits = 0
         start = next((e for e in self.timeline.events if e.source.type == "START"), None)
         self.tempo = start.data.get("tempo") if start else None
         self.numerator = start.data.get("time_signature_numerator", 4) if start else 4
         self.denominator = start.data.get("time_signature_denominator", 4) if start else 4
         self.audio_root: Path | None = None
         self.audio_tracks = ()
+        self._audio_identities: dict[Path, tuple[int, int]] = {}
         has_start = any(flag.type == "START" for flag in song.flags)
         self.timing_map = (TimingMap.from_song(song) if has_start else
                            TimingMap(song.ppqn, [(MusicalPosition(1, 1, 1), 120, 4, 4)]))
@@ -100,14 +104,118 @@ class EditorModel:
     def lane_counts(self) -> dict[str, int]:
         return {lane: sum(self.lane(e) == lane for e in self.timeline.events) for lane in LANES}
 
-    def resolve_audio(self, root: str | Path | None = None) -> None:
+    def resolve_audio(self, root: str | Path | None = None) -> set[Path]:
+        """Resolve audio and return files whose identity changed since the last scan."""
         if root is not None:
             self.audio_root = Path(root)
         automatic = stadium_backup_audio_paths(self.path)
         resolver = AudioResolver(self.path.parent, self.audio_root,
                                  automatic[0] if automatic else None,
                                  automatic[1] if automatic else None)
-        self.audio_tracks = audio_track_views(self.song.tracks, resolver)
+        previous = {track.resolved_path: track for track in self.audio_tracks if track.resolved_path}
+        views = audio_track_views(self.song.tracks, resolver, inspect_files=False)
+        changed: set[Path] = set()
+        identities: dict[Path, tuple[int, int]] = {}
+        refreshed = []
+        for view in views:
+            path = view.resolved_path
+            identity = None
+            if path:
+                try:
+                    stat = path.stat(); identity = (stat.st_size, stat.st_mtime_ns)
+                except OSError:
+                    pass
+            if path and identity is not None:
+                identities[path] = identity
+            old = previous.get(path)
+            if path and identity == self._audio_identities.get(path) and old:
+                info = old.file_info
+            else:
+                info = None
+                if path:
+                    changed.add(path)
+                    try: info = read_wav_info(path)
+                    except (wave.Error, OSError, EOFError): pass
+            refreshed.append(type(view)(view.number, view.source, path, info))
+        changed.update(set(self._audio_identities) - set(identities))
+        self._audio_identities = identities
+        self.audio_tracks = tuple(refreshed)
+        return changed
+
+    def refresh_audio(self) -> set[Path]:
+        """Refresh derived audio state without changing Song JSON or Undo state."""
+        return self.resolve_audio()
+
+    def _replace_tracks(self, tracks: list, *, undo: bool = True) -> None:
+        if undo:
+            self._undo.append(("audio_tracks", list(self.song.tracks)))
+            self._structural_edits += 1
+            self._audio_edits += 1
+        self.song.tracks = tracks
+        self.resolve_audio()
+
+    def add_audio_track(self, source_wav: str | Path, name: str | None = None,
+                        destination: str | Path | None = None) -> dict:
+        """Copy a PCM WAV into managed storage and append a fixture-safe track."""
+        tracks = self.song.tracks
+        if not isinstance(tracks, list):
+            raise ValueError("This Song has no editable tracks array")
+        if len(tracks) >= MAX_AUDIO_TRACKS:
+            raise ValueError("A Song can contain at most 8 audio tracks")
+        source = Path(source_wav)
+        try:
+            info = read_wav_info(source)
+        except Exception as exc:
+            raise ValueError(f"Invalid or unsupported PCM WAV: {exc}") from exc
+        rates = {track.file_info.sample_rate for track in self.audio_tracks if track.file_info}
+        if rates and info.sample_rate not in rates:
+            raise ValueError(f"Sample rate must match the existing Song audio ({min(rates)} Hz)")
+        if info.channels not in (1, 2) or info.sample_width not in (2, 3):
+            raise ValueError("Only mono/stereo 16-bit and 24-bit PCM WAV is supported")
+        automatic = stadium_backup_audio_paths(self.path)
+        target_dir = Path(destination) if destination else (automatic[0] if automatic else None)
+        if target_dir is None:
+            raise ValueError("The backup audio folder could not be derived; choose a destination")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = source.name
+        if source.suffix.casefold() != ".wav":
+            raise ValueError("Audio track files must use the .wav extension")
+        target = target_dir / filename
+        if target.exists():
+            raise FileExistsError(f"Audio file already exists: {target.name}")
+        shutil.copy2(source, target)
+        # Real fixtures consistently use this Stadium path and these neutral defaults.
+        existing_filename = next((item.get("filename") for item in tracks
+                                  if isinstance(item, dict) and isinstance(item.get("filename"), str)
+                                  and "/" in item["filename"].replace("\\", "/")), None)
+        prefix = (existing_filename.replace("\\", "/").rsplit("/", 1)[0]
+                  if existing_filename else
+                  f"../../../../../sd-stadium/songs/workspace/Audio/{self.path.stem}")
+        stored = f"{prefix}/{filename}"
+        track = {"name": name or source.stem, "filename": stored, "offset": 0,
+                 "gain": 1.0, "panning": 0.0, "mute": False, "solo": False,
+                 "trim": 1.0, "transpose": False}
+        self._replace_tracks([*tracks, track])
+        return track
+
+    def delete_audio_track(self, index: int) -> dict:
+        if not isinstance(self.song.tracks, list) or not 0 <= index < len(self.song.tracks):
+            raise IndexError("Audio track index out of range")
+        removed = self.song.tracks[index]
+        self._replace_tracks(self.song.tracks[:index] + self.song.tracks[index + 1:])
+        return removed
+
+    def move_audio_track(self, old_index: int, new_index: int) -> bool:
+        tracks = self.song.tracks
+        if not isinstance(tracks, list) or not (0 <= old_index < len(tracks)):
+            raise IndexError("Audio track index out of range")
+        new_index = max(0, min(new_index, len(tracks) - 1))
+        if old_index == new_index:
+            return False
+        reordered = list(tracks)
+        reordered.insert(new_index, reordered.pop(old_index))
+        self._replace_tracks(reordered)
+        return True
 
     @property
     def audio_overflow(self) -> int:
@@ -210,6 +318,12 @@ class EditorModel:
         if not self._undo:
             return False
         operation = self._undo.pop()
+        if operation[0] == "audio_tracks":
+            self.song.tracks = operation[1]
+            self._structural_edits -= 1
+            self._audio_edits -= 1
+            self.resolve_audio()
+            return True
         if operation[0] == "create":
             _, event, previous_selection = operation
             self.timeline.events.remove(event)
@@ -290,4 +404,5 @@ class EditorModel:
             Path(path).write_text(self.song.to_json_text(), encoding="utf-8")
         finally:
             self.song.flags = source_flags
-        return SaveSummary(sum(e.position != p for e, p in zip(self.timeline.events, self._original_positions)))
+        return SaveSummary(sum(e.position != p for e, p in zip(self.timeline.events, self._original_positions)),
+                           tracks_changed=self._audio_edits)
