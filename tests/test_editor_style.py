@@ -1,7 +1,9 @@
 from pathlib import Path
 
+from stadium_reaper_bridge.editor import style
 from stadium_reaper_bridge.editor.style import (
     AUDIO,
+    LANE_GRADIENT_OPACITY,
     LANE_PALETTE,
     LaneBackgroundCache,
     composite_lane_rgb,
@@ -38,6 +40,13 @@ def test_lane_background_cache_uses_color_size_key_and_preserves_alpha_composite
     assert calls[0]["format"] == "PPM"
     assert calls[0]["data"].startswith(b"P6\n5 7\n255\n")
     assert len(set(composite_lane_rgb("#10273b", 77))) > 1
+
+
+def test_lane_gradient_uses_centralized_sixty_percent_opacity(monkeypatch):
+    monkeypatch.setattr(style, "_gradient_rows", lambda: ((255, 255, 255, 255),))
+
+    assert LANE_GRADIENT_OPACITY == 0.60
+    assert composite_lane_rgb("#000000", 1) == ((153, 153, 153),)
 
 
 def test_semantic_lane_color_associations_are_unchanged():
