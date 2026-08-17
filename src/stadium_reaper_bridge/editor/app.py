@@ -6,14 +6,19 @@ Launch with ``PYTHONPATH=src python -m stadium_reaper_bridge.editor.app``.
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from concurrent.futures import ThreadPoolExecutor
 
 from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_HEIGHT,
                      drag_units, fit_song_scale, horizontal_wheel_units,
                      marquee_candidates, normalized_rectangle, snap_drag_delta,
-                     timeline_x, units_at_x, x_for_position, zoom_about_cursor)
+                     snapped_units_at_x, timeline_x, units_at_x, x_for_position,
+                     zoom_about_cursor)
 from .model import EditorModel, LANES, MovePreview
+from .creation import (create_generic_midi_cc, create_second_helix_looper,
+                       create_second_helix_preset, create_second_helix_snapshot,
+                       create_stadium_looper, create_structure_marker,
+                       create_video_command)
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
                        raster_ppm, timeline_units_to_x, viewport_columns)
@@ -84,6 +89,7 @@ class ReapcaseEditor(tk.Tk):
         xscroll.grid(row=1, column=0, sticky="ew"); frame.rowconfigure(0, weight=1); frame.columnconfigure(0, weight=1)
         self.canvas.bind("<Button-1>", self.click); self.canvas.bind("<B1-Motion>", self.drag)
         self.canvas.bind("<ButtonRelease-1>", self.drop)
+        self.canvas.bind("<Button-3>", self.context_menu)
         self.canvas.bind("<Control-MouseWheel>", self.mouse_zoom)
         self.canvas.bind("<Control-Button-4>", self.mouse_zoom)
         self.canvas.bind("<Control-Button-5>", self.mouse_zoom)
@@ -407,6 +413,116 @@ class ReapcaseEditor(tk.Tk):
         if over_ruler:
             self.model.cursor = self.model._position(
                 units_at_x(x, self.model.song.ppqn, self.pixels_per_beat))
+
+    def context_menu(self, event):
+        """Open a compact lane-specific creation menu at the clicked position."""
+        if not self.model or event.x < HEADER_WIDTH:
+            return
+        y = self.canvas.canvasy(event.y)
+        lane_index = int((y - RULER_HEIGHT) // LANE_HEIGHT)
+        if lane_index < 0 or lane_index >= len(LANES):
+            return  # Ruler and audio lanes deliberately have no creation menu.
+        lane = LANES[lane_index]
+        x = self.canvas.canvasx(event.x)
+        units = snapped_units_at_x(x, self.model.song.ppqn, self.pixels_per_beat,
+                                   self.grid_choice.get(), self.model.numerator)
+        position = self.model._position(units)
+        menu = tk.Menu(self, tearoff=False)
+        add = tk.Menu(menu, tearoff=False)
+        menu.add_cascade(label="ADD NEW", menu=add)
+        if lane == "STRUCTURE":
+            add.add_command(label="Marker...", command=lambda: self._marker_dialog(position))
+        elif lane == "STADIUM":
+            looper = tk.Menu(add, tearoff=False)
+            for action in ("Clear Loop", "Record", "Stop", "Play", "Play Once"):
+                looper.add_command(label=action,
+                    command=lambda value=action: self._create(create_stadium_looper, position, value))
+            add.add_cascade(label="Looper", menu=looper)
+        elif lane == "SECOND HELIX":
+            snapshots = tk.Menu(add, tearoff=False)
+            for snapshot in self.model.decoder.second_helix_snapshots():
+                snapshots.add_command(label=f"Snapshot {snapshot}",
+                    command=lambda value=snapshot: self._create(
+                        create_second_helix_snapshot, position, value, self.model.decoder))
+            add.add_cascade(label="Snapshot Change", menu=snapshots)
+            add.add_command(label="Preset Change...", command=lambda: self._preset_dialog(position))
+            looper = tk.Menu(add, tearoff=False)
+            labels = {"Undo/Redo": "Undo / Redo", "On": "Block On", "Off": "Block Off"}
+            allowed = {"Record", "Overdub", "Play", "Stop", "Play Once", "Undo/Redo",
+                       "Forward", "Reverse", "Full Speed", "Half Speed", "On", "Off"}
+            for action in self.model.decoder.second_helix_actions():
+                if action in allowed:
+                    looper.add_command(label=labels.get(action, action),
+                        command=lambda value=action: self._create(
+                            create_second_helix_looper, position, value, self.model.decoder))
+            add.add_cascade(label="Looper", menu=looper)
+        elif lane == "VIDEO":
+            labels = {"preload": "Preload Video...", "play_one_shot": "Play One Shot...",
+                      "play_loop": "Play Loop...", "stop": "Stop Video...",
+                      "rescan_playlist": "Rescan Playlist"}
+            for action in self.model.decoder.video_actions():
+                if action in labels:
+                    callback = (lambda value=action: self._video_dialog(position, value))
+                    add.add_command(label=labels[action], command=callback)
+        elif lane == "MIDI / OTHER":
+            add.add_command(label="MIDI CC...", command=lambda: self._midi_cc_dialog(position))
+        if add.index("end") is None:
+            return
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _create(self, factory, *args):
+        try:
+            created = factory(*args)
+            self.model.insert_event(created)
+        except ValueError as exc:
+            messagebox.showerror("Cannot create event", str(exc))
+            return
+        self.redraw()
+
+    def _marker_dialog(self, position):
+        name = simpledialog.askstring("Add Structure Marker", "Marker name:", parent=self)
+        if name is not None:
+            self._create(create_structure_marker, position, name)
+
+    def _video_dialog(self, position, action):
+        if action == "rescan_playlist":
+            self._create(create_video_command, position, None, action, self.model.decoder)
+            return
+        video = simpledialog.askinteger("Add Video Command", "Video number:", parent=self,
+                                        initialvalue=6, minvalue=0, maxvalue=127)
+        if video is not None:
+            self._create(create_video_command, position, video, action, self.model.decoder)
+
+    def _preset_dialog(self, position):
+        values = []
+        for label, optional in (("Bank MSB (blank = Off):", True),
+                                ("Bank LSB (blank = Off):", True), ("Program:", False)):
+            raw = simpledialog.askstring("Add Second Helix Preset", label, parent=self)
+            if raw is None:
+                return
+            raw = raw.strip()
+            if not raw and optional:
+                values.append(None)
+                continue
+            try:
+                values.append(int(raw))
+            except ValueError:
+                messagebox.showerror("Cannot create event", f"{label.rstrip(':')} must be an integer")
+                return
+        self._create(create_second_helix_preset, position, *values, self.model.decoder)
+
+    def _midi_cc_dialog(self, position):
+        values = []
+        for label, low, high in (("Channel:", 1, 16), ("CC:", 0, 127), ("Value:", 0, 127)):
+            value = simpledialog.askinteger("Add MIDI CC", label, parent=self,
+                                            minvalue=low, maxvalue=high)
+            if value is None:
+                return
+            values.append(value)
+        self._create(create_generic_midi_cc, position, *values, self.model.decoder)
 
     def drag(self, event):
         if not self.model:

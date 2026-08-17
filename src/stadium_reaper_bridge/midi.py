@@ -96,6 +96,27 @@ class RigMidiDecoder:
 
     encode = encode_rig_command
 
+    @property
+    def second_helix_channel(self) -> int:
+        return _midi_int("channel", self.config["second_helix"]["channel"], 1, 16)
+
+    def second_helix_snapshots(self) -> tuple[int, ...]:
+        snap = self.config["second_helix"]["snapshot"]
+        return tuple(range(snap["value_min"] + snap["offset"],
+                           snap["value_max"] + snap["offset"] + 1))
+
+    def second_helix_actions(self) -> tuple[str, ...]:
+        actions = []
+        for mapping in self.config["second_helix"]["cc"].values():
+            for side in ("low", "high"):
+                action = mapping.get(side)
+                if action and action != "Noop" and action not in actions:
+                    actions.append(action)
+        return tuple(actions)
+
+    def video_actions(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(self.config["video"]["values"].values()))
+
     def _encode_stadium(self, action: str, command: dict[str, Any]) -> dict[str, int]:
         stadium = self.config["stadium_transport"]
         channel = _midi_int("channel", stadium.get("channel"), 1, 16)

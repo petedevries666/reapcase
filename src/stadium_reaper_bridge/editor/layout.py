@@ -33,6 +33,17 @@ def units_at_x(x: float, ppqn: int, pixels_per_beat: float) -> int:
     return max(0, round((x - HEADER_WIDTH) / pixels_per_beat * ppqn))
 
 
+def snapped_units_at_x(x: float, ppqn: int, pixels_per_beat: float, mode: str,
+                       beats_per_bar: int) -> int:
+    """Convert a canvas coordinate to a grid-aligned timeline unit.
+
+    This is the canonical pointer-to-timeline path used by creation.  Canvas
+    scrolling is intentionally handled by the caller via ``canvasx``.
+    """
+    units = units_at_x(x, ppqn, pixels_per_beat)
+    return snap_drag_delta(0, units, mode, ppqn, beats_per_bar)
+
+
 def track_header_rect(lane_top: float) -> tuple[float, float, float, float]:
     return (0.0, lane_top, float(HEADER_WIDTH), lane_top + LANE_HEIGHT)
 
