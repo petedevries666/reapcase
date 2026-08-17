@@ -21,7 +21,7 @@ from .lighting import (HIT_PRESETS, STATE_PRESETS, LightingKind,
                        create_lighting_event, derive_lighting_regions)
 from .model import EditorModel, LANES, MovePreview
 from .style import (AUDIO, LOOPER_STATE_FILLS, THEME, TIMELINE,
-                    apply_ttk_theme, lane_colors)
+                    LaneBackgroundCache, apply_ttk_theme, lane_colors)
 from .sequence import SequenceClickKind
 from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
                         derive_structure_layout, sticky_label_x,
@@ -117,6 +117,7 @@ class ReapcaseEditor(tk.Tk):
         self.monitor_solo: list[bool] = []
         self.waveforms = {}
         self._waveform_images = []
+        self._lane_backgrounds = LaneBackgroundCache(self)
         self.manual_audio_root = None
         self.audio_grid_overlay = tk.BooleanVar(value=False)
         self._waveform_pending = set()
@@ -460,17 +461,12 @@ class ReapcaseEditor(tk.Tk):
             if lane in LANES:
                 lane_style = lane_colors(lane)
                 background = lane_style.background
-                highlight = lane_style.background_highlight
             else:
                 background = AUDIO.background
-                highlight = AUDIO.background_highlight
-            self.canvas.create_rectangle(0, y, width, y + current_height,
-                                         fill=background, outline=TIMELINE.separator)
-            # One broad band suggests a restrained vertical gradient without
-            # adding redraw work proportional to lane height or canvas width.
-            self.canvas.create_rectangle(1, y + 1, width - 1,
-                                         y + current_height / 2,
-                                         fill=highlight, outline="")
+            lane_image = self._lane_backgrounds.image(background, int(width), current_height)
+            self.canvas.create_image(0, y, image=lane_image, anchor="nw")
+            self.canvas.create_line(0, y + current_height, width, y + current_height,
+                                    fill=TIMELINE.separator)
             if lane == "STRUCTURE":
                 for boundary in (y + MARKERS_HEIGHT, y + MARKERS_HEIGHT + PAUSES_HEIGHT):
                     self.canvas.create_line(0, boundary, width, boundary, fill=TIMELINE.sublane_separator)
@@ -755,14 +751,17 @@ class ReapcaseEditor(tk.Tk):
             current_height = lane_height(lane) if lane in LANES else LANE_HEIGHT
             if lane in LANES:
                 lane_style = lane_colors(lane)
-                header_background = lane_style.background_highlight
+                background = lane_style.background
                 title_color = lane_style.header
             else:
-                header_background = AUDIO.background_highlight
+                background = AUDIO.background
                 title_color = AUDIO.text
+            header_image = self._lane_backgrounds.image(background, HEADER_WIDTH, current_height)
+            self.canvas.create_image(view_left, y, image=header_image, anchor="nw",
+                                     tags=("fixed-header",))
             self.canvas.create_rectangle(view_left, y, view_left + HEADER_WIDTH, y + current_height,
-                                         fill=header_background,
-                                         outline=TIMELINE.separator, tags=("fixed-header",))
+                                         fill="", outline=TIMELINE.separator,
+                                         tags=("fixed-header",))
             title_offset = 4 if lane in COMPOSITE_LANES else 12
             self.canvas.create_text(view_left + 8, y + title_offset, text=lane, anchor="nw",
                                     fill=title_color, font=("TkDefaultFont", 9, "bold"),
