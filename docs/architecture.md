@@ -22,6 +22,10 @@
   opaque, même si son type ou ses paramètres sont inconnus.
 - Après déplacement, seule la position rendue change ; le payload est réutilisé.
 - Les clés JSON inconnues restent dans le document exporté.
+- Les flags Stadium `START` et `TIME` restent chacun un unique événement de
+  timeline source contenant à la fois le tempo et la signature rythmique. Ils ne
+  sont pas scindés : l'ordre source et la reconstruction lossless un-pour-un sont
+  ainsi préservés.
 - Les positions observées sont indexées à partir de 1 : une frontière exacte de
   beat utilise `.001`. Avec un PPQN de 240, les ticks valides vont de 1 à 240 ;
   `.000` n'est pas accepté sans fixture Stadium qui en démontre la validité.

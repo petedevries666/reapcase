@@ -1,5 +1,5 @@
 {
   "second_helix": {"channel": 3, "snapshot": {"cc": 69, "value_min": 0, "value_max": 7, "offset": 1},
-    "cc": {"60": {"low": "Overdub", "high": "Record"}, "61": {"low": "Stop", "high": "Play"}, "62": {"high": "Play Once"}, "63": {"high": "Undo/Redo"}, "65": {"low": "Forward", "high": "Reverse"}, "66": {"low": "Full Speed", "high": "Half Speed"}, "67": {"low": "Off", "high": "On"}, "68": {"low": "Tuner", "high": "Tuner"}, "64": {"low": "Tap Tempo", "high": "Tap Tempo"}}},
+    "cc": {"60": {"low": "Overdub", "high": "Record"}, "61": {"low": "Stop", "high": "Play"}, "62": {"high": "Play Once"}, "63": {"high": "Undo/Redo"}, "65": {"low": "Forward", "high": "Reverse"}, "66": {"low": "Full Speed", "high": "Half Speed"}, "67": {"low": "Off", "high": "On"}, "68": {"low": "Tuner", "high": "Tuner"}, "64": {"low": "Noop", "high": "Tap Tempo"}}},
   "video": {"channel": 16, "values": {"0": "stop", "10": "preload", "11": "play_one_shot", "12": "play_loop", "127": "rescan_playlist"}}
 }
