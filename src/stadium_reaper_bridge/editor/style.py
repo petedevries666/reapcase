@@ -92,6 +92,7 @@ class LaneColors:
 THEME = ThemeColors()
 TIMELINE = TimelineStyle()
 AUDIO = AudioStyle()
+LANE_GRADIENT_OPACITY = 0.60
 
 # Backgrounds are deliberately much darker than events.  The paired highlight
 # remains useful as a flat fallback and for controls; lane depth comes from the
@@ -199,7 +200,7 @@ def composite_lane_rgb(base: str, height: int) -> tuple[tuple[int, int, int], ..
     result = []
     for y in range(height):
         sample = source[round(y * (len(source) - 1) / max(1, height - 1))]
-        alpha = sample[3]
+        alpha = round(sample[3] * LANE_GRADIENT_OPACITY)
         result.append(tuple((sample[channel] * alpha + base_rgb[channel] * (255 - alpha) + 127) // 255
                             for channel in range(3)))
     return tuple(result)
