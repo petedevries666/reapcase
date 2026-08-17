@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "mappings": [
+    {
+      "rig": "second_helix",
+      "channel": 3,
+      "message": "CC",
+      "controller": 64,
+      "value_ranges": [
+        {"minimum": 0, "maximum": 63, "action": "Noop"},
+        {"minimum": 64, "maximum": 127, "action": "Tap Tempo"}
+      ]
+    }
+  ]
+}

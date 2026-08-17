@@ -8,6 +8,14 @@
 2. **`timeline.py` — représentation intermédiaire.** Les adaptateurs échangent
    des positions musicales et des événements typés. `source` peut référencer
    l'objet Stadium original afin de réutiliser son payload lors de l'export.
+   Un flag Stadium `START` ou `TIME` devient exactement un événement `TEMPO`,
+   dans le même ordre que les flags source. Son dictionnaire `data` porte les
+   trois valeurs `tempo`, `numerator` et `denominator`. L'adaptateur REAPER doit
+   donc créer son marqueur combiné de tempo/signature à partir de ces trois
+   champs. `TIME_SIGNATURE` est réservé aux formats qui représentent une
+   signature comme un événement source indépendant ; créer aussi cet événement
+   pour un même flag Stadium casserait la correspondance un-à-un nécessaire au
+   round-trip sans perte.
 3. **Adaptateur REAPER (à venir).** Il écrira/lira le projet REAPER, y compris
    tempo, signatures et markers, sans introduire de logique Stadium.
 4. **Mappings (à venir).** Un chargeur validé de `config/aliases.json` traduira

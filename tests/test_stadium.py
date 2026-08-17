@@ -4,6 +4,8 @@ from pathlib import Path
 import unittest
 
 from stadium_reaper_bridge.stadium import MusicalPosition, StadiumFlag, StadiumSong
+from stadium_reaper_bridge.midi import decode_midi_cc, load_rig_midi_mapping
+from stadium_reaper_bridge.timeline import TimelineEventKind, stadium_to_timeline
 
 
 MONZTER_FIXTURE = Path(__file__).parent / "fixtures" / "monzter_332.json"
@@ -83,6 +85,43 @@ class MonzterFixtureTests(unittest.TestCase):
 
 
 class StadiumModelTests(unittest.TestCase):
+    def test_second_helix_cc64_obeys_tap_tempo_value_range(self):
+        mapping = load_rig_midi_mapping("config/rig_midi.json")
+
+        self.assertIsNone(
+            decode_midi_cc(mapping, rig="second_helix", channel=3, controller=64, value=0)
+        )
+        self.assertEqual(
+            decode_midi_cc(mapping, rig="second_helix", channel=3, controller=64, value=127),
+            "Tap Tempo",
+        )
+
+    def test_start_and_time_are_single_combined_tempo_signature_events(self):
+        song = StadiumSong.from_dict({
+            "name": "Meter changes", "ppqn": 240, "params": {}, "tracks": [],
+            "flags": [
+                "001-01.001|START;;9;141;0;6;4;Off;true;Rig;Song;Snap 1",
+                "005-02.052|TIME;Time 2;4;123;0;3;8",
+            ],
+        })
+
+        timeline = stadium_to_timeline(song)
+
+        self.assertEqual([event.kind for event in timeline.events], [
+            TimelineEventKind.TEMPO, TimelineEventKind.TEMPO,
+        ])
+        self.assertEqual(timeline.events[0].data, {
+            "tempo": 141.0, "numerator": 6, "denominator": 4,
+        })
+        self.assertEqual(timeline.events[1].data, {
+            "tempo": 123.0, "numerator": 3, "denominator": 8,
+        })
+        self.assertIs(timeline.events[0].source, song.flags[0])
+        self.assertNotIn(
+            TimelineEventKind.TIME_SIGNATURE,
+            [event.kind for event in timeline.events],
+        )
+
     def test_no_op_round_trip_is_byte_exact_and_keeps_unknown_data(self):
         source = '{\n "name":"Démo", "ppqn":240, "params":{"future":true},\n "flags":["026-06.200|ALIEN;x;;y"], "tracks":[], "unknown":{"x":1}\n}\n'
         song = StadiumSong.from_json_text(source)
