@@ -18,19 +18,41 @@ _POSITION = re.compile(r"^(?P<bar>\d+)-(?P<beat>\d+)\.(?P<tick>\d+)$")
 
 @dataclass(frozen=True, order=True)
 class MusicalPosition:
-    """A Stadium `BAR-BEAT.TICK` position, retaining its original formatting."""
+    """A one-based Stadium `BAR-BEAT.TICK` position.
+
+    Observed Stadium files use tick ``001`` for an exact beat boundary. Tick
+    zero is therefore rejected until a real-world fixture demonstrates that it
+    is valid.
+    """
 
     bar: int
     beat: int
     tick: int
     original: str | None = field(default=None, compare=False)
 
+    def __post_init__(self) -> None:
+        if self.bar < 1 or self.beat < 1 or self.tick < 1:
+            raise ValueError("Stadium bar, beat, and tick values must be one-based")
+
     @classmethod
-    def parse(cls, value: str) -> "MusicalPosition":
+    def parse(cls, value: str, *, ppqn: int | None = None) -> "MusicalPosition":
         match = _POSITION.fullmatch(value)
         if not match:
             raise ValueError(f"Invalid Stadium musical position: {value!r}")
-        return cls(*(int(match.group(key)) for key in ("bar", "beat", "tick")), original=value)
+        position = cls(
+            *(int(match.group(key)) for key in ("bar", "beat", "tick")),
+            original=value,
+        )
+        position.validate(ppqn)
+        return position
+
+    def validate(self, ppqn: int | None = None) -> None:
+        """Validate the tick against a Song PPQN when one is available."""
+        if ppqn is not None:
+            if isinstance(ppqn, bool) or not isinstance(ppqn, int) or ppqn < 1:
+                raise ValueError(f"PPQN must be a positive integer, got {ppqn!r}")
+            if self.tick > ppqn:
+                raise ValueError(f"Tick {self.tick} exceeds Song PPQN {ppqn}")
 
     def render(self) -> str:
         if self.original is not None:
@@ -53,11 +75,11 @@ class StadiumFlag:
     original: str | None = field(default=None, compare=False)
 
     @classmethod
-    def parse(cls, value: str) -> "StadiumFlag":
+    def parse(cls, value: str, *, ppqn: int | None = None) -> "StadiumFlag":
         position, separator, payload = value.partition("|")
         if not separator:
             raise ValueError(f"Stadium flag has no payload delimiter: {value!r}")
-        return cls(MusicalPosition.parse(position), payload, original=value)
+        return cls(MusicalPosition.parse(position, ppqn=ppqn), payload, original=value)
 
     @property
     def type(self) -> str:
@@ -88,7 +110,10 @@ class StadiumSong:
             name=data.get("name"),
             ppqn=data.get("ppqn"),
             params=copy.deepcopy(data.get("params")),
-            flags=[StadiumFlag.parse(value) for value in data.get("flags", [])],
+            flags=[
+                StadiumFlag.parse(value, ppqn=data.get("ppqn"))
+                for value in data.get("flags", [])
+            ],
             tracks=copy.deepcopy(data.get("tracks")),
             _document=data,
         )
