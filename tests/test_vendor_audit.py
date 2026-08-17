@@ -13,6 +13,8 @@ class VendorAuditTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.vendor = json.loads(Path("config/vendor_capabilities.json").read_text())
+        cls.helix = json.loads(Path("config/helix_floor_midi.json").read_text())
+        cls.rig = json.loads(Path("config/rig_midi.json").read_text())
         cls.empirical = json.loads(Path("config/stadium_flag_inventory.json").read_text())
         cls.capabilities = {item["feature"]: item for item in cls.vendor["capabilities"]}
 
@@ -78,6 +80,55 @@ class VendorAuditTests(unittest.TestCase):
     def test_rig_midi_mapping_is_unchanged_by_documentation_audit(self):
         digest = hashlib.sha256(Path("config/rig_midi.json").read_bytes()).hexdigest()
         self.assertEqual(digest, "a8a1f5d345216988e6e81527cba75dc1e6f0d768176deeaeafe169f860b6719f")
+
+    def test_helix_vendor_inventory_has_official_looper_mappings(self):
+        expected = {
+            "60": {"low": "overdub", "high": "record"},
+            "61": {"low": "stop", "high": "play"},
+            "62": {"high": "play_once"},
+            "63": {"high": "undo_redo"},
+            "65": {"low": "forward", "high": "reverse"},
+            "66": {"low": "full_speed", "high": "half_speed"},
+            "67": {"low": "bypass", "high": "enable"},
+        }
+        self.assertEqual(set(self.helix["looper"]), set(expected))
+        for cc, actions in expected.items():
+            with self.subTest(cc=cc):
+                for value_range, action in actions.items():
+                    self.assertEqual(self.helix["looper"][cc][value_range], action)
+
+    def test_helix_snapshot_cc69_and_navigation_are_documented(self):
+        snapshots = self.helix["snapshots"]
+        self.assertEqual(snapshots["cc"], 69)
+        self.assertEqual(snapshots["select"], {
+            "value_min": 0, "value_max": 7, "snapshot_offset": 1,
+        })
+        self.assertEqual((snapshots["next"], snapshots["previous"]), (8, 9))
+
+    def test_generic_helix_capability_never_contains_our_channel_three(self):
+        def keys(value):
+            if isinstance(value, dict):
+                return set(value) | set().union(*(keys(v) for v in value.values()))
+            if isinstance(value, list):
+                return set().union(*(keys(v) for v in value)) if value else set()
+            return set()
+
+        self.assertNotIn("channel", keys(self.helix))
+        self.assertEqual(self.rig["second_helix"]["channel"], 3)
+
+    def test_vendor_and_rig_agree_on_second_helix_controller_numbers(self):
+        vendor_ccs = set(self.helix["looper"])
+        vendor_ccs |= {str(self.helix["transport_and_global"][name]["cc"])
+                       for name in ("tap_tempo", "tuner")}
+        vendor_ccs.add(str(self.helix["snapshots"]["cc"]))
+        self.assertEqual(set(self.rig["second_helix"]["cc"]), vendor_ccs - {"69"})
+        self.assertEqual(self.rig["second_helix"]["snapshot"]["cc"], 69)
+
+    def test_vendor_only_capabilities_do_not_become_rig_mappings(self):
+        configured = set(self.rig["second_helix"]["cc"])
+        self.assertTrue({"1", "2", "3", "49", "59", "70"}.isdisjoint(configured))
+        self.assertNotIn("midi_clock", self.rig["second_helix"])
+        self.assertNotIn("command_center", self.rig["second_helix"])
 
 
 if __name__ == "__main__":

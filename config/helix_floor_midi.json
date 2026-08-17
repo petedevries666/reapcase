@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "device": "Line 6 Helix Floor",
+  "documentation_version": "3.80",
+  "source": "https://line6.com/support/manuals/helix/",
+  "scope": "Vendor capability only; MIDI channel and stage routing belong in rig_midi.json.",
+  "preset_recall": {
+    "bank_select_lsb": {
+      "cc": 32,
+      "values": "0-7",
+      "action": "select_setlist"
+    },
+    "program_change": {
+      "values": "0-127",
+      "action": "select_preset_within_setlist"
+    },
+    "notes": "Receive direction. Send Bank/Program from Command Center is a separate capability."
+  },
+  "snapshots": {
+    "cc": 69,
+    "select": {
+      "value_min": 0,
+      "value_max": 7,
+      "snapshot_offset": 1
+    },
+    "next": 8,
+    "previous": 9
+  },
+  "looper": {
+    "60": {
+      "low": "overdub",
+      "high": "record",
+      "low_values": "0-63",
+      "high_values": "64-127"
+    },
+    "61": {
+      "low": "stop",
+      "high": "play",
+      "low_values": "0-63",
+      "high_values": "64-127"
+    },
+    "62": {
+      "high": "play_once",
+      "active_values": "64-127"
+    },
+    "63": {
+      "high": "undo_redo",
+      "active_values": "64-127"
+    },
+    "65": {
+      "low": "forward",
+      "high": "reverse",
+      "low_values": "0-63",
+      "high_values": "64-127"
+    },
+    "66": {
+      "low": "full_speed",
+      "high": "half_speed",
+      "low_values": "0-63",
+      "high_values": "64-127"
+    },
+    "67": {
+      "low": "bypass",
+      "high": "enable",
+      "low_values": "0-63",
+      "high_values": "64-127"
+    }
+  },
+  "transport_and_global": {
+    "tap_tempo": {
+      "cc": 64,
+      "active_values": "64-127"
+    },
+    "tuner": {
+      "cc": 68,
+      "off_values": "0-63",
+      "on_values": "64-127"
+    },
+    "all_bypass": {
+      "cc": 70,
+      "off_values": "0-63",
+      "on_values": "64-127"
+    }
+  },
+  "expression": {
+    "exp_1": {
+      "cc": 1,
+      "values": "0-127"
+    },
+    "exp_2": {
+      "cc": 2,
+      "values": "0-127"
+    },
+    "exp_3": {
+      "cc": 3,
+      "values": "0-127"
+    }
+  },
+  "footswitch_emulation": {
+    "cc_min": 49,
+    "cc_max": 59,
+    "footswitch_min": 1,
+    "footswitch_max": 11,
+    "release_values": "0-63",
+    "press_values": "64-127"
+  },
+  "assignments": {
+    "block_bypass": "Incoming MIDI CC may be learned/assigned to block bypass; assignment details are preset-specific.",
+    "parameter_control": "Incoming MIDI CC may be assigned to controllable parameters with configured minimum and maximum values.",
+    "evidence": "vendor_documented"
+  },
+  "midi_clock": {
+    "capability": "MIDI Clock send, receive, and off are configurable in Global Settings; tempo synchronization is global rather than a Showcase flag payload.",
+    "evidence": "vendor_documented"
+  },
+  "command_center": {
+    "message_types": [
+      "MIDI CC",
+      "MIDI CC Toggle",
+      "Bank/Program",
+      "MIDI Note",
+      "MMC",
+      "CV Out",
+      "Ext Amp",
+      "Hotkey"
+    ],
+    "notes": "Availability can depend on command source, physical Helix model, and connector; this inventory does not assert an undocumented source/type combination.",
+    "attachments": {
+      "footswitch": "Command Center commands may be assigned to footswitch command sources; the available command list is source- and model-dependent.",
+      "instant_command": "Instant Commands send their configured command on preset or snapshot recall; the available command list is source- and model-dependent.",
+      "snapshot": "A snapshot is not a third physical command source. It recalls documented Instant Command values and supported footswitch command states/values."
+    }
+  },
+  "reserved_ccs": [
+    {
+      "cc": "0",
+      "category": "global",
+      "function": "Bank Select MSB",
+      "values": "0-127"
+    },
+    {
+      "cc": "1-3",
+      "category": "expression",
+      "function": "EXP 1-3 emulation",
+      "values": "0-127"
+    },
+    {
+      "cc": "32",
+      "category": "global",
+      "function": "Bank Select LSB / setlist",
+      "values": "0-7"
+    },
+    {
+      "cc": "49-59",
+      "category": "footswitch",
+      "function": "FS1-FS11 emulation",
+      "values": "0-63 release; 64-127 press"
+    },
+    {
+      "cc": "60-63,65-67",
+      "category": "looper",
+      "function": "Looper controls",
+      "values": "See looper table"
+    },
+    {
+      "cc": "64",
+      "category": "tap",
+      "function": "Tap Tempo",
+      "values": "64-127 active"
+    },
+    {
+      "cc": "68",
+      "category": "tuner",
+      "function": "Tuner off/on",
+      "values": "0-63 off; 64-127 on"
+    },
+    {
+      "cc": "69",
+      "category": "snapshot",
+      "function": "Snapshot select/next/previous",
+      "values": "0-7 select; 8 next; 9 previous"
+    },
+    {
+      "cc": "70",
+      "category": "global",
+      "function": "All Bypass off/on",
+      "values": "0-63 off; 64-127 on"
+    }
+  ],
+  "freely_assignable_ccs": {
+    "status": "documented_with_reservations",
+    "notes": "Use non-reserved controller numbers for user assignments. This file intentionally expresses the official reserved set rather than guessing a single contiguous free range."
+  }
+}

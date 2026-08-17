@@ -15,35 +15,349 @@
     "stadium_flag_list": "https://manuals.line6.com/en/helix-stadium/live/flag-list",
     "stadium_global_settings": "https://manuals.line6.com/en/helix-stadium/live/global-settings",
     "stadium_song_view": "https://manuals.line6.com/en/helix-stadium/live/song-view",
-    "helix_floor_manual": "https://line6.com/support/manuals/helix/"
+    "helix_floor_manual": "https://line6.com/support/manuals/helix/",
+    "helix_floor_3_80_manual_index": "https://line6.com/support/manuals/helix/"
   },
   "timing_contract": {
     "format": "Bar-Beat.Tick",
     "ppqn": 240,
     "indexing": "one_based",
     "exact_beat_tick": 1,
-    "quarter_beat_ticks": [1, 61, 121, 181],
+    "quarter_beat_ticks": [
+      1,
+      61,
+      121,
+      181
+    ],
     "evidence": "vendor_documented+fixture_observed",
     "notes": "The official display uses 001 at a beat boundary. Fixtures also use one-based ticks, including non-grid positions; their Song ppqn is 240."
   },
   "capabilities": [
-    {"feature":"Start","domain":"showcase_flag","evidence":"vendor_documented+fixture_observed","vendor_status":"documented","fixture_status":"observed","observed_json_types":["START"],"current_reapcase_support":"semantic_partial","notes":"Vendor: defines initial tempo, time signature, and optional preset/snapshot recall. Parser exposes those fields from the observed layout; other positions remain opaque."},
-    {"feature":"End","domain":"showcase_flag","evidence":"vendor_documented+fixture_observed","vendor_status":"documented","fixture_status":"observed","observed_json_types":["END"],"current_reapcase_support":"semantic_partial","notes":"Vendor: end position plus fade and playback/end behavior options. Only the observed label is exposed; option fields remain opaque because UI documentation does not prove serialized positions."},
-    {"feature":"Marker","domain":"showcase_flag","evidence":"vendor_documented+fixture_observed","vendor_status":"documented","fixture_status":"observed","observed_json_types":["MARKER"],"current_reapcase_support":"semantic_partial","notes":"Vendor options include Pause at Marker, Count In, Cycle Marker, and preset/snapshot recall. Names and option values are fixture-confirmed; association of payload positions 3-9 with those UI options is inferred from field position."},
-    {"feature":"Cycle","domain":"showcase_flag","evidence":"vendor_documented+fixture_observed","vendor_status":"documented","fixture_status":"observed","observed_json_types":["CYCLE_START","CYCLE_END"],"current_reapcase_support":"semantic_partial","notes":"A cycle is represented empirically by paired start/end payload types. Repeat count and one option are exposed without assigning undocumented meaning to the latter."},
-    {"feature":"Preset/Snap","domain":"showcase_flag","evidence":"vendor_documented+fixture_observed","vendor_status":"documented","fixture_status":"observed","observed_json_types":["PRESETSNAP"],"current_reapcase_support":"semantic_partial","notes":"Vendor recalls a preset and/or snapshot. Setlist, preset, and snapshot positions are empirically interpreted."},
-    {"feature":"Looper","domain":"showcase_flag","evidence":"vendor_documented+fixture_observed","vendor_status":"documented","fixture_status":"observed","observed_json_types":["LOOPER"],"current_reapcase_support":"semantic_partial","notes":"Native Song flags are distinct from both global MIDI looper control sets. Observed label and action strings are exposed losslessly."},
-    {"feature":"Utility","domain":"showcase_flag","evidence":"vendor_documented","vendor_status":"documented","fixture_status":"not_observed","observed_json_types":[],"current_reapcase_support":"unsupported_semantic","notes":"No fixture payload exists; do not add a JSON serializer or semantic layout."},
-    {"feature":"Ext Amp","domain":"showcase_flag","evidence":"vendor_documented","vendor_status":"documented","fixture_status":"not_observed","observed_json_types":[],"current_reapcase_support":"unsupported_semantic","notes":"No fixture payload exists; do not add a JSON serializer or semantic layout."},
-    {"feature":"MIDI Bank/Program","domain":"showcase_flag","evidence":"vendor_documented+fixture_observed","vendor_status":"documented","fixture_status":"observed","observed_json_types":["MIDI_BANK_PROGRAM"],"current_reapcase_support":"semantic_partial","notes":"A Showcase flag sends Bank Select/Program Change. This direction differs from Stadium receiving Bank/PC for preset recall."},
-    {"feature":"MIDI CC","domain":"showcase_flag","evidence":"vendor_documented+fixture_observed","vendor_status":"documented","fixture_status":"observed","observed_json_types":["MIDI_CC"],"current_reapcase_support":"semantic_partial","notes":"Observed layouts provide channel, controller, and value."},
-    {"feature":"MIDI MMC","domain":"showcase_flag","evidence":"vendor_documented","vendor_status":"documented","fixture_status":"not_observed","observed_json_types":[],"current_reapcase_support":"unsupported_semantic","notes":"Supported by the vendor UI, but its serialized JSON payload is unknown. Do not invent one."},
-    {"feature":"Hotkey","domain":"showcase_flag","evidence":"vendor_documented","vendor_status":"documented","fixture_status":"not_observed","observed_json_types":[],"current_reapcase_support":"unsupported_semantic","notes":"No fixture payload exists; do not add a JSON serializer or semantic layout."},
-    {"feature":"Time","domain":"showcase_flag","evidence":"vendor_documented+fixture_observed","vendor_status":"documented","fixture_status":"observed","observed_json_types":["TIME"],"current_reapcase_support":"semantic_partial","notes":"Vendor: tempo and time-signature changes. Observed fields expose both."},
-    {"feature":"Global MIDI channel","domain":"stadium_global_midi","evidence":"vendor_documented+rig_defined","vendor_status":"documented","fixture_status":"not_applicable","observed_json_types":[],"current_reapcase_support":"configured","notes":"Configurable globally; vendor default is channel 1. rig_midi.json currently defines channel 1."},
-    {"feature":"Global transport and selection CCs","domain":"stadium_global_midi","evidence":"vendor_documented+rig_defined","vendor_status":"documented","fixture_status":"not_applicable","observed_json_types":[],"current_reapcase_support":"configured","notes":"CC10 Song, 32 Setlist, 46 Marker, 47 Return to Zero, 48 Cycle, 49 Previous/Next Song, 50 Previous/Next Marker, 51 Play/Pause, 63 Playlist, 64 Tap Tempo, and 69 snapshot 1-8/next/previous match the current rig mapping."},
-    {"feature":"Stadium global looper remote","domain":"stadium_global_midi","evidence":"vendor_documented+rig_defined","vendor_status":"documented","fixture_status":"not_applicable","observed_json_types":[],"current_reapcase_support":"configured","notes":"CC52 Clear; 53 Undo/Redo; 54 Full/Half; 55 Forward/Reverse; 58 Overdub/Record; 59 Stop/Play; 60 Play Once; 62 Looper Off/On."},
-    {"feature":"Second Helix Floor looper remote","domain":"helix_floor_midi","evidence":"vendor_documented+fixture_observed+rig_defined","vendor_status":"documented","fixture_status":"observed","observed_json_types":["MIDI_CC"],"current_reapcase_support":"configured","notes":"CC60 Record/Overdub; 61 Play/Stop; 62 Play Once; 63 Undo/Redo; 65 Forward/Reverse; 66 Full/Half; 67 Looper Block On/Off. This independent rig uses channel 3."},
-    {"feature":"Stadium preset recall via received Bank/PC","domain":"stadium_global_midi","evidence":"vendor_documented","vendor_status":"documented","fixture_status":"not_applicable","observed_json_types":[],"current_reapcase_support":"not_configured","notes":"Incoming Bank Select and Program Change control Stadium preset recall; this is not a Showcase MIDI_BANK_PROGRAM flag sent on playback."}
+    {
+      "feature": "Start",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented+fixture_observed",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "START"
+      ],
+      "current_reapcase_support": "semantic_partial",
+      "notes": "Vendor: defines initial tempo, time signature, and optional preset/snapshot recall. Parser exposes those fields from the observed layout; other positions remain opaque."
+    },
+    {
+      "feature": "End",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented+fixture_observed",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "END"
+      ],
+      "current_reapcase_support": "semantic_partial",
+      "notes": "Vendor: end position plus fade and playback/end behavior options. Only the observed label is exposed; option fields remain opaque because UI documentation does not prove serialized positions."
+    },
+    {
+      "feature": "Marker",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented+fixture_observed",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "MARKER"
+      ],
+      "current_reapcase_support": "semantic_partial",
+      "notes": "Vendor options include Pause at Marker, Count In, Cycle Marker, and preset/snapshot recall. Names and option values are fixture-confirmed; association of payload positions 3-9 with those UI options is inferred from field position."
+    },
+    {
+      "feature": "Cycle",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented+fixture_observed",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "CYCLE_START",
+        "CYCLE_END"
+      ],
+      "current_reapcase_support": "semantic_partial",
+      "notes": "A cycle is represented empirically by paired start/end payload types. Repeat count and one option are exposed without assigning undocumented meaning to the latter."
+    },
+    {
+      "feature": "Preset/Snap",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented+fixture_observed",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "PRESETSNAP"
+      ],
+      "current_reapcase_support": "semantic_partial",
+      "notes": "Vendor recalls a preset and/or snapshot. Setlist, preset, and snapshot positions are empirically interpreted."
+    },
+    {
+      "feature": "Looper",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented+fixture_observed",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "LOOPER"
+      ],
+      "current_reapcase_support": "semantic_partial",
+      "notes": "Native Song flags are distinct from both global MIDI looper control sets. Observed label and action strings are exposed losslessly."
+    },
+    {
+      "feature": "Utility",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "unsupported_semantic",
+      "notes": "No fixture payload exists; do not add a JSON serializer or semantic layout."
+    },
+    {
+      "feature": "Ext Amp",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "unsupported_semantic",
+      "notes": "No fixture payload exists; do not add a JSON serializer or semantic layout."
+    },
+    {
+      "feature": "MIDI Bank/Program",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented+fixture_observed",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "MIDI_BANK_PROGRAM"
+      ],
+      "current_reapcase_support": "semantic_partial",
+      "notes": "A Showcase flag sends Bank Select/Program Change. This direction differs from Stadium receiving Bank/PC for preset recall."
+    },
+    {
+      "feature": "MIDI CC",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented+fixture_observed",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "MIDI_CC"
+      ],
+      "current_reapcase_support": "semantic_partial",
+      "notes": "Observed layouts provide channel, controller, and value."
+    },
+    {
+      "feature": "MIDI MMC",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "unsupported_semantic",
+      "notes": "Supported by the vendor UI, but its serialized JSON payload is unknown. Do not invent one."
+    },
+    {
+      "feature": "Hotkey",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "unsupported_semantic",
+      "notes": "No fixture payload exists; do not add a JSON serializer or semantic layout."
+    },
+    {
+      "feature": "Time",
+      "domain": "showcase_flag",
+      "evidence": "vendor_documented+fixture_observed",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "TIME"
+      ],
+      "current_reapcase_support": "semantic_partial",
+      "notes": "Vendor: tempo and time-signature changes. Observed fields expose both."
+    },
+    {
+      "feature": "Global MIDI channel",
+      "domain": "stadium_global_midi",
+      "evidence": "vendor_documented+rig_defined",
+      "vendor_status": "documented",
+      "fixture_status": "not_applicable",
+      "observed_json_types": [],
+      "current_reapcase_support": "configured",
+      "notes": "Configurable globally; vendor default is channel 1. rig_midi.json currently defines channel 1."
+    },
+    {
+      "feature": "Global transport and selection CCs",
+      "domain": "stadium_global_midi",
+      "evidence": "vendor_documented+rig_defined",
+      "vendor_status": "documented",
+      "fixture_status": "not_applicable",
+      "observed_json_types": [],
+      "current_reapcase_support": "configured",
+      "notes": "CC10 Song, 32 Setlist, 46 Marker, 47 Return to Zero, 48 Cycle, 49 Previous/Next Song, 50 Previous/Next Marker, 51 Play/Pause, 63 Playlist, 64 Tap Tempo, and 69 snapshot 1-8/next/previous match the current rig mapping."
+    },
+    {
+      "feature": "Stadium global looper remote",
+      "domain": "stadium_global_midi",
+      "evidence": "vendor_documented+rig_defined",
+      "vendor_status": "documented",
+      "fixture_status": "not_applicable",
+      "observed_json_types": [],
+      "current_reapcase_support": "configured",
+      "notes": "CC52 Clear; 53 Undo/Redo; 54 Full/Half; 55 Forward/Reverse; 58 Overdub/Record; 59 Stop/Play; 60 Play Once; 62 Looper Off/On."
+    },
+    {
+      "feature": "Stadium preset recall via received Bank/PC",
+      "domain": "stadium_global_midi",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_applicable",
+      "observed_json_types": [],
+      "current_reapcase_support": "not_configured",
+      "notes": "Incoming Bank Select and Program Change control Stadium preset recall; this is not a Showcase MIDI_BANK_PROGRAM flag sent on playback."
+    },
+    {
+      "feature": "Helix Floor preset recall",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented+fixture_observed+rig_defined",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "MIDI_CC",
+        "MIDI_BANK_PROGRAM"
+      ],
+      "current_reapcase_support": "configured",
+      "notes": "Incoming CC32 Bank Select LSB selects setlist 0-7 and PC 0-127 selects its preset. Fixtures instead show Stadium sending program-only MIDI_BANK_PROGRAM flags to our channel-3 rig; direction remains distinct."
+    },
+    {
+      "feature": "Helix Floor snapshots CC69",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented+fixture_observed+rig_defined",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "MIDI_CC"
+      ],
+      "current_reapcase_support": "configured",
+      "notes": "Values 0-7 select Snapshots 1-8; 8 is next and 9 previous. Our rig and fixtures cover direct selection only."
+    },
+    {
+      "feature": "Helix Floor looper CC60/61",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented+fixture_observed+rig_defined",
+      "vendor_status": "documented",
+      "fixture_status": "observed",
+      "observed_json_types": [
+        "MIDI_CC"
+      ],
+      "current_reapcase_support": "configured",
+      "notes": "CC60: 0-63 Overdub, 64-127 Record. CC61: 0-63 Stop, 64-127 Play. Both appear in channel-3 fixtures."
+    },
+    {
+      "feature": "Helix Floor looper CC62/63/65/66/67",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented+rig_defined",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "configured",
+      "notes": "CC62 high Play Once; CC63 high Undo/Redo; CC65 low/high Forward/Reverse; CC66 Full/Half Speed; CC67 Bypass/Enable. Rig-defined but absent from fixtures."
+    },
+    {
+      "feature": "Helix Floor Tap Tempo CC64",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented+rig_defined",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "configured",
+      "notes": "CC64 values 64-127 activate Tap Tempo; low values do not."
+    },
+    {
+      "feature": "Helix Floor Tuner CC68",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented+rig_defined",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "configured_with_discrepancy",
+      "notes": "Vendor values 0-63 mean Tuner Off and 64-127 Tuner On. Current rig data collapses both ranges to Tuner and needs a later focused correction."
+    },
+    {
+      "feature": "Helix Floor expression emulation",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "not_configured",
+      "notes": "CC1, CC2, and CC3 emulate EXP 1, EXP 2, and EXP 3 over values 0-127."
+    },
+    {
+      "feature": "Helix Floor footswitch emulation",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "not_configured",
+      "notes": "CC49-59 emulate FS1-FS11; 0-63 release/off and 64-127 press/on."
+    },
+    {
+      "feature": "Helix Floor block bypass assignment",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "not_configured",
+      "notes": "Incoming user-assigned MIDI CC may control block bypass; assignments are preset-specific."
+    },
+    {
+      "feature": "Helix Floor parameter control",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "not_configured",
+      "notes": "Incoming user-assigned MIDI CC may control parameters using configured minimum and maximum values."
+    },
+    {
+      "feature": "Helix Floor MIDI Clock",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "not_configured",
+      "notes": "Global MIDI Clock send, receive, and off behavior is documented; no current fixture or rig mapping establishes use."
+    },
+    {
+      "feature": "Helix Floor Command Center output",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "semantic_partial",
+      "notes": "Command Center supports MIDI CC, CC Toggle, Bank/Program, MIDI Note, MMC, plus applicable CV Out, Ext Amp, and Hotkey commands. Fixtures show Stadium-originated CC and Bank/Program messages, not Helix Command Center configuration."
+    },
+    {
+      "feature": "Helix Floor All Bypass CC70",
+      "domain": "helix_floor",
+      "evidence": "vendor_documented",
+      "vendor_status": "documented",
+      "fixture_status": "not_observed",
+      "observed_json_types": [],
+      "current_reapcase_support": "not_configured",
+      "notes": "CC70 uses 0-63 off and 64-127 on."
+    }
   ]
 }
