@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from stadium_reaper_bridge.editor.looper import derive_looper_regions
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.editor.structure import (derive_structure_layout,
                                                      sticky_label_x,
@@ -66,6 +67,65 @@ class StructureLayoutTests(unittest.TestCase):
                                              "VIDEO", "MIDI / OTHER"})
         for lane in LANE_PALETTE:
             self.assertNotEqual(lane_colors(lane).normal, lane_colors(lane).selected)
+
+
+class LooperRegionTests(unittest.TestCase):
+    def regions(self, model, system):
+        return derive_looper_regions(model.timeline.events, model._units, system,
+                                     model.song_end_units)
+
+    def test_stadium_states_stop_and_point_actions(self):
+        model = model_for([
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "010-01.001|LOOPER;RECORD;1;Record",
+            "014-01.001|LOOPER;PLAY;1;Play",
+            "016-01.001|LOOPER;REVERSE;1;Reverse",
+            "018-01.001|LOOPER;HALF SPEED;1;Half Speed",
+            "020-01.001|LOOPER;STOP;1;Stop",
+            "024-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ])
+        regions = self.regions(model, "STADIUM")
+        self.assertEqual([(r.state, r.start_units, r.end_units) for r in regions],
+                         [("RECORD", model._units(model.timeline.events[1].position),
+                           model._units(model.timeline.events[2].position)),
+                          ("PLAY", model._units(model.timeline.events[2].position),
+                           model._units(model.timeline.events[5].position))])
+        self.assertEqual([r.source_event_indices for r in regions], [(1,), (2,)])
+
+    def test_second_helix_is_independent_and_open_ended(self):
+        model = model_for([
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "010-01.001|LOOPER;PLAY;1;Play",
+            "012-01.001|MIDI_CC;BASS PLAY;4;CC;3;61;127",
+            "014-01.001|LOOPER;STOP;1;Stop",
+            "016-01.001|MIDI_CC;BASS OVERDUB;4;CC;3;60;0",
+            "020-01.001|MIDI_CC;BASS STOP;4;CC;3;61;0",
+            "024-01.001|LOOPER;RECORD;1;Record",
+            "028-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ])
+        stadium = self.regions(model, "STADIUM")
+        helix = self.regions(model, "SECOND HELIX")
+        self.assertEqual((stadium[0].start_units, stadium[0].end_units),
+                         (model._units(model.timeline.events[1].position),
+                          model._units(model.timeline.events[3].position)))
+        self.assertEqual([(r.state, r.end_units) for r in helix],
+                         [("PLAY", model._units(model.timeline.events[4].position)),
+                          ("OVERDUB", model._units(model.timeline.events[5].position))])
+        self.assertTrue(stadium[-1].open_ended)
+        self.assertEqual(stadium[-1].end_units, model.song_end_units)
+
+    def test_malformed_stop_and_repeated_play_are_conservative(self):
+        model = model_for([
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "002-01.001|LOOPER;STOP;1;Stop",
+            "003-01.001|LOOPER;PLAY;1;Play",
+            "005-01.001|LOOPER;PLAY;1;Play",
+            "007-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ])
+        regions = self.regions(model, "STADIUM")
+        self.assertEqual(len(regions), 2)
+        self.assertEqual(regions[0].end_units, regions[1].start_units)
+        self.assertTrue(regions[1].open_ended)
 
 
 class EditingTests(unittest.TestCase):
