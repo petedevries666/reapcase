@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 LANE_HEIGHT = 72
 HEADER_WIDTH = 140
+RULER_HEIGHT = 26
 DEFAULT_PIXELS_PER_BEAT = 90.0
 # CLOCKSICK reaches beat 993; a roughly one-pixel minimum allows its complete
 # timeline (plus breathing room) to fit in the editor's standard 1180px window.
@@ -20,6 +21,26 @@ MAX_PIXELS_PER_BEAT = 360.0
 def x_for_position(position, ppqn: int, beats_per_bar: int, pixels_per_beat: float) -> float:
     beats = (position.bar - 1) * beats_per_bar + position.beat - 1 + (position.tick - 1) / ppqn
     return HEADER_WIDTH + beats * pixels_per_beat
+
+
+def timeline_x(units: int, ppqn: int, pixels_per_beat: float) -> float:
+    """Map timeline units onto the one canonical editor origin."""
+    return HEADER_WIDTH + units / ppqn * pixels_per_beat
+
+
+def units_at_x(x: float, ppqn: int, pixels_per_beat: float) -> int:
+    """Map a canvas coordinate back to non-negative timeline units."""
+    return max(0, round((x - HEADER_WIDTH) / pixels_per_beat * ppqn))
+
+
+def track_header_rect(lane_top: float) -> tuple[float, float, float, float]:
+    return (0.0, lane_top, float(HEADER_WIDTH), lane_top + LANE_HEIGHT)
+
+
+def waveform_clip_rect(lane_top: float, end_x: float) -> tuple[float, float, float, float]:
+    """Audio clips start at the origin; their header-side edge is exclusive."""
+    return (float(HEADER_WIDTH), lane_top + 22, max(float(HEADER_WIDTH), end_x),
+            lane_top + 62)
 
 
 def drag_units(pixel_delta: float, pixels_per_beat: float, ppqn: int) -> int:

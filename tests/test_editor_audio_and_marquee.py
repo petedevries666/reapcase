@@ -6,9 +6,10 @@ import wave
 
 from stadium_reaper_bridge.editor.audio import (AudioResolver, TempoChange, TempoMap,
                                                  read_wav_info, stadium_backup_audio_paths)
-from stadium_reaper_bridge.editor.layout import (HEADER_WIDTH, horizontal_wheel_units,
+from stadium_reaper_bridge.editor.layout import (HEADER_WIDTH, RULER_HEIGHT, horizontal_wheel_units,
                                                   marquee_candidates, normalized_rectangle,
-                                                  x_for_position)
+                                                  timeline_x, track_header_rect, units_at_x,
+                                                  waveform_clip_rect, x_for_position)
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.midi import RigMidiDecoder
 from stadium_reaper_bridge.stadium import MusicalPosition, StadiumSong
@@ -115,6 +116,19 @@ class AudioAndMarqueeTests(unittest.TestCase):
         self.assertEqual(tempo.seconds_to_musical_position(4), MusicalPosition(2, 3, 1))
         audio_x = HEADER_WIDTH + tempo.seconds_to_units(4) / ppqn * 90
         self.assertEqual(audio_x, x_for_position(MusicalPosition(2, 3, 1), ppqn, 4, 90))
+
+    def test_audio_origin_header_boundary_and_zoom_scroll_are_canonical(self):
+        self.assertEqual(timeline_x(0, 240, 90), HEADER_WIDTH)
+        self.assertEqual(units_at_x(HEADER_WIDTH, 240, 90), 0)
+        header = track_header_rect(RULER_HEIGHT)
+        waveform = waveform_clip_rect(RULER_HEIGHT, HEADER_WIDTH + 900)
+        # The rectangles share a boundary but have no positive-area overlap.
+        self.assertEqual(header[2], waveform[0])
+        self.assertFalse(header[2] > waveform[0])
+        for scale in (1, 90, 360):
+            for scroll in (0, 50, 500):
+                self.assertEqual(timeline_x(0, 240, scale), HEADER_WIDTH)
+                self.assertEqual(units_at_x(HEADER_WIDTH, 240, scale), 0)
 
     def test_fit_extent_includes_resolved_audio_duration(self):
         with tempfile.TemporaryDirectory() as directory:

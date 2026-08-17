@@ -9,10 +9,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from concurrent.futures import ThreadPoolExecutor
 
-from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT,
+from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_HEIGHT,
                      drag_units, fit_song_scale, horizontal_wheel_units,
                      marquee_candidates, normalized_rectangle, snap_drag_delta,
-                     x_for_position, zoom_about_cursor)
+                     timeline_x, units_at_x, x_for_position, zoom_about_cursor)
 from .model import EditorModel, LANES, MovePreview
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
@@ -95,6 +95,7 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.bind("<Button-5>", self.horizontal_wheel)
         self.canvas.bind("<Button-2>", lambda event: self.canvas.scan_mark(event.x, event.y))
         self.canvas.bind("<B2-Motion>", lambda event: self.canvas.scan_dragto(event.x, event.y, gain=1))
+        self.canvas.bind("<Motion>", self.timeline_hover)
         self._update_zoom_label()
         ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w", padding=5).pack(fill="x")
 
@@ -178,11 +179,14 @@ class ReapcaseEditor(tk.Tk):
         total_beats = m.song_end_units / m.song.ppqn + 2
         width = HEADER_WIDTH + total_beats * self.pixels_per_beat
         all_lanes = list(LANES) + [f"AUDIO {track.number}" for track in m.audio_tracks]
-        height = len(all_lanes) * LANE_HEIGHT
+        height = RULER_HEIGHT + len(all_lanes) * LANE_HEIGHT
+        # The ruler is a dedicated seek surface, deliberately separate from
+        # both the transport above and the editable lanes below.
+        self.canvas.create_rectangle(HEADER_WIDTH, 0, width, RULER_HEIGHT,
+                                     fill="#252d38", outline="#465363", tags=("ruler",))
         for lane_index, lane in enumerate(all_lanes):
-            y = lane_index * LANE_HEIGHT
+            y = RULER_HEIGHT + lane_index * LANE_HEIGHT
             self.canvas.create_rectangle(0, y, width, y + LANE_HEIGHT, fill="#202631" if lane_index % 2 else "#1c222c", outline="#394250")
-            self.canvas.create_text(8, y + 12, text=lane, anchor="nw", fill="#9ec8ff", font=("TkDefaultFont", 9, "bold"))
         max_bar = max(1, int(total_beats / m.numerator) + 2)
         for bar in range(1, max_bar + 1):
             for beat in range(1, m.numerator + 1):
@@ -190,8 +194,10 @@ class ReapcaseEditor(tk.Tk):
                 prominent = beat == 1
                 if not prominent and self.pixels_per_beat < 28:
                     continue
-                self.canvas.create_line(x, 0, x, height, fill="#708096" if prominent else "#343f4d", width=2 if prominent else 1)
-                if prominent: self.canvas.create_text(x + 4, 3, text=f"{bar:03d}-01.001", anchor="nw", fill="#b8c2ce")
+                self.canvas.create_line(x, RULER_HEIGHT, x, height, fill="#708096" if prominent else "#343f4d", width=2 if prominent else 1)
+                self.canvas.create_line(x, 17 if prominent else 21, x, RULER_HEIGHT,
+                                        fill="#9aa9bb" if prominent else "#667487")
+                if prominent: self.canvas.create_text(x + 4, 2, text=f"{bar:03d}", anchor="nw", fill="#c2ccd8")
                 if self.pixels_per_beat >= 100:
                     for quarter in range(1, 4):
                         qx = x + quarter * self.pixels_per_beat / 4
@@ -200,7 +206,7 @@ class ReapcaseEditor(tk.Tk):
         self.event_bounds = {}
         for i, event in enumerate(m.timeline.events):
             lane = LANES.index(m.lane(event)); x = x_for_position(event.position, m.song.ppqn, m.numerator, self.pixels_per_beat)
-            y = lane * LANE_HEIGHT + 27; selected = i in m.selected
+            y = RULER_HEIGHT + lane * LANE_HEIGHT + 27; selected = i in m.selected
             previewed = preview_selection is not None and i in preview_selection
             text = f"{m.label(event)}  {event.position.render()}"
             item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w", fill="#101318", tags=(f"event:{i}",))
@@ -212,7 +218,7 @@ class ReapcaseEditor(tk.Tk):
             self.event_bounds[i] = (box[0]-4, box[1]-3, box[2]+4, box[3]+3)
             self.canvas.tag_raise(item)
         for lane_offset, track in enumerate(m.audio_tracks):
-            y = (len(LANES) + lane_offset) * LANE_HEIGHT
+            y = RULER_HEIGHT + (len(LANES) + lane_offset) * LANE_HEIGHT
             flags = " ".join(word for enabled, word in ((track.source.get("mute"), "MUTE"),
                                                           (track.source.get("solo"), "SOLO")) if enabled)
             levels = f"trim {track.source.get('trim', '?')}  gain {track.source.get('gain', '?')}"
@@ -270,9 +276,43 @@ class ReapcaseEditor(tk.Tk):
             self._draw_drag_preview(self.drag_preview)
         if m.tempo_map:
             play_units = m.tempo_map.seconds_to_units(self.audio_engine.current_time)
-            play_x = HEADER_WIDTH + play_units / m.song.ppqn * self.pixels_per_beat
+            play_x = timeline_x(play_units, m.song.ppqn, self.pixels_per_beat)
             self.canvas.create_line(play_x, 0, play_x, height, fill="#ff5b57", width=2,
                                     tags=("playhead",))
+        # Draw the fixed header last so scrollable lane content can never show
+        # through it. Its right edge is the same origin used by every timeline
+        # element above.
+        view_left = self.canvas.canvasx(0)
+        self.canvas.create_rectangle(view_left, 0, view_left + HEADER_WIDTH, RULER_HEIGHT,
+                                     fill="#171b22", outline="#394250",
+                                     tags=("fixed-header",))
+        for lane_index, lane in enumerate(all_lanes):
+            y = RULER_HEIGHT + lane_index * LANE_HEIGHT
+            self.canvas.create_rectangle(view_left, y, view_left + HEADER_WIDTH, y + LANE_HEIGHT,
+                                         fill="#202631" if lane_index % 2 else "#1c222c",
+                                         outline="#394250", tags=("fixed-header",))
+            self.canvas.create_text(view_left + 8, y + 12, text=lane, anchor="nw",
+                                    fill="#9ec8ff", font=("TkDefaultFont", 9, "bold"),
+                                    tags=("fixed-header",))
+            if lane_index >= len(LANES):
+                audio_index = lane_index - len(LANES)
+                track = m.audio_tracks[audio_index]
+                flags = " ".join(word for enabled, word in
+                                 ((track.source.get("mute"), "MUTE"),
+                                  (track.source.get("solo"), "SOLO")) if enabled)
+                levels = f"trim {track.source.get('trim', '?')}  gain {track.source.get('gain', '?')}"
+                self.canvas.create_text(view_left + 8, y + 28, anchor="nw", fill="#c6d4e5",
+                                        text=f"{track.name}\n{flags} {levels}".strip(),
+                                        tags=("fixed-header",))
+                for column, (label, enabled) in enumerate(
+                        (("M", self.monitor_muted[audio_index]),
+                         ("S", self.monitor_solo[audio_index]))):
+                    x0 = view_left + 76 + column * 27
+                    tags = ("fixed-header", f"monitor:{audio_index}:{label}")
+                    self.canvas.create_rectangle(x0, y + 5, x0 + 23, y + 23,
+                        fill="#d36b62" if enabled and label == "M" else
+                             ("#e3bf58" if enabled else "#394552"), tags=tags)
+                    self.canvas.create_text(x0 + 11, y + 14, text=label, fill="white", tags=tags)
         unsupported = ", ".join(m.unsupported_types) or "none"
         overflow = f" | WARNING: {m.audio_overflow} tracks above display limit preserved" if m.audio_overflow else ""
         tempo = f"{m.tempo:g} BPM" if m.tempo is not None else "tempo unavailable"
@@ -298,7 +338,7 @@ class ReapcaseEditor(tk.Tk):
             x = x_for_position(position, self.model.song.ppqn, self.model.numerator, self.pixels_per_beat)
             if not preview.valid:
                 x += preview.delta_units / self.model.song.ppqn * self.pixels_per_beat
-            y = LANES.index(self.model.lane(event)) * LANE_HEIGHT + 27
+            y = RULER_HEIGHT + LANES.index(self.model.lane(event)) * LANE_HEIGHT + 27
             text = f"{self.model.label(event)}  {position.render()}"
             item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w",
                                            fill="#381b1b" if not preview.valid else "#263241",
@@ -330,7 +370,7 @@ class ReapcaseEditor(tk.Tk):
     def click(self, event):
         if not self.model: return
         index = self._event_index(event); x = self.canvas.canvasx(event.x)
-        units = max(0, round((x - HEADER_WIDTH) / self.pixels_per_beat * self.model.song.ppqn))
+        units = units_at_x(x, self.model.song.ppqn, self.pixels_per_beat)
         self.model.cursor = self.model._position(units)
         monitor = next((tag for tag in self.canvas.gettags("current") if tag.startswith("monitor:")), None)
         if monitor:
@@ -343,7 +383,8 @@ class ReapcaseEditor(tk.Tk):
                 self.audio_engine.set_monitor(resolved_index,
                     muted=self.monitor_muted[lane_index], solo=self.monitor_solo[lane_index])
             self.redraw(); return
-        if self.canvas.canvasy(event.y) < 24:
+        if (self.canvas.canvasy(event.y) < RULER_HEIGHT and
+                event.x >= HEADER_WIDTH):
             self.seek_units(units); self.redraw(); return
         if index is not None:
             self.model.select_for_drag(index, toggle=bool(event.state & 0x4))
@@ -355,6 +396,17 @@ class ReapcaseEditor(tk.Tk):
             self.marquee_base = set(self.model.selected)
             self.marquee_mode = "toggle" if event.state & 0x4 else ("add" if event.state & 0x1 else "replace")
         self.redraw()
+
+    def timeline_hover(self, event):
+        """Advertise the ruler seek affordance and update its position readout."""
+        if not self.model:
+            return
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        over_ruler = y < RULER_HEIGHT and event.x >= HEADER_WIDTH
+        self.canvas.configure(cursor="crosshair" if over_ruler else "")
+        if over_ruler:
+            self.model.cursor = self.model._position(
+                units_at_x(x, self.model.song.ppqn, self.pixels_per_beat))
 
     def drag(self, event):
         if not self.model:

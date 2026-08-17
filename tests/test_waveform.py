@@ -119,7 +119,18 @@ class WaveformTests(unittest.TestCase):
         self.assertTrue(active)
         self.assertLessEqual(len(active), 2)  # narrow vertical impulse, never a polygon slope
         self.assertTrue(ppm.startswith(b"P6\n"))
-        self.assertEqual(left, 0)
+        self.assertEqual(left, HEADER_WIDTH)
+
+    def test_viewport_waveform_is_clipped_to_canonical_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "origin.wav"
+            write_impulses(path, RATE, {0: (1, 1)})
+            summary = extract_waveform(path)
+            tempo, _ = self.tempo()
+            left, columns = viewport_columns(summary, tempo, 240, 180, 0, 400,
+                                              HEADER_WIDTH, margin=32)
+        self.assertEqual(left, HEADER_WIDTH)
+        self.assertGreater(columns[0][1], .9)
 
     def test_click_sync_reports_exact_frames_and_signed_deviation(self):
         tempo, position = self.tempo()
