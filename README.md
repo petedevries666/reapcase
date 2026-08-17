@@ -1,4 +1,6 @@
-# Stadium Reaper Bridge
+# Reapcase
+
+> This is the first user-facing Reapcase milestone. Preserve the existing backend architecture and treat the GUI as a thin layer over it.
 
 Socle minimal pour une conversion **sans perte** des Songs Helix Stadium vers
 REAPER, puis de REAPER vers Stadium.
@@ -27,6 +29,26 @@ Python 3.11+ suffit, sans dépendance d'exécution :
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
+
+Lancer l'éditeur desktop (bibliothèque standard Tkinter uniquement) :
+
+```bash
+PYTHONPATH=src python -m stadium_reaper_bridge.editor.app
+```
+
+Utilisez **Open JSON** pour charger une Song, sélectionnez les flags dans les
+lanes STRUCTURE, STADIUM, SECOND HELIX, VIDEO et MIDI / OTHER, puis déplacez-les
+par glisser-déposer ou avec **Shift Selected**. **Save As JSON** exige une
+nouvelle destination et affiche le bilan lossless avant export. Le panneau du
+bas indique sélection, curseur, modifications et types non pris en charge.
+
+### Limites du MVP
+
+- la géométrie des déplacements utilise la signature initiale (les changements
+  de signature restent visibles mais ne redéfinissent pas encore la grille) ;
+- pas de suppression ni d'édition de payload, d'audio ou de fichiers `.peak` ;
+- pas d'intégration REAPER ni de reconstruction de backup Stadium ;
+- zoom et édition détaillée des familles vendor-only sont reportés.
 
 Exemple d'utilisation du modèle lossless :
 
