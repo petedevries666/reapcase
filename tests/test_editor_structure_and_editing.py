@@ -3,11 +3,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from stadium_reaper_bridge.editor.looper import derive_looper_regions
+from stadium_reaper_bridge.editor.looper import (derive_looper_regions,
+                                                  looper_display_label)
 from stadium_reaper_bridge.editor.model import EditorModel, LANES
 from stadium_reaper_bridge.editor.composite import (
     COMMANDS_HEIGHT, COMPOSITE_HEIGHT, event_sublane, lane_height, lane_top,
-    sublane_bounds, sublane_content_bounds)
+    looper_item_bounds, sublane_bounds, sublane_content_bounds)
 from stadium_reaper_bridge.editor.structure import (derive_structure_layout,
                                                      sticky_label_x,
                                                      structure_sublane)
@@ -133,6 +134,33 @@ class LooperRegionTests(unittest.TestCase):
 
 
 class CompositeLaneTests(unittest.TestCase):
+    def test_all_looper_items_share_vertical_geometry(self):
+        for lane in ("STADIUM", "SECOND HELIX"):
+            expected = sublane_content_bounds(LANES, lane, "looper")
+            for label, width in (("RECORD", 160), ("OVERDUB", 220),
+                                 ("STOP", 44), ("REVERSE", 68),
+                                 ("HALF SPEED", 92)):
+                with self.subTest(lane=lane, label=label):
+                    bounds = looper_item_bounds(LANES, lane, 500, 500 + width)
+                    self.assertEqual((bounds[1], bounds[3]), expected)
+                    self.assertEqual(bounds[0], 500)
+
+    def test_looper_display_labels_use_semantics_without_mutating_sources(self):
+        model = model_for([
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "002-01.001|LOOPER;HALF SPEED;1;Half Speed",
+            "003-01.001|MIDI_CC;BASS STOP;4;CC;3;61;0",
+            "004-01.001|MIDI_CC;BASS REVERSE;4;CC;3;65;127",
+            "005-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ])
+        stadium, stop, reverse = model.timeline.events[1:4]
+        original_stop = stop.source.render()
+        self.assertEqual(looper_display_label(stadium, "STADIUM"), "HALF SPEED")
+        self.assertEqual(looper_display_label(stop, "SECOND HELIX"), "STOP")
+        self.assertEqual(looper_display_label(reverse, "SECOND HELIX"), "REVERSE")
+        self.assertEqual(stop.source.render(), original_stop)
+        self.assertIn("BASS STOP", stop.source.render())
+
     def test_composite_heights_bounds_and_following_lane_positions(self):
         self.assertEqual(lane_height("STADIUM"), COMPOSITE_HEIGHT)
         self.assertEqual(lane_height("SECOND HELIX"), COMPOSITE_HEIGHT)

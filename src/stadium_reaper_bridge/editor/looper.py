@@ -20,7 +20,8 @@ class LooperRegion:
     open_ended: bool = False
 
 
-def _looper_action(event: TimelineEvent, system: str) -> str | None:
+def looper_action(event: TimelineEvent, system: str) -> str | None:
+    """Return a normalized action from semantic data without changing its source label."""
     if system == "STADIUM":
         if event.source.type != "LOOPER":
             return None
@@ -37,12 +38,17 @@ def _looper_action(event: TimelineEvent, system: str) -> str | None:
     return action.strip().replace("_", " ").upper()
 
 
+def looper_display_label(event: TimelineEvent, system: str) -> str | None:
+    """Return the device-independent label used within a dedicated LOOPER row."""
+    return looper_action(event, system)
+
+
 def derive_looper_regions(events: Iterable[TimelineEvent], units_for: Callable,
                            system: str, song_end_units: int) -> tuple[LooperRegion, ...]:
     """Derive regions; only sustained actions and STOP affect the state machine."""
     relevant = []
     for index, event in enumerate(events):
-        action = _looper_action(event, system)
+        action = looper_action(event, system)
         if action in SUSTAINED_STATES or action == "STOP":
             relevant.append((units_for(event.position), index, action))
     relevant.sort(key=lambda item: (item[0], item[1]))
