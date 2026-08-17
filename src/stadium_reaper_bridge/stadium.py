@@ -86,6 +86,54 @@ class StadiumFlag:
         """Best-effort type for dispatch; never used to discard payload data."""
         return self.payload.partition(";")[0]
 
+    @property
+    def fields(self) -> tuple[str, ...]:
+        """The exact semicolon-delimited fields, including empty fields."""
+        return tuple(self.payload.split(";"))
+
+    def semantic_data(self) -> dict[str, Any]:
+        """Parse only empirically understood fields without changing payload.
+
+        The returned mapping is a view: :attr:`payload` remains authoritative
+        and is always used when rendering the flag.
+        """
+        f = self.fields
+        try:
+            if self.type == "START" and len(f) >= 12:
+                return {"tempo": float(f[3]), "time_signature_numerator": int(f[5]),
+                        "time_signature_denominator": int(f[6]), "setlist": f[9],
+                        "preset": f[10], "snapshot": f[11]}
+            if self.type == "TIME" and len(f) >= 7:
+                return {"label": f[1], "tempo": float(f[3]),
+                        "time_signature_numerator": int(f[5]),
+                        "time_signature_denominator": int(f[6])}
+            if self.type == "MARKER" and len(f) >= 10:
+                return {"name": f[1], "count_in": f[3], "pause_at_marker": f[4],
+                        "cycle_marker": f[5], "marker_recalls_preset": f[6].lower() == "true",
+                        "setlist": f[7], "preset": f[8], "snapshot": f[9]}
+            if self.type == "PRESETSNAP" and len(f) >= 6:
+                return {"setlist": f[3], "preset": f[4], "snapshot": f[5]}
+            if self.type == "MIDI_CC" and len(f) >= 7:
+                return {"label": f[1], "channel": int(f[4]), "cc": int(f[5]),
+                        "value": int(f[6])}
+            if self.type == "MIDI_BANK_PROGRAM" and len(f) >= 8:
+                def bank(value: str) -> int | None:
+                    return None if value == "Off" else int(value)
+                return {"label": f[1], "channel": int(f[4]), "bank_msb": bank(f[5]),
+                        "bank_lsb": bank(f[6]), "program": int(f[7])}
+            if self.type == "LOOPER" and len(f) >= 4:
+                return {"label": f[1], "action": f[3]}
+            if self.type == "CYCLE_START" and len(f) >= 5:
+                return {"repeat_count": f[3], "option": f[4]}
+            if self.type == "CYCLE_END":
+                return {}
+            if self.type == "END":
+                return {"label": f[1] if len(f) > 1 else ""}
+        except (ValueError, IndexError):
+            # A malformed known variant is still valid lossless source data.
+            return {}
+        return {}
+
     def render(self) -> str:
         rendered = f"{self.position.render()}|{self.payload}"
         return self.original if self.original == rendered else rendered

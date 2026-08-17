@@ -1,7 +1,14 @@
 """Public domain models for Stadium Reaper Bridge."""
 
 from .stadium import MusicalPosition, StadiumFlag, StadiumSong
-from .timeline import Timeline, TimelineEvent, TimelineEventKind
+from .timeline import (
+    Timeline,
+    TimelineEvent,
+    TimelineEventKind,
+    stadium_to_timeline,
+    timeline_source_flags,
+)
+from .midi import RigMidiDecoder
 
 __all__ = [
     "MusicalPosition",
@@ -10,4 +17,7 @@ __all__ = [
     "Timeline",
     "TimelineEvent",
     "TimelineEventKind",
+    "RigMidiDecoder",
+    "stadium_to_timeline",
+    "timeline_source_flags",
 ]
