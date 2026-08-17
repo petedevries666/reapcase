@@ -96,6 +96,16 @@ def zoom_about_cursor(old_scale: float, requested_scale: float, scroll_x: float,
     return ZoomResult(new_scale, max(0.0, new_scroll))
 
 
+def zoom_about_units(requested_scale: float, anchor_units: int, ppqn: int,
+                     viewport_x: float,
+                     minimum: float = MIN_PIXELS_PER_BEAT,
+                     maximum: float = MAX_PIXELS_PER_BEAT) -> ZoomResult:
+    """Zoom with an absolute musical-unit anchor fixed at ``viewport_x``."""
+    new_scale = clamp_zoom(requested_scale, minimum, maximum)
+    anchor_canvas_x = timeline_x(anchor_units, ppqn, new_scale)
+    return ZoomResult(new_scale, max(0.0, anchor_canvas_x - viewport_x))
+
+
 def fit_song_scale(song_end_units: int, ppqn: int, viewport_width: float,
                    minimum: float = MIN_PIXELS_PER_BEAT,
                    maximum: float = MAX_PIXELS_PER_BEAT) -> float:
