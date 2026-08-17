@@ -8,8 +8,10 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from .layout import HEADER_WIDTH, LANE_HEIGHT, x_for_position
-from .model import EditorModel, LANES
+from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT,
+                     drag_units, fit_song_scale, snap_drag_delta,
+                     x_for_position, zoom_about_cursor)
+from .model import EditorModel, LANES, MovePreview
 
 
 class ReapcaseEditor(tk.Tk):
@@ -18,11 +20,13 @@ class ReapcaseEditor(tk.Tk):
         self.title("Reapcase Desktop Editor")
         self.geometry("1180x680")
         self.model: EditorModel | None = None
-        self.pixels_per_beat = 90
+        self.pixels_per_beat = DEFAULT_PIXELS_PER_BEAT
         self.drag_x: float | None = None
+        self.drag_preview: MovePreview | None = None
         self.grid_choice = tk.StringVar(value="1 beat")
         self.info = tk.StringVar(value="Open a Stadium Song JSON to begin")
         self.status = tk.StringVar(value="No file loaded")
+        self.zoom_label = tk.StringVar()
         self._build()
 
     def _build(self):
@@ -30,11 +34,13 @@ class ReapcaseEditor(tk.Tk):
         for text, command in (("Open JSON", self.open_json), ("Save As JSON", self.save_as),
                               ("Select All", self.select_all), ("Select All After Cursor", self.select_after),
                               ("Select Lane", self.select_lane), ("Shift Selected", self.shift_dialog),
-                              ("Undo", self.undo)):
+                              ("Undo", self.undo), ("Zoom Out", lambda: self.zoom_step(1 / 1.25)),
+                              ("Zoom In", lambda: self.zoom_step(1.25)), ("Fit Song", self.fit_song)):
             ttk.Button(toolbar, text=text, command=command).pack(side="left", padx=2)
         ttk.Label(toolbar, text=" Grid:").pack(side="left")
         ttk.Combobox(toolbar, textvariable=self.grid_choice, state="readonly", width=12,
                      values=("1 bar", "1 beat", "quarter beat", "no snap")).pack(side="left")
+        ttk.Label(toolbar, textvariable=self.zoom_label, width=8, anchor="e").pack(side="left", padx=5)
         ttk.Label(self, textvariable=self.info, padding=(8, 3)).pack(fill="x")
         frame = ttk.Frame(self); frame.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(frame, background="#171b22", highlightthickness=0)
@@ -45,6 +51,18 @@ class ReapcaseEditor(tk.Tk):
         xscroll.grid(row=1, column=0, sticky="ew"); frame.rowconfigure(0, weight=1); frame.columnconfigure(0, weight=1)
         self.canvas.bind("<Button-1>", self.click); self.canvas.bind("<B1-Motion>", self.drag)
         self.canvas.bind("<ButtonRelease-1>", self.drop)
+        self.canvas.bind("<Control-MouseWheel>", self.mouse_zoom)
+        self.canvas.bind("<Control-Button-4>", self.mouse_zoom)
+        self.canvas.bind("<Control-Button-5>", self.mouse_zoom)
+        self.canvas.bind("<Shift-MouseWheel>", self.horizontal_wheel)
+        self.canvas.bind("<Shift-Button-4>", self.horizontal_wheel)
+        self.canvas.bind("<Shift-Button-5>", self.horizontal_wheel)
+        self.canvas.bind("<MouseWheel>", self.vertical_wheel)
+        self.canvas.bind("<Button-4>", self.vertical_wheel)
+        self.canvas.bind("<Button-5>", self.vertical_wheel)
+        self.canvas.bind("<Button-2>", lambda event: self.canvas.scan_mark(event.x, event.y))
+        self.canvas.bind("<B2-Motion>", lambda event: self.canvas.scan_dragto(event.x, event.y, gain=1))
+        self._update_zoom_label()
         ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w", padding=5).pack(fill="x")
 
     def open_json(self):
@@ -79,8 +97,14 @@ class ReapcaseEditor(tk.Tk):
             for beat in range(1, m.numerator + 1):
                 x = HEADER_WIDTH + ((bar - 1) * m.numerator + beat - 1) * self.pixels_per_beat
                 prominent = beat == 1
+                if not prominent and self.pixels_per_beat < 28:
+                    continue
                 self.canvas.create_line(x, 0, x, height, fill="#708096" if prominent else "#343f4d", width=2 if prominent else 1)
                 if prominent: self.canvas.create_text(x + 4, 3, text=f"{bar:03d}-01.001", anchor="nw", fill="#b8c2ce")
+                if self.pixels_per_beat >= 100:
+                    for quarter in range(1, 4):
+                        qx = x + quarter * self.pixels_per_beat / 4
+                        self.canvas.create_line(qx, 0, qx, height, fill="#29333f", dash=(1, 3))
         for i, event in enumerate(m.timeline.events):
             lane = LANES.index(m.lane(event)); x = x_for_position(event.position, m.song.ppqn, m.numerator, self.pixels_per_beat)
             y = lane * LANE_HEIGHT + 27; selected = i in m.selected
@@ -91,10 +115,34 @@ class ReapcaseEditor(tk.Tk):
                                                 fill="#ffd166" if selected else "#8fd3c7", outline="#ffffff" if selected else "#4d8f88",
                                                 tags=(f"event:{i}",))
             self.canvas.tag_raise(item)
+        if self.drag_preview:
+            self._draw_drag_preview(self.drag_preview)
         unsupported = ", ".join(m.unsupported_types) or "none"
         self.info.set(f"{m.song.name}  |  PPQN {m.song.ppqn}  |  {m.tempo:g} BPM  |  {m.numerator}/{m.denominator}  |  {len(m.timeline.events)} flags  |  {m.path}")
         self.status.set(f"{m.path.name}  |  flags {len(m.timeline.events)}  |  selected {len(m.selected)}  |  cursor {m.cursor.render()}  |  {'MODIFIED' if m.modified else 'unmodified'}  |  unsupported: {unsupported}")
         self.canvas.configure(scrollregion=(0, 0, width, height))
+        self._update_zoom_label()
+
+    def _draw_drag_preview(self, preview: MovePreview):
+        if not self.model:
+            return
+        targets = preview.targets if preview.valid else preview.original
+        for index, position in zip(preview.indices, targets):
+            event = self.model.timeline.events[index]
+            x = x_for_position(position, self.model.song.ppqn, self.model.numerator, self.pixels_per_beat)
+            if not preview.valid:
+                x += preview.delta_units / self.model.song.ppqn * self.pixels_per_beat
+            y = LANES.index(self.model.lane(event)) * LANE_HEIGHT + 27
+            text = f"{self.model.label(event)}  {position.render()}"
+            item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w",
+                                           fill="#381b1b" if not preview.valid else "#263241",
+                                           tags=("drag-preview",))
+            box = self.canvas.bbox(item)
+            self.canvas.create_rectangle(box[0]-4, box[1]-3, box[2]+4, box[3]+3,
+                                         fill="#e87777" if not preview.valid else "#d8e7f5",
+                                         outline="#ff4f4f" if not preview.valid else "#8fb8dc",
+                                         stipple="gray50", tags=("drag-preview",))
+            self.canvas.tag_raise(item)
 
     def _event_index(self, event):
         tags = self.canvas.gettags("current")
@@ -109,26 +157,75 @@ class ReapcaseEditor(tk.Tk):
             if event.state & 0x4: self.model.selected.symmetric_difference_update({index})
             else: self.model.selected = {index}
             self.drag_x = x
+            self.drag_preview = self.model.preview_shift(0)
         self.redraw()
 
     def drag(self, event):
-        pass  # Movement is committed atomically on release.
+        if not self.model or self.drag_x is None or not self.model.selected:
+            return
+        dx = self.canvas.canvasx(event.x) - self.drag_x
+        raw = drag_units(dx, self.pixels_per_beat, self.model.song.ppqn)
+        anchor = min(self.model._units(self.model.timeline.events[i].position) for i in self.model.selected)
+        delta = snap_drag_delta(anchor, raw, self.grid_choice.get(), self.model.song.ppqn,
+                                self.model.numerator)
+        self.drag_preview = self.model.preview_shift(delta)
+        self.redraw()
+        count = len(self.drag_preview.indices)
+        if self.drag_preview.valid:
+            noun = "event" if count == 1 else "events"
+            self.status.set(f"Move {count} {noun} → {self.drag_preview.destination.render()}  |  valid")
+        else:
+            self.status.set("Invalid move: before Song start")
 
     def drop(self, event):
         if not self.model or self.drag_x is None: return
-        dx = self.canvas.canvasx(event.x) - self.drag_x
-        raw = round(dx / self.pixels_per_beat * self.model.song.ppqn)
-        grids = {"1 bar": self.model.song.ppqn*self.model.numerator, "1 beat": self.model.song.ppqn,
-                 "quarter beat": self.model.song.ppqn//4, "no snap": 1}
-        grid = grids[self.grid_choice.get()]
-        anchor = min(self.model._units(self.model.timeline.events[i].position) for i in self.model.selected)
-        # Snap the destination, not merely the delta: quarter-beat boundaries
-        # are therefore exactly ticks 001/061/121/181 at 240 PPQN.
-        delta = round((anchor + raw) / grid) * grid - anchor
-        try:
-            if delta: self.model.shift_selected(ticks=delta)
-        except ValueError as exc: messagebox.showerror("Invalid movement", str(exc))
-        self.drag_x = None; self.redraw()
+        preview = self.drag_preview
+        if preview and preview.valid:
+            self.model.commit_preview(preview)
+        self.drag_x = None
+        self.drag_preview = None
+        self.redraw()
+
+    @staticmethod
+    def _wheel_direction(event):
+        return 1 if getattr(event, "delta", 0) > 0 or getattr(event, "num", 0) == 4 else -1
+
+    def mouse_zoom(self, event):
+        self._zoom_at(1.12 ** self._wheel_direction(event), event.x)
+        return "break"
+
+    def zoom_step(self, factor):
+        self._zoom_at(factor, self.canvas.winfo_width() / 2)
+
+    def _zoom_at(self, factor, cursor_x):
+        old_scroll = self.canvas.canvasx(0)
+        result = zoom_about_cursor(self.pixels_per_beat, self.pixels_per_beat * factor,
+                                   old_scroll, cursor_x)
+        self.pixels_per_beat = result.pixels_per_beat
+        self.redraw()
+        region = self.canvas.cget("scrollregion").split()
+        width = float(region[2]) if len(region) == 4 else 1
+        self.canvas.xview_moveto(result.scroll_x / max(1, width))
+
+    def fit_song(self):
+        if not self.model:
+            return
+        end = max((self.model._units(e.position) for e in self.model.timeline.events), default=0)
+        self.pixels_per_beat = fit_song_scale(end, self.model.song.ppqn,
+                                              self.canvas.winfo_width())
+        self.redraw()
+        self.canvas.xview_moveto(0)
+
+    def _update_zoom_label(self):
+        self.zoom_label.set(f"{self.pixels_per_beat / DEFAULT_PIXELS_PER_BEAT:.0%}")
+
+    def horizontal_wheel(self, event):
+        self.canvas.xview_scroll(-self._wheel_direction(event) * 3, "units")
+        return "break"
+
+    def vertical_wheel(self, event):
+        self.canvas.yview_scroll(-self._wheel_direction(event) * 3, "units")
+        return "break"
 
     def select_all(self):
         if self.model: self.model.select_all(); self.redraw()
