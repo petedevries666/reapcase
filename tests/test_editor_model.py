@@ -6,7 +6,8 @@ import unittest
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.editor.layout import (MAX_PIXELS_PER_BEAT, MIN_PIXELS_PER_BEAT,
                                                   drag_units, fit_song_scale,
-                                                  snap_drag_delta, zoom_about_cursor)
+                                                  snap_drag_delta, timeline_x,
+                                                  zoom_about_cursor, zoom_about_units)
 from stadium_reaper_bridge.midi import RigMidiDecoder
 from stadium_reaper_bridge.stadium import StadiumSong
 
@@ -155,6 +156,26 @@ class EditorModelTests(unittest.TestCase):
         self.assertGreaterEqual(scale, MIN_PIXELS_PER_BEAT)
         self.assertLessEqual(scale, MAX_PIXELS_PER_BEAT)
         self.assertLessEqual(140 + (32 + 1) * scale, 1000)
+
+    def test_playhead_unit_zoom_stays_centered_after_scrolling(self):
+        anchor_units, ppqn, viewport_x = 240 * 140, 240, 500
+        for requested in (180, 45):
+            result = zoom_about_units(requested, anchor_units, ppqn, viewport_x)
+            self.assertAlmostEqual(timeline_x(anchor_units, ppqn, result.pixels_per_beat)
+                                   - result.scroll_x, viewport_x)
+
+    def test_offscreen_playhead_zoom_moves_viewport_to_anchor(self):
+        result = zoom_about_units(180, 240 * 140, 240, 500)
+        self.assertGreater(result.scroll_x, 0)
+        self.assertAlmostEqual(timeline_x(240 * 140, 240, result.pixels_per_beat)
+                               - result.scroll_x, 500)
+
+    def test_playhead_zoom_uses_timing_map_absolute_units(self):
+        model = self.load("clocksick_453.json")
+        anchor_units = model._units(model.timeline.events[-2].position)
+        result = zoom_about_units(135, anchor_units, model.song.ppqn, 420)
+        self.assertAlmostEqual(timeline_x(anchor_units, model.song.ppqn,
+                                          result.pixels_per_beat) - result.scroll_x, 420)
 
     def test_fit_song_fits_longest_fixture_in_standard_editor_width(self):
         model = self.load("clocksick_453.json")
