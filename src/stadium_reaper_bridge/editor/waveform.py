@@ -11,12 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 import time
 import wave
-from typing import Callable
+from typing import Callable, Protocol
 
 from .audio_engine import AudioEngine
 
 
-DEFAULT_BASE_BUCKET_FRAMES = 128
+# 32 frames is below one display pixel at common DAW zoom levels at 48 kHz,
+# while the upper pyramid levels keep long recordings compact to render.
+DEFAULT_BASE_BUCKET_FRAMES = 32
 DEFAULT_READ_FRAMES = 4096
 
 
@@ -54,6 +56,15 @@ class WaveformPyramid:
 
 # Old public name retained for callers that only used the summary attributes.
 WaveformSummary = WaveformPyramid
+
+
+@dataclass(frozen=True)
+class SyncTransient:
+    frame: int
+    audio_seconds: float
+    grid: str
+    deviation_samples: int
+    deviation_ms: float
 
 
 def _next_level(source: PeakLevel) -> PeakLevel:
@@ -175,7 +186,135 @@ def display_peaks(summary: WaveformPyramid, pixel_width: float,
     return points
 
 
+class _TempoMap(Protocol):
+    def seconds_to_units(self, seconds: float) -> int: ...
+    def units_to_seconds(self, units: int) -> float: ...
+
+
+def timeline_units_to_x(units: int, ppqn: int, pixels_per_beat: float,
+                        origin_x: float = 0.0) -> float:
+    return origin_x + units / ppqn * pixels_per_beat
+
+
+def frame_to_canvas_x(frame: int, sample_rate: int, tempo_map: _TempoMap,
+                      ppqn: int, pixels_per_beat: float,
+                      origin_x: float = 0.0) -> float:
+    """Canonical frame -> seconds -> tempo units -> canvas coordinate chain."""
+    units = tempo_map.seconds_to_units(frame / sample_rate)
+    return timeline_units_to_x(units, ppqn, pixels_per_beat, origin_x)
+
+
 def frame_x(frame: int, sample_rate: int, pixels_per_second: float,
             clip_start_x: float = 0.0) -> float:
-    """Shared exact sample-frame to canvas coordinate mapping."""
+    """Legacy constant-tempo helper retained for external callers."""
     return clip_start_x + frame / sample_rate * pixels_per_second
+
+
+def viewport_columns(summary: WaveformPyramid, tempo_map: _TempoMap, ppqn: int,
+                     pixels_per_beat: float, viewport_left: int,
+                     viewport_width: int, origin_x: float = 0.0,
+                     margin: int = 32) -> tuple[int, list[tuple[float, float]]]:
+    """Raster-ready min/max columns for only the visible canvas interval.
+
+    This consumes the cached pyramid only: it never opens the WAV. Each cached
+    extrema bucket is placed through the canonical tempo-aware mapping, rather
+    than stretched across the clip's final width.
+    """
+    left = max(0, int(viewport_left) - margin)
+    right = max(left + 1, int(viewport_left + viewport_width) + margin)
+    width = right - left
+    columns: list[tuple[float, float] | None] = [None] * width
+    full_width = frame_to_canvas_x(summary.total_frames, summary.sample_rate,
+                                   tempo_map, ppqn, pixels_per_beat, origin_x) - origin_x
+    level = choose_peak_level(summary, max(1, full_width), max_objects=2_000_000_000)
+    left_units = max(0, round((left - origin_x) / pixels_per_beat * ppqn))
+    right_units = max(0, round((right - origin_x) / pixels_per_beat * ppqn))
+    first_bucket = max(0, int(tempo_map.units_to_seconds(left_units) *
+                              summary.sample_rate // level.frames_per_bucket) - 1)
+    last_bucket = min(len(level), int(tempo_map.units_to_seconds(right_units) *
+                                      summary.sample_rate // level.frames_per_bucket) + 2)
+    for index in range(first_bucket, last_bucket):
+        low, high = level.minimum[index], level.maximum[index]
+        frame = index * level.frames_per_bucket
+        x = frame_to_canvas_x(frame, summary.sample_rate, tempo_map, ppqn,
+                              pixels_per_beat, origin_x)
+        next_frame = min(summary.total_frames, frame + level.frames_per_bucket)
+        next_x = frame_to_canvas_x(next_frame, summary.sample_rate, tempo_map,
+                                   ppqn, pixels_per_beat, origin_x)
+        first = max(0, int(round(x)) - left)
+        stop = min(width, max(first + 1, int(round(next_x)) - left))
+        for column in range(first, stop):
+            old = columns[column]
+            columns[column] = ((low, high) if old is None else
+                               (min(old[0], low), max(old[1], high)))
+    return left, [(0.0, 0.0) if value is None else value for value in columns]
+
+
+def raster_ppm(columns: list[tuple[float, float]], height: int = 40,
+               foreground: tuple[int, int, int] = (183, 220, 255),
+               background: tuple[int, int, int] = (82, 107, 138)) -> bytes:
+    """Draw independent vertical extrema columns (no diagonal interpolation)."""
+    width, center = max(1, len(columns)), height // 2
+    pixels = bytearray(background * (width * height))
+    for x, (low, high) in enumerate(columns):
+        y0 = max(0, min(height - 1, round(center - high * (center - 2))))
+        y1 = max(0, min(height - 1, round(center - low * (center - 2))))
+        for y in range(min(y0, y1), max(y0, y1) + 1):
+            offset = (y * width + x) * 3
+            pixels[offset:offset + 3] = bytes(foreground)
+    return f"P6\n{width} {height}\n255\n".encode() + pixels
+
+
+def analyze_grid_sync(path: str | Path, tempo_map: _TempoMap, ppqn: int,
+                      units_to_position: Callable[[int], object],
+                      threshold_ratio: float = 0.6) -> tuple[SyncTransient, ...]:
+    """Find strong transient frames and measure them against nearest beats."""
+    def amplitudes(source: wave.Wave_read):
+        channels, width = source.getnchannels(), source.getsampwidth()
+        while data := source.readframes(DEFAULT_READ_FRAMES):
+            samples = AudioEngine._samples(data, width)
+            for start in range(0, len(samples), channels):
+                yield max(abs(value) for value in samples[start:start + channels])
+
+    with wave.open(str(path), "rb") as source:
+        rate = source.getframerate()
+        maximum = max(amplitudes(source), default=0.0)
+    if maximum <= 0:
+        return ()
+    candidates: list[int] = []
+    with wave.open(str(path), "rb") as source:
+        active_frame = None
+        active_value = -1.0
+        for frame, value in enumerate(amplitudes(source)):
+            if value >= maximum * threshold_ratio:
+                if value > active_value:
+                    active_frame, active_value = frame, value
+            elif active_frame is not None:
+                if not candidates or active_frame - candidates[-1] >= rate // 50:
+                    candidates.append(active_frame)
+                active_frame, active_value = None, -1.0
+        if active_frame is not None and (not candidates or active_frame - candidates[-1] >= rate // 50):
+            candidates.append(active_frame)
+    results = []
+    for frame in candidates:
+        seconds = frame / rate
+        units = tempo_map.seconds_to_units(seconds)
+        beat_units = round(units / ppqn) * ppqn
+        beat_seconds = tempo_map.units_to_seconds(beat_units)
+        delta_seconds = seconds - beat_seconds
+        results.append(SyncTransient(frame, seconds,
+                                     units_to_position(beat_units).render(),
+                                     round(delta_seconds * rate),
+                                     delta_seconds * 1000))
+    return tuple(results)
+
+
+def format_grid_sync(results: tuple[SyncTransient, ...]) -> str:
+    lines = ["CLICK SYNC", ""]
+    for index, item in enumerate(results, 1):
+        lines.extend((f"transient {index}", f"frame       {item.frame}",
+                      f"audio time  {item.audio_seconds:.6f} s",
+                      f"grid        {item.grid}",
+                      f"deviation   {item.deviation_ms:+.3f} ms / "
+                      f"{item.deviation_samples:+d} samples", ""))
+    return "\n".join(lines)

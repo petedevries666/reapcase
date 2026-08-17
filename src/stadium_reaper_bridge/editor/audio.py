@@ -36,9 +36,13 @@ def read_wav_info(path: str | Path) -> AudioFileInfo:
 class AudioResolver:
     """Resolve Stadium references without ever guessing between duplicates."""
 
-    def __init__(self, song_directory: str | Path, audio_root: str | Path | None = None):
+    def __init__(self, song_directory: str | Path, audio_root: str | Path | None = None,
+                 automatic_audio_dir: str | Path | None = None,
+                 backup_audio_root: str | Path | None = None):
         self.song_directory = Path(song_directory)
         self.audio_root = Path(audio_root) if audio_root else None
+        self.automatic_audio_dir = Path(automatic_audio_dir) if automatic_audio_dir else None
+        self.backup_audio_root = Path(backup_audio_root) if backup_audio_root else None
 
     def resolve(self, filename: Any) -> Path | None:
         if not isinstance(filename, str) or not filename:
@@ -47,13 +51,27 @@ class AudioResolver:
         for candidate in (stored, self.song_directory / stored):
             if candidate.is_file():
                 return candidate.resolve()
-        if not self.audio_root or not self.audio_root.is_dir():
+        # Stadium backups deliberately keep JSON and audio in sibling trees.
+        # Resolve the Song-specific directory before any recursive fallback.
+        if self.automatic_audio_dir:
+            candidate = self.automatic_audio_dir / PurePosixPath(
+                filename.replace("\\", "/")).name
+            if candidate.is_file():
+                return candidate.resolve()
+        match = self._unique_tail_match(filename, self.backup_audio_root)
+        if match:
+            return match
+        return self._unique_tail_match(filename, self.audio_root)
+
+    @staticmethod
+    def _unique_tail_match(filename: str, root: Path | None) -> Path | None:
+        if not root or not root.is_dir():
             return None
         # A root commonly points at .../workspace/Audio while the JSON contains
         # .../Audio/453/CLICK.wav. Prefer unique longest relative-tail matches.
         normalized = PurePosixPath(filename.replace("\\", "/"))
         parts = normalized.parts
-        files = [p for p in self.audio_root.rglob(normalized.name) if p.is_file()]
+        files = [p for p in root.rglob(normalized.name) if p.is_file()]
         for length in range(min(len(parts), 6), 1, -1):
             tail = tuple(part.casefold() for part in parts[-length:])
             matches = [p for p in files if tuple(part.casefold() for part in p.parts[-length:]) == tail]
@@ -62,6 +80,24 @@ class AudioResolver:
             if len(matches) > 1:
                 return None
         return files[0].resolve() if len(files) == 1 else None
+
+
+def stadium_backup_audio_paths(json_path: str | Path) -> tuple[Path, Path] | None:
+    """Return (Song audio directory, Audio root) for a real extracted backup.
+
+    Recognition is suffix based and case-insensitive. Standalone JSON documents
+    simply return ``None``.
+    """
+    path = Path(json_path)
+    parents = path.parents
+    if len(parents) < 4:
+        return None
+    tail = tuple(part.casefold() for part in path.parts[-4:-1])
+    if tail != ("showcase", "songs", "workspace"):
+        return None
+    backup_root = parents[3]
+    audio_root = backup_root / "songs" / "workspace" / "Audio"
+    return audio_root / path.stem, audio_root
 
 
 @dataclass(frozen=True)

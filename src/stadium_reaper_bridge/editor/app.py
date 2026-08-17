@@ -15,7 +15,8 @@ from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT,
                      x_for_position, zoom_about_cursor)
 from .model import EditorModel, LANES, MovePreview
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
-from .waveform import display_peaks, extract_waveform
+from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
+                       raster_ppm, timeline_units_to_x, viewport_columns)
 
 
 class ReapcaseEditor(tk.Tk):
@@ -41,6 +42,9 @@ class ReapcaseEditor(tk.Tk):
         self.monitor_muted: list[bool] = []
         self.monitor_solo: list[bool] = []
         self.waveforms = {}
+        self._waveform_images = []
+        self.manual_audio_root = None
+        self.audio_grid_overlay = tk.BooleanVar(value=False)
         self._waveform_pending = set()
         # A single low-duty analyzer avoids concurrent WAV scans competing with
         # the playback stream for disk and CPU.
@@ -53,6 +57,7 @@ class ReapcaseEditor(tk.Tk):
         toolbar = ttk.Frame(self, padding=6); toolbar.pack(fill="x")
         for text, command in (("Open JSON", self.open_json), ("Save As JSON", self.save_as),
                               ("Locate Audio Folder", self.locate_audio),
+                              ("Analyze Grid Sync", self.analyze_sync),
                               ("Select All", self.select_all), ("Select All After Cursor", self.select_after),
                               ("Select Lane", self.select_lane), ("Shift Selected", self.shift_dialog),
                               ("Undo", self.undo), ("Zoom Out", lambda: self.zoom_step(1 / 1.25)),
@@ -61,6 +66,8 @@ class ReapcaseEditor(tk.Tk):
         ttk.Label(toolbar, text=" Grid:").pack(side="left")
         ttk.Combobox(toolbar, textvariable=self.grid_choice, state="readonly", width=12,
                      values=("1 bar", "1 beat", "quarter beat", "no snap")).pack(side="left")
+        ttk.Checkbutton(toolbar, text="Audio grid", variable=self.audio_grid_overlay,
+                        command=self.redraw).pack(side="left")
         ttk.Label(toolbar, textvariable=self.zoom_label, width=8, anchor="e").pack(side="left", padx=5)
         ttk.Label(self, textvariable=self.info, padding=(8, 3)).pack(fill="x")
         transport = ttk.Frame(self, padding=(8, 3)); transport.pack(fill="x")
@@ -70,7 +77,7 @@ class ReapcaseEditor(tk.Tk):
         ttk.Label(transport, textvariable=self.transport_position, font=("TkFixedFont", 10)).pack(side="left", padx=14)
         frame = ttk.Frame(self); frame.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(frame, background="#171b22", highlightthickness=0)
-        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.canvas.xview)
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self._scroll_horizontal)
         yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(xscrollcommand=xscroll.set, yscrollcommand=yscroll.set)
         self.canvas.grid(row=0, column=0, sticky="nsew"); yscroll.grid(row=0, column=1, sticky="ns")
@@ -97,6 +104,8 @@ class ReapcaseEditor(tk.Tk):
         self.audio_engine.close()
         try: self.model = EditorModel.open(path)
         except Exception as exc: messagebox.showerror("Cannot open Song", str(exc)); return
+        if self.manual_audio_root:
+            self.model.resolve_audio(self.manual_audio_root)
         self._configure_audio()
         self.redraw()
 
@@ -114,9 +123,25 @@ class ReapcaseEditor(tk.Tk):
         if not self.model: return
         root = filedialog.askdirectory(title="Locate Audio Folder")
         if root:
+            self.manual_audio_root = root
             self.model.resolve_audio(root)
             self._configure_audio()
             self.redraw()
+
+    def analyze_sync(self):
+        if not self.model or not self.model.tempo_map:
+            return
+        track = next((item for item in self.model.audio_tracks if item.resolved_path), None)
+        if not track:
+            messagebox.showinfo("Grid Sync", "No resolved audio track to analyze.")
+            return
+        try:
+            results = analyze_grid_sync(track.resolved_path, self.model.tempo_map,
+                                        self.model.song.ppqn, self.model._position)
+        except Exception as exc:
+            messagebox.showerror("Grid Sync", str(exc)); return
+        messagebox.showinfo(f"Grid Sync — {track.name}",
+                            format_grid_sync(results) if results else "CLICK SYNC\n\nNo strong transients found.")
 
     def _configure_audio(self):
         self.audio_engine.close(); self.waveforms.clear(); self._waveform_pending.clear()
@@ -147,6 +172,7 @@ class ReapcaseEditor(tk.Tk):
 
     def redraw(self):
         self.canvas.delete("all")
+        self._waveform_images = []
         if not self.model: return
         m = self.model
         total_beats = m.song_end_units / m.song.ppqn + 2
@@ -214,22 +240,28 @@ class ReapcaseEditor(tk.Tk):
                                                  fill="#f0f5fa",
                                                  text=f"{track.filename}  |  {state}")
             summary = self.waveforms.get(str(track.resolved_path))
-            if summary:
+            if summary and m.tempo_map:
                 center, amplitude = y + 42, 18
-                peaks = display_peaks(summary, end_x - start_x)
-                # One filled polygon gives a continuous envelope without one
-                # Tk object per pixel. Min/max extrema keep narrow clicks tall.
-                upper = [(start_x + dx, center - high * amplitude)
-                         for dx, _low, high in peaks]
-                lower = [(start_x + dx, center - low * amplitude)
-                         for dx, low, _high in reversed(peaks)]
-                coordinates = [coordinate for point in upper + lower for coordinate in point]
-                if len(coordinates) >= 6:
-                    self.canvas.create_polygon(*coordinates, fill="#b7dcff",
-                                               outline="#d8ecff", width=1)
+                viewport_left = int(self.canvas.canvasx(0))
+                viewport_width = max(1, self.canvas.winfo_width())
+                image_left, columns = viewport_columns(
+                    summary, m.tempo_map, m.song.ppqn, self.pixels_per_beat,
+                    viewport_left, viewport_width, HEADER_WIDTH)
+                image = tk.PhotoImage(data=raster_ppm(columns), format="PPM")
+                self._waveform_images.append(image)
+                self.canvas.create_image(image_left, y + 22, image=image, anchor="nw")
                 self.canvas.create_line(start_x, center, end_x, center,
                                         fill="#7891aa", width=1)
                 self.canvas.tag_raise(clip_label)
+            if self.audio_grid_overlay and self.pixels_per_beat >= 40:
+                for unit in range(0, m.song_end_units + 1, max(1, m.song.ppqn // 4)):
+                    x = timeline_units_to_x(unit, m.song.ppqn, self.pixels_per_beat,
+                                            HEADER_WIDTH)
+                    beat = unit % m.song.ppqn == 0
+                    bar = unit % (m.song.ppqn * m.numerator) == 0
+                    self.canvas.create_line(x, y + 22, x, y + 62,
+                        fill="#d5e6fa" if bar else ("#90a9c5" if beat else "#53657a"),
+                        width=2 if bar else 1, dash=() if beat else (1, 3))
         if self.marquee_anchor and self.marquee_point:
             bounds = normalized_rectangle(*self.marquee_anchor, *self.marquee_point)
             self.canvas.create_rectangle(*bounds, fill="#527aa3", stipple="gray50",
@@ -383,6 +415,7 @@ class ReapcaseEditor(tk.Tk):
         region = self.canvas.cget("scrollregion").split()
         width = float(region[2]) if len(region) == 4 else 1
         self.canvas.xview_moveto(result.scroll_x / max(1, width))
+        self.redraw()
 
     def fit_song(self):
         if not self.model:
@@ -392,13 +425,19 @@ class ReapcaseEditor(tk.Tk):
                                               self.canvas.winfo_width())
         self.redraw()
         self.canvas.xview_moveto(0)
+        self.redraw()
 
     def _update_zoom_label(self):
         self.zoom_label.set(f"{self.pixels_per_beat / DEFAULT_PIXELS_PER_BEAT:.0%}")
 
     def horizontal_wheel(self, event):
         self.canvas.xview_scroll(horizontal_wheel_units(self._wheel_direction(event)), "units")
+        self.redraw()
         return "break"
+
+    def _scroll_horizontal(self, *args):
+        self.canvas.xview(*args)
+        self.redraw()
 
     def select_all(self):
         if self.model: self.model.select_all(); self.redraw()
