@@ -32,6 +32,10 @@ class RigMidiDecoder:
 
         second = self.config["second_helix"]
         if channel == second["channel"]:
+            for expression, expression_cc in self.second_helix_expressions():
+                if cc == expression_cc and value in (0, 127):
+                    return {"system": "second_helix", "action": "expression",
+                            "expression": expression, "value": value}
             snap = second["snapshot"]
             if cc == snap["cc"] and snap["value_min"] <= value <= snap["value_max"]:
                 return {"system": "second_helix", "action": "snapshot", "snapshot": value + snap["offset"]}
@@ -114,6 +118,15 @@ class RigMidiDecoder:
                     actions.append(action)
         return tuple(actions)
 
+    def second_helix_expressions(self) -> tuple[tuple[int, int], ...]:
+        """Return the configured EXP-number to incoming-CC capabilities."""
+        mappings = self.config["second_helix"].get("expressions", {})
+        result = []
+        for expression, cc in mappings.items():
+            result.append((_midi_int("expression", int(expression), 1, 3),
+                           _midi_int("expression CC", cc, 0, 127)))
+        return tuple(sorted(result))
+
     def video_actions(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(self.config["video"]["values"].values()))
 
@@ -159,6 +172,16 @@ class RigMidiDecoder:
 
     def _encode_second_helix(self, action: str, command: dict[str, Any]) -> dict[str, int]:
         second = self.config["second_helix"]
+        if action == "expression":
+            expression = _midi_int("expression", command.get("expression"), 1, 3)
+            value = _midi_int("expression value", command.get("value"), 0, 127)
+            if value not in (0, 127):
+                raise ValueError("expression value must be 0 or 127")
+            mappings = dict(self.second_helix_expressions())
+            if expression not in mappings:
+                raise ValueError(f"expression {expression} is not configured")
+            return {"channel": self.second_helix_channel,
+                    "cc": mappings[expression], "value": value}
         if action == "snapshot":
             snapshot = _midi_int("snapshot", command.get("snapshot"), 1, 128)
             snap = second["snapshot"]

@@ -20,7 +20,7 @@ from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
                         STRUCTURE_HEIGHT, derive_structure_layout,
                         sticky_label_x, structure_sublane)
 from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
-                       create_generic_midi_cc, create_second_helix_looper,
+                       create_generic_midi_cc, create_second_helix_expression, create_second_helix_looper,
                        create_second_helix_preset, create_second_helix_snapshot,
                        create_stadium_looper, create_stadium_snapshot, create_structure_marker,
                        create_video_command)
@@ -583,6 +583,15 @@ class ReapcaseEditor(tk.Tk):
                     command=lambda value=action: self._create(create_stadium_looper, position, value))
             add.add_cascade(label="Looper", menu=looper)
         elif lane == "SECOND HELIX":
+            expressions = tk.Menu(add, tearoff=False)
+            for expression, _cc in self.model.decoder.second_helix_expressions():
+                endpoints = tk.Menu(expressions, tearoff=False)
+                for label, value in (("Minimum", 0), ("Maximum", 127)):
+                    endpoints.add_command(label=label, command=lambda exp=expression, endpoint=value:
+                        self._create(create_second_helix_expression, position, exp, endpoint,
+                                     self.model.decoder))
+                expressions.add_cascade(label=f"EXP {expression}", menu=endpoints)
+            add.add_cascade(label="Expression Pedal", menu=expressions)
             snapshots = tk.Menu(add, tearoff=False)
             for snapshot in self.model.decoder.second_helix_snapshots():
                 snapshots.add_command(label=f"Snapshot {snapshot}",

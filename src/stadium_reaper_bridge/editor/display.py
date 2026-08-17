@@ -9,6 +9,9 @@ def badge_text(event: TimelineEvent) -> str:
     if alias.get("system") == "video":
         return f"VIDEO {alias.get('video', '')} {alias['action'].replace('_', ' ').upper()}".replace("  ", " ")
     if alias.get("system") == "second_helix":
+        if alias.get("action") == "expression":
+            percentage = 0 if alias["value"] == 0 else 100
+            return f"EXP{alias['expression']} {percentage}%"
         if alias.get("action") == "snapshot":
             return f"BASS SNAP {alias['snapshot']}"
         return f"BASS {alias['action'].upper()}"

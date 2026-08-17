@@ -152,6 +152,19 @@ def create_second_helix_snapshot(position: MusicalPosition, snapshot: int,
     return _midi_cc(position, midi, f"BASS SNAP {snapshot}", decoder)
 
 
+def create_second_helix_expression(position: MusicalPosition, expression: int, value: int,
+                                   decoder: RigMidiDecoder) -> TimelineEvent:
+    """Create one configured Helix expression endpoint CC event."""
+    if isinstance(expression, bool) or not isinstance(expression, int) or expression not in (1, 2, 3):
+        raise ValueError("Expression must be 1, 2, or 3")
+    if isinstance(value, bool) or not isinstance(value, int) or value not in (0, 127):
+        raise ValueError("Expression value must be 0 or 127")
+    midi = decoder.encode({"system": "second_helix", "action": "expression",
+                           "expression": expression, "value": value})
+    percentage = 0 if value == 0 else 100
+    return _midi_cc(position, midi, f"EXP{expression} {percentage}%", decoder)
+
+
 def create_second_helix_looper(position: MusicalPosition, action: str,
                                decoder: RigMidiDecoder) -> TimelineEvent:
     midi = decoder.encode({"system": "second_helix", "action": action})
