@@ -8,6 +8,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from concurrent.futures import ThreadPoolExecutor
+from ..show import MidiRoute, ReapcaseShow, SHOW_SUFFIX
+from ..runtime import LiveRuntime, Readiness, ShowPreloader
 
 from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_HEIGHT,
                      drag_units, fit_song_scale, horizontal_wheel_units,
@@ -96,6 +98,15 @@ class ReapcaseEditor(tk.Tk):
         self.zoom_label = tk.StringVar()
         self.transport_position = tk.StringVar(value="00:00.000   |   001-01.001")
         self.audio_engine = AudioEngine()
+        self.show: ReapcaseShow | None = None
+        self.show_preloader = ShowPreloader()
+        self.live_runtime: LiveRuntime | None = None
+        self.app_mode = tk.StringVar(value="EDIT")
+        self.auto_advance = tk.BooleanVar(value=False)
+        self.show_name = tk.StringVar(value="SHOW: No show open")
+        self.show_summary = tk.StringVar(value="0 Songs")
+        self.current_live = tk.StringVar(value="CURRENT  —")
+        self.next_live = tk.StringVar(value="NEXT  —")
         self.monitor_muted: list[bool] = []
         self.monitor_solo: list[bool] = []
         self.waveforms = {}
@@ -133,7 +144,29 @@ class ReapcaseEditor(tk.Tk):
         ttk.Checkbutton(toolbar, text="Audio grid", variable=self.audio_grid_overlay,
                         command=self.redraw).pack(side="left")
         ttk.Label(toolbar, textvariable=self.zoom_label, width=8, anchor="e").pack(side="left", padx=5)
+        ttk.Combobox(toolbar, textvariable=self.app_mode, values=("EDIT", "LIVE"), state="readonly",
+                     width=6).pack(side="right", padx=4)
         ttk.Label(self, textvariable=self.info, padding=(8, 3)).pack(fill="x")
+        showbar = ttk.LabelFrame(self, text="SHOW / SETLIST", padding=5); showbar.pack(fill="x", padx=6)
+        buttons = ttk.Frame(showbar); buttons.pack(side="left")
+        for text, command in (("New Show", self.new_show), ("Open Show", self.open_show),
+                              ("Save Show", self.save_show), ("Add Song", self.add_show_song),
+                              ("Remove", self.remove_show_song), ("Move Up", lambda: self.move_show_song(-1)),
+                              ("Move Down", lambda: self.move_show_song(1)), ("Relocate Song…", self.relocate_show_song),
+                              ("Preflight Show", self.preflight_show), ("Refresh Show", self.refresh_show),
+                              ("MIDI Settings", self.midi_settings)):
+            ttk.Button(buttons, text=text, command=command).pack(side="left", padx=1)
+        ttk.Label(showbar, textvariable=self.show_name, width=25).pack(side="left", padx=8)
+        self.setlist = tk.Listbox(showbar, height=4, width=52, exportselection=False)
+        self.setlist.pack(side="left", fill="x", expand=True); self.setlist.bind("<<ListboxSelect>>", self.select_show_song)
+        ttk.Label(showbar, textvariable=self.show_summary, width=30).pack(side="right")
+        ttk.Checkbutton(showbar, text="Auto Advance", variable=self.auto_advance,
+                        command=self._set_auto_advance).pack(side="right", padx=4)
+        live = ttk.Frame(self, padding=(8, 3)); live.pack(fill="x")
+        ttk.Button(live, text="Previous Song", command=self.previous_song).pack(side="left")
+        ttk.Button(live, text="Next Song", command=self.next_song).pack(side="left", padx=3)
+        ttk.Label(live, textvariable=self.current_live, font=("TkDefaultFont", 10, "bold")).pack(side="left", padx=14)
+        ttk.Label(live, textvariable=self.next_live).pack(side="left", padx=14)
         transport = ttk.Frame(self, padding=(8, 3)); transport.pack(fill="x")
         ttk.Button(transport, text="|<<", width=5, command=self.return_to_start).pack(side="left")
         ttk.Button(transport, text="Play / Pause", command=self.play_pause).pack(side="left", padx=3)
@@ -163,6 +196,129 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.bind("<Motion>", self.timeline_hover)
         self._update_zoom_label()
         ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w", padding=5).pack(fill="x")
+
+    def _show_changed(self):
+        self.setlist.delete(0, "end")
+        if not self.show:
+            self.show_name.set("SHOW: No show open"); return
+        self.show_name.set(f"SHOW: {self.show.name}")
+        self.auto_advance.set(self.show.auto_advance)
+        for index, song in enumerate(self.show.songs):
+            self.setlist.insert("end", f"{index + 1:02d}  {song.title}   … NOT PREFLIGHTED")
+        self.show_summary.set(f"{len(self.show.songs)} Songs")
+        self.live_runtime = LiveRuntime(self.show, self.show_preloader, self.stop_playback)
+
+    def _set_auto_advance(self):
+        if self.show: self.show.auto_advance = self.auto_advance.get()
+
+    def new_show(self):
+        name = simpledialog.askstring("New Show", "Show name:", initialvalue="Untitled Show")
+        if name:
+            self.show_preloader.restart(); self.show = ReapcaseShow(name=name); self._show_changed()
+
+    def open_show(self):
+        path = filedialog.askopenfilename(filetypes=(("Reapcase Show", f"*{SHOW_SUFFIX}"), ("JSON", "*.json")))
+        if not path: return
+        try:
+            self.show_preloader.restart(); self.show = ReapcaseShow.open(path); self._show_changed(); self.preflight_show()
+        except Exception as exc: messagebox.showerror("Cannot open Show", str(exc))
+
+    def save_show(self):
+        if not self.show: return
+        path = self.show.path or filedialog.asksaveasfilename(defaultextension=SHOW_SUFFIX,
+                                                               filetypes=(("Reapcase Show", f"*{SHOW_SUFFIX}"),))
+        if path:
+            try: self.show.save(path); self._show_changed()
+            except Exception as exc: messagebox.showerror("Cannot save Show", str(exc))
+
+    def add_show_song(self):
+        if not self.show: self.new_show()
+        if not self.show: return
+        paths = filedialog.askopenfilenames(filetypes=(("Stadium Song JSON", "*.json"),))
+        for path in paths: self.show.add_song(path)
+        self.show_preloader.restart(); self._show_changed()
+
+    def _show_index(self):
+        selected = self.setlist.curselection()
+        return selected[0] if selected else None
+
+    def remove_show_song(self):
+        index = self._show_index()
+        if self.show and index is not None: self.show.remove_song(index); self.show_preloader.restart(); self._show_changed()
+
+    def move_show_song(self, delta):
+        index = self._show_index()
+        if not self.show or index is None or not 0 <= index + delta < len(self.show.songs): return
+        self.show.move_song(index, index + delta); self.show_preloader.restart(); self._show_changed()
+        self.setlist.selection_set(index + delta)
+
+    def relocate_show_song(self):
+        index = self._show_index()
+        if not self.show or index is None: return
+        path = filedialog.askopenfilename(filetypes=(("Stadium Song JSON", "*.json"),))
+        if path: self.show.relocate_song(index, path); self.show_preloader.restart(); self._show_changed()
+
+    def preflight_show(self):
+        if not self.show: return
+        self.show_preloader.restart(); results = [None] * len(self.show.songs)
+        def update(index, prepared):
+            results[index] = prepared
+            def paint():
+                marker = {Readiness.READY: "✓", Readiness.WARNING: "⚠", Readiness.ERROR: "✕"}[prepared.readiness]
+                detail = next((d.message for d in prepared.diagnostics if d.readiness is not Readiness.READY),
+                              f"Audio {prepared.audio_resolved}/{prepared.audio_total}")
+                self.setlist.delete(index); self.setlist.insert(index, f"{index + 1:02d}  {prepared.title}   {marker} {prepared.readiness.value}   {detail}")
+                done = [item for item in results if item]
+                counts = {status: sum(i.readiness is status for i in done) for status in Readiness}
+                self.show_summary.set(f"{len(self.show.songs)} Songs  {counts[Readiness.READY]} Ready  {counts[Readiness.WARNING]} Warning  {counts[Readiness.ERROR]} Errors")
+            self.after(0, paint)
+        for index, song in enumerate(self.show.songs):
+            self.show_preloader.prepare(self.show, song, lambda item, i=index: update(i, item))
+
+    def refresh_show(self): self.preflight_show()
+
+    def select_show_song(self, _event=None):
+        index = self._show_index()
+        if self.live_runtime and index is not None:
+            prepared = self.live_runtime.select(index); self._update_live_header(prepared)
+
+    def _update_live_header(self, prepared=None):
+        if not self.live_runtime: return
+        current = prepared or self.live_runtime.current_song; nxt = self.live_runtime.next_song
+        if current: self.current_live.set(f"CURRENT  {current.title}  {current.duration_seconds:.1f}s  {current.readiness.value}  Audio {current.audio_resolved}/{current.audio_total}")
+        self.next_live.set(f"NEXT  {nxt.title}  {nxt.readiness.value}" if nxt else "NEXT  — / NOT READY")
+
+    def next_song(self):
+        if not self.live_runtime: return
+        prepared = self.live_runtime.next()
+        if prepared is None: self.status.set("NEXT NOT READY"); return
+        self.setlist.selection_clear(0, "end"); self.setlist.selection_set(self.live_runtime.current_index)
+        self._update_live_header(prepared)
+
+    def previous_song(self):
+        if not self.live_runtime: return
+        prepared = self.live_runtime.previous()
+        if prepared is None: self.status.set("PREVIOUS NOT READY"); return
+        self.setlist.selection_clear(0, "end"); self.setlist.selection_set(self.live_runtime.current_index)
+        self._update_live_header(prepared)
+
+    def midi_settings(self):
+        if not self.show: return
+        window = tk.Toplevel(self); window.title("Show MIDI Routing (configuration only)")
+        values = {}
+        for row, (name, label) in enumerate((("stadium", "Stadium"), ("second_helix", "Second Helix"), ("lights", "Lights"))):
+            route = self.show.midi[name]; enabled = tk.BooleanVar(value=route.enabled)
+            port = tk.StringVar(value=route.port or ""); channel = tk.StringVar(value=str(route.channel)); values[name] = (enabled, port, channel)
+            ttk.Checkbutton(window, text=label, variable=enabled).grid(row=row, column=0, padx=8, pady=5, sticky="w")
+            ttk.Label(window, text="Port:").grid(row=row, column=1); ttk.Entry(window, textvariable=port, width=24).grid(row=row, column=2)
+            ttk.Label(window, text="Channel:").grid(row=row, column=3); ttk.Entry(window, textvariable=channel, width=4).grid(row=row, column=4)
+        def apply():
+            try:
+                self.show.midi = {name: MidiRoute(enabled.get(), port.get().strip() or None, int(channel.get()))
+                                  for name, (enabled, port, channel) in values.items()}
+                self.show.validate(); window.destroy()
+            except Exception as exc: messagebox.showerror("Invalid MIDI routing", str(exc), parent=window)
+        ttk.Button(window, text="Save Settings", command=apply).grid(row=4, column=0, columnspan=5, pady=8)
 
     def open_json(self):
         path = filedialog.askopenfilename(filetypes=(("JSON", "*.json"), ("All files", "*")))
@@ -641,6 +797,9 @@ class ReapcaseEditor(tk.Tk):
 
     def context_menu(self, event):
         """Open a compact lane-specific creation menu at the clicked position."""
+        if self.app_mode.get() == "LIVE":
+            self.status.set("Timeline authoring is disabled in LIVE mode")
+            return
         if not self.model:
             return
         y = self.canvas.canvasy(event.y)
@@ -831,6 +990,7 @@ class ReapcaseEditor(tk.Tk):
         self._create(create_generic_midi_cc, position, *values, self.model.decoder)
 
     def drag(self, event):
+        if self.app_mode.get() == "LIVE": return
         if not self.model:
             return
         if self.audio_drag:
@@ -861,6 +1021,7 @@ class ReapcaseEditor(tk.Tk):
             self.status.set("Invalid move: before Song start")
 
     def drop(self, event):
+        if self.app_mode.get() == "LIVE": return
         if not self.model: return
         if self.audio_drag:
             source, target = self.audio_drag; self.audio_drag = None
@@ -972,11 +1133,13 @@ class ReapcaseEditor(tk.Tk):
         self._configure_audio(); self.redraw()
 
     def delete_selected(self):
+        if self.app_mode.get() == "LIVE": return
         if self.model:
             self.model.delete_selected()
             self.redraw()
 
     def duplicate_selected(self):
+        if self.app_mode.get() == "LIVE": return
         if self.model:
             self.model.duplicate_selected()
             self.redraw()
@@ -1005,6 +1168,7 @@ class ReapcaseEditor(tk.Tk):
 
     def destroy(self):
         self.audio_engine.close(); self._waveform_pool.shutdown(wait=False, cancel_futures=True)
+        self.show_preloader.shutdown()
         super().destroy()
 
 
