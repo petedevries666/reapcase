@@ -34,6 +34,36 @@ Cette stratégie distingue la **fidélité syntaxique** (no-op exact) de la
 **fidélité sémantique** après édition (valeurs inconnues intactes, sérialisation
 JSON normalisée).
 
+## Trois domaines de contrôle indépendants
+
+Les données d'un **Stadium Song** (`START`, `TIME`, `MARKER`, `PRESETSNAP`,
+`LOOPER`, `CYCLE`, `MIDI`…) appartiennent au document Song et à son contrat de
+round-trip lossless. Le MIDI contenu dans un flag reste donc interprété comme
+syntaxe Song générique ; le parseur Stadium ne lui attribue aucune commande de
+rig.
+
+L'**automatisation de rig externe** est une couche de configuration séparée.
+Elle contient deux systèmes existants : `second_helix` pour le second Helix et
+`video` pour la vidéo.
+
+Le **contrôle distant du Stadium à l'exécution** constitue un troisième système,
+`stadium_transport`. Il décrit les commandes externes de transport, de looper,
+de snapshots et de navigation dans les songs, markers, setlists et playlists.
+Ces fonctions globales utilisent le **Global MIDI Channel** configurable du
+Stadium ; la configuration fournit sa valeur par défaut, le canal 1, et peut être
+modifiée sans changer le codec.
+
+Pour CC48, la documentation fournisseur décrit une action contextuelle : la
+plage 0–63 efface ou crée le Cycle, tandis que 64–127 agit comme commutateur
+d'activation/désactivation. L'alias stable `cycle_toggle` évite donc de prétendre
+que le codec connaît l'état courant ou la frontière de Cycle concernée. Cette
+infrastructure est facultative et n'est ni consultée ni nécessaire pour le
+round-trip lossless du JSON Song.
+
+Le décodeur/encodeur MIDI de rig est seul responsable de ces trois systèmes de
+contrôle. En particulier, les CC de `stadium_transport` ne sont pas des
+sémantiques de `StadiumFlag.semantic_data()`.
+
 ## Étapes suivantes
 
 1. Collecter des fixtures anonymisées issues de Stadium.
