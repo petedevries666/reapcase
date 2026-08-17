@@ -22,6 +22,21 @@ class SaveSummary:
     tracks_changed: int = 0
 
 
+@dataclass(frozen=True)
+class MovePreview:
+    """An immutable proposed edit; constructing one cannot alter the timeline."""
+
+    indices: tuple[int, ...]
+    original: tuple[MusicalPosition, ...]
+    targets: tuple[MusicalPosition, ...]
+    delta_units: int
+    valid: bool
+
+    @property
+    def destination(self) -> MusicalPosition | None:
+        return self.targets[0] if self.targets else None
+
+
 class EditorModel:
     """Own editor state while leaving payloads and source documents immutable."""
 
@@ -117,6 +132,30 @@ class EditorModel:
             self.timeline.events[index].position = target
         return len(indices)
 
+    def preview_shift(self, delta_units: int) -> MovePreview:
+        """Calculate an atomic selected-event move without mutating model state."""
+        indices = tuple(sorted(self.selected, key=lambda i: self._units(self.timeline.events[i].position)))
+        original = tuple(self.timeline.events[i].position for i in indices)
+        target_units = tuple(self._units(position) + delta_units for position in original)
+        if any(units < 0 for units in target_units):
+            return MovePreview(indices, original, (), delta_units, False)
+        return MovePreview(indices, original, tuple(self._position(units) for units in target_units),
+                           delta_units, True)
+
+    def commit_preview(self, preview: MovePreview) -> int:
+        """Apply one still-current preview as one undoable model edit."""
+        if not preview.valid:
+            return 0
+        if any(self.timeline.events[i].position != position
+               for i, position in zip(preview.indices, preview.original)):
+            raise ValueError("Timeline changed since the drag began")
+        if not preview.indices or preview.delta_units == 0:
+            return 0
+        self._undo.append((list(preview.indices), list(preview.original)))
+        for index, target in zip(preview.indices, preview.targets):
+            self.timeline.events[index].position = target
+        return len(preview.indices)
+
     def undo(self) -> bool:
         if not self._undo:
             return False
@@ -129,4 +168,3 @@ class EditorModel:
         self.song.flags = timeline_source_flags(self.timeline)
         Path(path).write_text(self.song.to_json_text(), encoding="utf-8")
         return SaveSummary(sum(e.position != p for e, p in zip(self.timeline.events, self._original_positions)))
-

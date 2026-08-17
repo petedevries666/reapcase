@@ -4,6 +4,9 @@ import tempfile
 import unittest
 
 from stadium_reaper_bridge.editor.model import EditorModel
+from stadium_reaper_bridge.editor.layout import (MAX_PIXELS_PER_BEAT, MIN_PIXELS_PER_BEAT,
+                                                  drag_units, fit_song_scale,
+                                                  snap_drag_delta, zoom_about_cursor)
 from stadium_reaper_bridge.midi import RigMidiDecoder
 from stadium_reaper_bridge.stadium import StadiumSong
 
@@ -70,6 +73,55 @@ class EditorModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/"future.json"; model.save_as(path)
             self.assertEqual(path.read_text(), source)
+
+    def test_drag_pixel_conversion_and_all_snap_modes(self):
+        self.assertEqual(drag_units(45, 90, 240), 120)
+        anchor = 250
+        self.assertEqual(snap_drag_delta(anchor, 300, "1 bar", 240, 4), 710)
+        self.assertEqual(snap_drag_delta(anchor, 100, "1 beat", 240, 4), -10)
+        self.assertEqual(snap_drag_delta(anchor, 31, "quarter beat", 240, 4), 50)
+        self.assertEqual(snap_drag_delta(anchor, 31, "no snap", 240, 4), 31)
+
+    def test_preview_is_non_mutating_and_commit_is_once(self):
+        model = self.load("monzter_332.json")
+        model.selected = {1, 2}
+        before = [event.position for event in model.timeline.events]
+        preview = model.preview_shift(60)
+        self.assertEqual([event.position for event in model.timeline.events], before)
+        self.assertEqual(model.commit_preview(preview), 2)
+        after = [event.position for event in model.timeline.events]
+        self.assertNotEqual(after, before)
+        with self.assertRaises(ValueError):
+            model.commit_preview(preview)
+        self.assertEqual([event.position for event in model.timeline.events], after)
+
+    def test_preview_preserves_offsets_and_rejects_before_start(self):
+        model = self.load("monzter_332.json")
+        model.selected = {0, 1, 2}
+        preview = model.preview_shift(123)
+        original_units = [model._units(position) for position in preview.original]
+        target_units = [model._units(position) for position in preview.targets]
+        self.assertEqual([b - a for a, b in zip(original_units, target_units)], [123] * 3)
+        earliest = min(model._units(model.timeline.events[i].position) for i in model.selected)
+        invalid = model.preview_shift(-earliest - 1)
+        self.assertFalse(invalid.valid)
+        before = [event.position for event in model.timeline.events]
+        self.assertEqual(model.commit_preview(invalid), 0)
+        self.assertEqual([event.position for event in model.timeline.events], before)
+
+    def test_zoom_anchor_limits_and_fit(self):
+        result = zoom_about_cursor(90, 180, 400, 200)
+        old_beat = (400 + 200 - 140) / 90
+        new_beat = (result.scroll_x + 200 - 140) / result.pixels_per_beat
+        self.assertAlmostEqual(old_beat, new_beat)
+        self.assertEqual(zoom_about_cursor(90, 10000, 0, 300).pixels_per_beat,
+                         MAX_PIXELS_PER_BEAT)
+        self.assertEqual(zoom_about_cursor(90, 0.1, 0, 300).pixels_per_beat,
+                         MIN_PIXELS_PER_BEAT)
+        scale = fit_song_scale(240 * 32, 240, 1000)
+        self.assertGreaterEqual(scale, MIN_PIXELS_PER_BEAT)
+        self.assertLessEqual(scale, MAX_PIXELS_PER_BEAT)
+        self.assertLessEqual(140 + (32 + 1) * scale, 1000)
 
 
 if __name__ == "__main__": unittest.main()
