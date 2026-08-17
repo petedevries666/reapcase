@@ -5,7 +5,7 @@ import unittest
 import wave
 
 from stadium_reaper_bridge.editor.audio import (AudioResolver, TempoChange, TempoMap,
-                                                 read_wav_info)
+                                                 read_wav_info, stadium_backup_audio_paths)
 from stadium_reaper_bridge.editor.layout import (HEADER_WIDTH, horizontal_wheel_units,
                                                   marquee_candidates, normalized_rectangle,
                                                   x_for_position)
@@ -59,6 +59,51 @@ class AudioAndMarqueeTests(unittest.TestCase):
             for folder in ("one", "two"):
                 path = root / folder / "CLICK.wav"; path.parent.mkdir(); path.touch()
             self.assertIsNone(AudioResolver(root / "song", root).resolve("CLICK.wav"))
+
+    def test_real_backup_sibling_audio_tree_auto_resolves_without_mutation(self):
+        for song_id in ("332", "336", "429", "431", "453"):
+            with self.subTest(song_id=song_id), tempfile.TemporaryDirectory() as directory:
+                backup = Path(directory) / "backup"
+                json_path = backup / "showcase" / "songs" / "workspace" / f"{song_id}.json"
+                audio_dir = backup / "songs" / "workspace" / "Audio" / song_id
+                json_path.parent.mkdir(parents=True); audio_dir.mkdir(parents=True)
+                stored = f"../../../../../sd-stadium/songs/workspace/Audio/{song_id}/CLICK.wav"
+                document = {"name": "Backup", "ppqn": 240, "params": None,
+                            "flags": ["001-01.001|START;;;120;;4;4;;;;;"],
+                            "tracks": [{"name": "CLICK", "filename": stored}]}
+                original = json.dumps(document)
+                json_path.write_text(original)
+                wav = audio_dir / "CLICK.wav"
+                with wave.open(str(wav), "wb") as target:
+                    target.setnchannels(1); target.setsampwidth(2); target.setframerate(48000)
+                    target.writeframes(b"\0\0" * 10)
+                model = EditorModel.open(json_path)
+                self.assertEqual(model.audio_tracks[0].resolved_path, wav.resolve())
+                self.assertEqual(model.audio_tracks[0].source["filename"], stored)
+                self.assertEqual(json_path.read_text(), original)
+                self.assertFalse((backup / "showcase" / "songs" / "workspace" / "Audio").exists())
+
+    def test_backup_layout_missing_and_standalone_fall_back_cleanly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_json = root / "showcase" / "songs" / "workspace" / "431.json"
+            backup_json.parent.mkdir(parents=True); backup_json.touch()
+            paths = stadium_backup_audio_paths(backup_json)
+            self.assertEqual(paths[0], root / "songs" / "workspace" / "Audio" / "431")
+            self.assertIsNone(AudioResolver(backup_json.parent, automatic_audio_dir=paths[0]).resolve("MISSING.wav"))
+            standalone = root / "copied.json"
+            self.assertIsNone(stadium_backup_audio_paths(standalone))
+            manual = root / "manual" / "CLICK.wav"; manual.parent.mkdir(); manual.touch()
+            self.assertEqual(AudioResolver(standalone.parent, manual.parent).resolve("CLICK.wav"),
+                             manual.resolve())
+
+    def test_backup_tail_fallback_refuses_ambiguous_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Audio"
+            for song_id in ("431", "999"):
+                path = root / song_id / "CLICK.wav"; path.parent.mkdir(parents=True); path.touch()
+            resolver = AudioResolver(Path(directory), backup_audio_root=root)
+            self.assertIsNone(resolver.resolve("CLICK.wav"))
 
     def test_tempo_map_and_audio_use_shared_musical_scale(self):
         ppqn = 240

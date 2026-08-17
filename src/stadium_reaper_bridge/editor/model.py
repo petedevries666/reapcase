@@ -9,7 +9,8 @@ from typing import Iterable
 from ..midi import RigMidiDecoder
 from ..stadium import MusicalPosition, StadiumSong
 from ..timeline import Timeline, TimelineEvent, stadium_to_timeline, timeline_source_flags
-from .audio import AudioResolver, TempoChange, TempoMap, audio_track_views
+from .audio import (AudioResolver, TempoChange, TempoMap, audio_track_views,
+                    stadium_backup_audio_paths)
 
 LANES = ("STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "MIDI / OTHER")
 STRUCTURE = {"START", "END", "TIME", "MARKER", "CYCLE_START", "CYCLE_END"}
@@ -94,7 +95,10 @@ class EditorModel:
     def resolve_audio(self, root: str | Path | None = None) -> None:
         if root is not None:
             self.audio_root = Path(root)
-        resolver = AudioResolver(self.path.parent, self.audio_root)
+        automatic = stadium_backup_audio_paths(self.path)
+        resolver = AudioResolver(self.path.parent, self.audio_root,
+                                 automatic[0] if automatic else None,
+                                 automatic[1] if automatic else None)
         self.audio_tracks = audio_track_views(self.song.tracks, resolver)
 
     @property

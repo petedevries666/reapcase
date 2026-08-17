@@ -8,8 +8,11 @@ import wave
 
 from stadium_reaper_bridge.editor.layout import HEADER_WIDTH
 from stadium_reaper_bridge.editor.waveform import (
-    choose_peak_level, display_peaks, extract_waveform, frame_x,
+    analyze_grid_sync, choose_peak_level, display_peaks, extract_waveform,
+    frame_to_canvas_x, frame_x, raster_ppm, viewport_columns,
 )
+from stadium_reaper_bridge.editor.audio import TempoChange, TempoMap
+from stadium_reaper_bridge.stadium import MusicalPosition
 
 
 RATE = 48_000
@@ -26,6 +29,14 @@ def write_impulses(path: Path, frames: int, impulses: dict[int, tuple[float, flo
 
 
 class WaveformTests(unittest.TestCase):
+    @staticmethod
+    def tempo(changes=((0, 120),)):
+        ppqn = 240
+        units = lambda p: ((p.bar - 1) * 4 + p.beat - 1) * ppqn + p.tick - 1
+        position = lambda value: MusicalPosition(value // (ppqn * 4) + 1,
+                                                  value // ppqn % 4 + 1, value % ppqn + 1)
+        return TempoMap(ppqn, tuple(TempoChange(*item) for item in changes), units, position), position
+
     def test_pyramid_has_doubling_resolutions_and_preserves_transients(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "click.wav"
@@ -77,6 +88,51 @@ class WaveformTests(unittest.TestCase):
 
     def test_frame_zero_clip_and_grid_start_share_exact_coordinate(self):
         self.assertEqual(frame_x(0, RATE, 360, HEADER_WIDTH), HEADER_WIDTH)
+        tempo, _ = self.tempo()
+        self.assertEqual(frame_to_canvas_x(0, RATE, tempo, 240, 360, HEADER_WIDTH),
+                         HEADER_WIDTH)
+
+    def test_canonical_mapping_stays_aligned_across_tempo_change(self):
+        tempo, _ = self.tempo(((0, 120), (960, 90)))
+        for units in (0, 240, 720, 960, 1200, 1440):
+            frame = round(tempo.units_to_seconds(units) * RATE)
+            expected = HEADER_WIDTH + units / 240 * 180
+            self.assertLessEqual(abs(frame_to_canvas_x(frame, RATE, tempo, 240, 180,
+                                                       HEADER_WIDTH) - expected), 1)
+        beat = round(tempo.units_to_seconds(1200) * RATE)
+        positions = [frame_to_canvas_x(beat + delta, RATE, tempo, 240, 180, HEADER_WIDTH)
+                     for delta in (-480, 0, 480)]
+        self.assertLess(positions[0], positions[1]); self.assertLess(positions[1], positions[2])
+
+    def test_viewport_raster_uses_cache_and_draws_columns_not_diamonds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "truth.wav"
+            write_impulses(path, RATE, {RATE // 2: (1, 1)})
+            summary = extract_waveform(path)
+            tempo, _ = self.tempo()
+            with patch("stadium_reaper_bridge.editor.waveform.wave.open",
+                       side_effect=AssertionError("renderer reread WAV")):
+                left, columns = viewport_columns(summary, tempo, 240, 400, 0, 900,
+                                                 HEADER_WIDTH, margin=0)
+                ppm = raster_ppm(columns)
+        active = [index for index, (low, high) in enumerate(columns) if high > .9]
+        self.assertTrue(active)
+        self.assertLessEqual(len(active), 2)  # narrow vertical impulse, never a polygon slope
+        self.assertTrue(ppm.startswith(b"P6\n"))
+        self.assertEqual(left, 0)
+
+    def test_click_sync_reports_exact_frames_and_signed_deviation(self):
+        tempo, position = self.tempo()
+        frames = {0: (1, 1), RATE // 2 - 480: (1, 1),
+                  RATE: (1, 1), RATE * 3 // 2 + 480: (1, 1)}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sync.wav"; write_impulses(path, RATE * 2, frames)
+            results = analyze_grid_sync(path, tempo, 240, position)
+        self.assertEqual([item.frame for item in results], sorted(frames))
+        self.assertEqual(results[0].grid, "001-01.001")
+        self.assertEqual(results[0].deviation_samples, 0)
+        self.assertEqual(results[1].deviation_samples, -480)
+        self.assertEqual(results[3].deviation_samples, 480)
 
     def test_extraction_is_chunked_and_does_not_mutate_source(self):
         with tempfile.TemporaryDirectory() as directory:
