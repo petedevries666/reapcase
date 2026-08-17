@@ -79,7 +79,7 @@ class VendorAuditTests(unittest.TestCase):
 
     def test_rig_midi_mapping_is_unchanged_by_documentation_audit(self):
         digest = hashlib.sha256(Path("config/rig_midi.json").read_bytes()).hexdigest()
-        self.assertEqual(digest, "a8a1f5d345216988e6e81527cba75dc1e6f0d768176deeaeafe169f860b6719f")
+        self.assertEqual(digest, "6ca408c2f1e02d5303a14623eb68b1eaba350f9b4de9a916aa51fb35017f42d8")
 
     def test_helix_vendor_inventory_has_official_looper_mappings(self):
         expected = {

@@ -5,7 +5,7 @@ import unittest
 
 from stadium_reaper_bridge.editor.creation import (
     FLAG_CAPABILITIES, MarkerOptions, create_cycle_end, create_cycle_start,
-    create_second_helix_looper, create_second_helix_snapshot,
+    create_second_helix_expression, create_second_helix_looper, create_second_helix_snapshot,
     create_stadium_snapshot, create_structure_marker, create_video_command,
     parse_marker, stadium_context_at,
 )
@@ -139,6 +139,51 @@ class CreationTests(unittest.TestCase):
             event = create_second_helix_looper(MusicalPosition(2, 1, 1), action, DECODER)
             self.assertEqual((event.data["channel"], event.data["cc"], event.data["value"]),
                              (3, cc, value))
+
+    def test_second_helix_expression_endpoints_use_configured_capabilities(self):
+        self.assertEqual(DECODER.second_helix_expressions(), ((1, 1), (2, 2), (3, 3)))
+        position = MusicalPosition(57, 1, 1)
+        for expression, cc in DECODER.second_helix_expressions():
+            for value, label in ((0, f"EXP{expression} 0%"),
+                                 (127, f"EXP{expression} 100%")):
+                with self.subTest(expression=expression, value=value):
+                    event = create_second_helix_expression(position, expression, value, DECODER)
+                    self.assertEqual((event.data["channel"], event.data["cc"], event.data["value"]),
+                                     (DECODER.second_helix_channel, cc, value))
+                    self.assertEqual(event.data["rig_alias"], {
+                        "system": "second_helix", "action": "expression",
+                        "expression": expression, "value": value,
+                    })
+                    self.assertEqual(badge_text(event), label)
+                    self.assertNotIn(position.render(), badge_text(event))
+
+    def test_second_helix_expression_validation_round_trip_losslessness_and_undo(self):
+        position = MusicalPosition(57, 1, 1)
+        for expression in (0, 4, True, "1"):
+            with self.subTest(expression=expression), self.assertRaises(ValueError):
+                create_second_helix_expression(position, expression, 0, DECODER)
+        for value in (-1, 1, 126, 128, True, "127"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                create_second_helix_expression(position, 1, value, DECODER)
+
+        model = self.model()
+        original = model.song.to_dict()
+        event = create_second_helix_expression(position, 3, 127, DECODER)
+        model.insert_event(event)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "expression.json"
+            model.save_as(path)
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["flags"][:-1], original["flags"])
+            self.assertEqual({key: value for key, value in saved.items() if key != "flags"},
+                             {key: value for key, value in original.items() if key != "flags"})
+            reopened = EditorModel.open(path)
+            self.assertEqual(badge_text(reopened.timeline.events[-1]), "EXP3 100%")
+            self.assertEqual(reopened.timeline.events[-1].source.payload,
+                             "MIDI_CC;EXP3 100%;4;CC;3;3;127")
+        self.assertTrue(model.undo())
+        self.assertEqual([flag.render() for flag in model.song.flags], original["flags"])
+        self.assertFalse(model.modified)
 
     def test_video_commands_and_validation(self):
         expected = {"stop": 0, "preload": 10, "play_one_shot": 11, "play_loop": 12}
