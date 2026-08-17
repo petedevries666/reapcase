@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import shutil
 import tempfile
 import unittest
 
@@ -46,6 +48,19 @@ class SequenceDerivationTests(unittest.TestCase):
             self.assertTrue(all(point.kind is SequenceClickKind.TICKSECOND
                                 for point in points[1:]))
 
+    def test_click_rectangles_end_at_the_canonical_next_beat(self):
+        timing = self.timing((1, 4), (3, 3), (5, 6))
+        clicks = derive_seq_clicks(timing, timing.bar_end_units(5) - 1)
+        for click in clicks:
+            following = timing.shift_position(click.position, beats=1)
+            self.assertEqual(click.end_units, timing.position_to_units(following))
+        finals = [click for click in clicks if click.position.beat == timing.beats_in_bar(
+            click.position.bar)]
+        self.assertTrue(finals)
+        for click in finals:
+            self.assertEqual(timing.units_to_position(click.end_units),
+                             P(click.position.bar + 1, 1, 1))
+
     def test_count_in_uses_signature_active_at_bar_three(self):
         four = derive_count_in(self.timing((1, 4)))
         self.assertEqual([clip.label for clip in four], ["ONE", "TWO", "THREE", "FOUR"])
@@ -72,6 +87,62 @@ class SequenceDerivationTests(unittest.TestCase):
             output = Path(directory) / "song.json"
             model.save_as(output)
             self.assertEqual(output.read_text(encoding="utf-8"), source)
+
+    def test_sequence_edits_persist_losslessly_and_undo(self):
+        source_path = Path("tests/fixtures/monzter_332.json")
+        native = source_path.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            opened = directory / "opened.json"
+            shutil.copy2(source_path, opened)
+            model = EditorModel.open(opened)
+            initial_count = model.timing_map.beats_in_bar(3)
+            self.assertEqual(len(model.instructions), initial_count)
+            click = next(item for item in model.sequence_layout.clicks
+                         if item.position == P(2, 3, 1))
+            two = next(item for item in model.instructions if item.label == "TWO")
+            three = next(item for item in model.instructions if item.label == "THREE")
+            two_position = two.position
+            three_position = three.position
+            model.toggle_click_mute(click.identity)
+            model.toggle_instruction_mute(two.id)
+            model.move_instructions((three.id,), model.song.ppqn)
+            self.assertTrue(model.modified)
+            self.assertEqual(three.position, P(3, 4, 1))
+            self.assertTrue(model.undo())
+            self.assertEqual(three.position, three_position)
+            model.move_instructions((three.id,), model.song.ppqn)
+
+            output = directory / "saved.json"
+            model.save_as(output)
+            self.assertEqual(output.read_text(encoding="utf-8"), native)
+            reopened = EditorModel.open(output)
+            self.assertEqual(reopened.click_mutes, {click.identity})
+            self.assertTrue(next(item for item in reopened.instructions if item.id == two.id).muted)
+            self.assertEqual(next(item for item in reopened.instructions if item.id == three.id).position,
+                             P(3, 4, 1))
+            self.assertEqual(next(item for item in reopened.instructions if item.id == two.id).position,
+                             two_position)
+            self.assertEqual(len(reopened.instructions), initial_count)
+
+    def test_sequence_save_preserves_unknown_sidecar_namespaces(self):
+        source_path = Path("tests/fixtures/monzter_332.json")
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            opened = directory / "opened.json"
+            shutil.copy2(source_path, opened)
+            original_sidecar = {"custom": {"future": [1, 2]},
+                                "reapcase": {"version": 9, "lights": []}}
+            EditorModel.show_path(opened).write_text(json.dumps(original_sidecar), encoding="utf-8")
+            model = EditorModel.open(opened)
+            model.toggle_click_mute(model.sequence_layout.clicks[0].identity)
+            output = directory / "saved.json"
+            model.save_as(output)
+            saved = json.loads(EditorModel.show_path(output).read_text(encoding="utf-8"))
+            self.assertEqual(saved["custom"], original_sidecar["custom"])
+            self.assertEqual(saved["reapcase"]["version"], 9)
+            self.assertEqual(saved["reapcase"]["lights"], [])
+            self.assertIn("sequence", saved["reapcase"])
 
 
 if __name__ == "__main__":
