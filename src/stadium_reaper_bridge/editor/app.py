@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import tkinter as tk
 import time
+import json
+from pathlib import Path
+from queue import Empty, Queue
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from concurrent.futures import ThreadPoolExecutor
 from ..show import MidiRoute, ReapcaseShow, SHOW_SUFFIX
@@ -41,7 +44,8 @@ from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
                        raster_ppm, timeline_units_to_x, viewport_columns)
 from .ergonomics import BackupError, DialogPositions, follow_scroll
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
-                         marker_region_rows, visible_lane_layout)
+                         marker_region_rows, move_visible_lane,
+                         normalized_lane_order, visible_lane_layout)
 
 
 class Tooltip:
@@ -98,6 +102,10 @@ class ReapcaseEditor(tk.Tk):
         self.view_state = ViewState()
         self.current_view = tk.StringVar(value="timeline")
         self.lane_visibility = {lane: tk.BooleanVar(value=True) for lane in LANES + ("AUDIO",)}
+        self.lane_order = self._load_lane_order()
+        self.loading = False
+        self._loading_window = None
+        self._loading_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="song-open")
         self._manager_windows = {}
         self._event_rows = {}
         self.audio_drag: tuple[int, int] | None = None
@@ -325,8 +333,25 @@ class ReapcaseEditor(tk.Tk):
     def open_lane_manager(self):
         def build(win):
             body = ttk.Frame(win, padding=12); body.pack(fill="both", expand=True)
-            for lane in LANES + ("AUDIO",):
-                ttk.Checkbutton(body, text=lane, variable=self.lane_visibility[lane], command=self.redraw).pack(anchor="w")
+            rows = ttk.Frame(body); rows.pack(fill="both", expand=True)
+            def refresh():
+                for child in rows.winfo_children(): child.destroy()
+                shown = [lane for lane in self.lane_order if self.lane_visibility[lane].get()]
+                for row, lane in enumerate(self.lane_order):
+                    ttk.Checkbutton(rows, text=lane, variable=self.lane_visibility[lane],
+                                    command=lambda: (refresh(), self.redraw())).grid(row=row, column=0, sticky="w")
+                    ttk.Button(rows, text="↑", width=3, command=lambda x=lane: move(x, -1),
+                               state="normal" if lane in shown and shown.index(lane) > 0 else "disabled").grid(row=row, column=1)
+                    ttk.Button(rows, text="↓", width=3, command=lambda x=lane: move(x, 1),
+                               state="normal" if lane in shown and shown.index(lane) < len(shown)-1 else "disabled").grid(row=row, column=2)
+                row = len(self.lane_order)
+                ttk.Checkbutton(rows, text="AUDIO", variable=self.lane_visibility["AUDIO"],
+                                command=self.redraw).grid(row=row, column=0, sticky="w")
+            def move(lane, direction):
+                visible = {name: var.get() for name, var in self.lane_visibility.items()}
+                self.lane_order = move_visible_lane(self.lane_order, visible, lane, direction)
+                self._save_lane_order(); refresh(); self.redraw()
+            refresh()
             controls = ttk.Frame(body); controls.pack(fill="x", pady=(10, 0))
             def set_all(value):
                 for variable in self.lane_visibility.values(): variable.set(value)
@@ -494,15 +519,77 @@ class ReapcaseEditor(tk.Tk):
         self._prepare_dialog(window, "midi_settings", apply)
 
     def open_json(self):
+        if self.loading: return
         path = filedialog.askopenfilename(filetypes=(("JSON", "*.json"), ("All files", "*")))
         if not path: return
-        self.audio_engine.close()
-        try: self.model = EditorModel.open(path)
-        except Exception as exc: messagebox.showerror("Cannot open Song", str(exc)); return
-        if self.manual_audio_root:
-            self.model.resolve_audio(self.manual_audio_root)
-        self._configure_audio()
-        self._redraw_after_model_change()
+        self._begin_song_open(path)
+
+    def _begin_song_open(self, path):
+        """Start transactional Song loading; all Tk work stays in this thread."""
+        if self.loading: return False
+        self.loading = True
+        win = tk.Toplevel(self); self._loading_window = win
+        win.title("Opening Song"); win.resizable(False, False)
+        title = ttk.Label(win, text=f"Opening {Path(path).stem.upper()}…", padding=(18, 14, 18, 6))
+        title.pack(fill="x")
+        bar = ttk.Progressbar(win, mode="indeterminate", length=330); bar.pack(padx=18, pady=6)
+        phase = tk.StringVar(value="Starting…")
+        ttk.Label(win, textvariable=phase, padding=(18, 6, 18, 14)).pack(fill="x")
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+        self._prepare_dialog(win, "song_loading", cancel=lambda: None); bar.start(12)
+        updates = Queue()
+        future = self._loading_pool.submit(
+            EditorModel.open_phased, path, updates.put,
+            audio_root=self.manual_audio_root)
+        def poll():
+            if not self.loading: return
+            try:
+                while True: phase.set(updates.get_nowait())
+            except Empty:
+                pass
+            if not future.done(): self.after(35, poll); return
+            error = None
+            try:
+                candidate = future.result()
+                phase.set("Finalizing UI…")
+                self.audio_engine.close()
+                self.model = candidate
+                self._configure_audio()
+                self._redraw_after_model_change()
+            except Exception as exc:
+                error = exc
+            finally:
+                self._finish_song_open()
+            if error is not None:
+                messagebox.showerror("Cannot open Song", str(error), parent=self)
+        self.after(0, poll)
+        return True
+
+    def _finish_song_open(self):
+        if self._loading_window and self._loading_window.winfo_exists():
+            try: self._loading_window.grab_release()
+            except tk.TclError: pass
+            self._loading_window.destroy()
+        self._loading_window = None; self.loading = False
+
+    @staticmethod
+    def _lane_preferences_path():
+        return Path.home() / ".config" / "reapcase" / "ui.json"
+
+    def _load_lane_order(self):
+        try:
+            data = json.loads(self._lane_preferences_path().read_text(encoding="utf-8"))
+            return normalized_lane_order(data.get("lane_order", ()), LANES)
+        except (OSError, ValueError, TypeError):
+            return list(LANES)
+
+    def _save_lane_order(self):
+        path = self._lane_preferences_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"lane_order": self.lane_order}, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass  # Session persistence remains available on read-only homes.
 
     def _save_to(self, path):
         try:
@@ -517,11 +604,11 @@ class ReapcaseEditor(tk.Tk):
         self.redraw()
 
     def save(self):
-        if self.model:
+        if self.model and not self.loading:
             self._save_to(self.model.path)
 
     def save_as(self):
-        if not self.model: return
+        if not self.model or self.loading: return
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=(("JSON", "*.json"),))
         if path:
             self._save_to(path)
@@ -634,7 +721,7 @@ class ReapcaseEditor(tk.Tk):
         total_beats = m.song_end_units / m.song.ppqn + 2
         width = HEADER_WIDTH + total_beats * self.pixels_per_beat
         visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
-        layout = visible_lane_layout(LANES, visibility)
+        layout = visible_lane_layout(self.lane_order, visibility)
         visible_lanes = layout.lanes
         audio_visible = visibility.get("AUDIO", True)
         all_lanes = list(visible_lanes) + ([f"AUDIO {track.number}" for track in m.audio_tracks] if audio_visible else [])
@@ -716,7 +803,6 @@ class ReapcaseEditor(tk.Tk):
         state_fill = LOOPER_STATE_FILLS
         for region in looper_regions:
             if region.system not in visible_lanes: continue
-            lane = LANES.index(region.system)
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
             bounds = looper_item_bounds(visible_lanes, region.system, x1, x2)
@@ -738,7 +824,6 @@ class ReapcaseEditor(tk.Tk):
         lighting_regions = derive_lighting_regions(
             m.timeline.events, m._units, m.song_end_units)
         lighting_sources = {region.source_event_index for region in lighting_regions}
-        lights_lane = LANES.index("LIGHTS")
         palette = lane_colors("LIGHTS")
         for region in lighting_regions if "LIGHTS" in visible_lanes else ():
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
@@ -830,9 +915,9 @@ class ReapcaseEditor(tk.Tk):
                 continue
             if i in region_sources or i in looper_sources or i in lighting_sources:
                 continue
-            lane = LANES.index(m.lane(event)); x = timeline_x(m._units(event.position), m.song.ppqn, self.pixels_per_beat)
+            event_lane = m.lane(event); x = timeline_x(m._units(event.position), m.song.ppqn, self.pixels_per_beat)
             y = lane_tops[m.lane(event)] + 27
-            if lane == 0:
+            if event_lane == "STRUCTURE":
                 sublane = structure_sublane(event)
                 y = lane_tops["STRUCTURE"] + {"markers": 3, "pauses": MARKERS_HEIGHT + 1,
                                     "cycles": MARKERS_HEIGHT + PAUSES_HEIGHT + 3}[sublane]
@@ -1034,7 +1119,7 @@ class ReapcaseEditor(tk.Tk):
             if not preview.valid:
                 x += preview.delta_units / self.model.song.ppqn * self.pixels_per_beat
             visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
-            layout = visible_lane_layout(LANES, visibility)
+            layout = visible_lane_layout(self.lane_order, visibility)
             event_lane = self.model.lane(event)
             if event_lane not in layout.lanes: continue
             y = layout.tops[event_lane] + 27
@@ -1172,7 +1257,7 @@ class ReapcaseEditor(tk.Tk):
         if event.x < HEADER_WIDTH:
             return
         visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
-        layout = visible_lane_layout(LANES, visibility)
+        layout = visible_lane_layout(self.lane_order, visibility)
         lane = next((lane for lane in layout.lanes
                      if layout.tops[lane] <= y < layout.tops[lane] + lane_height(lane)), None)
         if lane is None:
@@ -1478,7 +1563,8 @@ class ReapcaseEditor(tk.Tk):
         if self.audio_drag:
             source, _ = self.audio_drag
             y = self.canvas.canvasy(event.y)
-            top = RULER_HEIGHT + sum(lane_height(lane) for lane in LANES)
+            visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
+            top = visible_lane_layout(self.lane_order, visibility).audio_top
             target = max(0, min(len(self.model.audio_tracks) - 1,
                                 int((y - top + LANE_HEIGHT / 2) // LANE_HEIGHT)))
             self.audio_drag = (source, target)
@@ -1643,7 +1729,7 @@ class ReapcaseEditor(tk.Tk):
         if not self.model: return None
         visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
         if not visibility.get("AUDIO", True): return None
-        top = visible_lane_layout(LANES, visibility).audio_top
+        top = visible_lane_layout(self.lane_order, visibility).audio_top
         index = int((y - top) // LANE_HEIGHT)
         return index if top <= y and 0 <= index < len(self.model.audio_tracks) else None
 
@@ -1680,6 +1766,7 @@ class ReapcaseEditor(tk.Tk):
     def return_to_start(self): self.audio_engine.return_to_start(); self.redraw()
     def stop_playback(self): self.audio_engine.stop(); self.redraw()
     def play_pause(self):
+        if self.loading: return
         try:
             if self.audio_engine.state is PlaybackState.PLAYING: self.audio_engine.pause()
             else: self.audio_engine.play()
@@ -1708,6 +1795,7 @@ class ReapcaseEditor(tk.Tk):
 
     def destroy(self):
         self.audio_engine.close(); self._waveform_pool.shutdown(wait=False, cancel_futures=True)
+        self._loading_pool.shutdown(wait=False, cancel_futures=True)
         self.show_preloader.shutdown()
         super().destroy()
 

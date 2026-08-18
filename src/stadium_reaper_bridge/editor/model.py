@@ -53,7 +53,8 @@ class MovePreview:
 class EditorModel:
     """Own editor state while leaving payloads and source documents immutable."""
 
-    def __init__(self, song: StadiumSong, path: Path, decoder: RigMidiDecoder):
+    def __init__(self, song: StadiumSong, path: Path, decoder: RigMidiDecoder,
+                 *, resolve_audio_on_init: bool = True):
         self.song, self.path = song, path
         self.timeline: Timeline = stadium_to_timeline(song, midi_decoder=decoder)
         self._show_document: dict = {}
@@ -84,13 +85,37 @@ class EditorModel:
         self.sequence_selected: set[str] = set()
         self._sequence_edits = 0
         self._load_sequence_layer()
-        self.resolve_audio()
+        if resolve_audio_on_init:
+            self.resolve_audio()
 
     @classmethod
     def open(cls, path: str | Path, decoder_path: str | Path = "config/rig_midi.json") -> "EditorModel":
         path = Path(path)
         return cls(StadiumSong.from_json_text(path.read_text(encoding="utf-8")), path,
                    RigMidiDecoder.from_file(decoder_path))
+
+    @classmethod
+    def open_phased(cls, path: str | Path, progress=lambda _phase: None,
+                    decoder_path: str | Path = "config/rig_midi.json",
+                    audio_root: str | Path | None = None) -> "EditorModel":
+        """Build and validate a candidate model with observable load phases.
+
+        This method owns no Tk objects and is therefore safe to run on a
+        worker.  Callers must commit its return value on the UI thread.
+        """
+        path = Path(path)
+        progress("Parsing song…")
+        song = StadiumSong.from_json_text(path.read_text(encoding="utf-8"))
+        progress("Loading sidecar and building timeline…")
+        decoder = RigMidiDecoder.from_file(decoder_path)
+        candidate = cls(song, path, decoder, resolve_audio_on_init=False)
+        progress("Resolving audio…")
+        candidate.resolve_audio(audio_root)
+        progress("Preparing views…")
+        # Force the projections used immediately by the UI while still on the
+        # worker; their results remain derived, not serialized state.
+        candidate.song_end_units
+        return candidate
 
     @staticmethod
     def show_path(path: str | Path) -> Path:
