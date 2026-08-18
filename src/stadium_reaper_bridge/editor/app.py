@@ -16,7 +16,7 @@ from ..show import MidiRoute, ReapcaseShow, SHOW_SUFFIX
 from ..runtime import LiveRuntime, Readiness, ShowPreloader
 
 from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_HEIGHT,
-                     drag_units, fit_song_scale, horizontal_wheel_units,
+                     drag_units, fit_range_scale, fit_song_scale, horizontal_wheel_units,
                      marquee_candidates, normalized_rectangle, snap_drag_delta,
                      snapped_units_at_x, timeline_x, units_at_x,
                      zoom_about_cursor)
@@ -44,8 +44,10 @@ from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
                        raster_ppm, timeline_units_to_x, viewport_columns)
 from .ergonomics import BackupError, DialogPositions, follow_scroll
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
+                         adjacent_event_index, adjacent_marker_index, focused_lane_visibility,
                          marker_region_rows, move_visible_lane,
                          normalized_lane_order, visible_lane_layout)
+from .inspector import inspector_projection
 
 
 class Tooltip:
@@ -96,11 +98,15 @@ class ReapcaseEditor(tk.Tk):
         self.pixels_per_beat = DEFAULT_PIXELS_PER_BEAT
         self.drag_x: float | None = None
         self.drag_preview: MovePreview | None = None
+        self.drag_copy = False
         self.playhead_drag = False
         self._follow_suspended_until = 0.0
         self._dialog_positions = DialogPositions({})
         self.view_state = ViewState()
         self.current_view = tk.StringVar(value="timeline")
+        self.inspector_visible = tk.BooleanVar(value=False)
+        self._lane_focus: str | None = None
+        self._focus_visibility: dict[str, bool] | None = None
         self.lane_visibility = {lane: tk.BooleanVar(value=True) for lane in LANES + ("AUDIO",)}
         self.lane_order = self._load_lane_order()
         self.loading = False
@@ -248,6 +254,14 @@ class ReapcaseEditor(tk.Tk):
         self.event_tree.bind("<<TreeviewSelect>>", self._event_list_selected)
         self.event_tree.bind("<Double-Button-1>", self._event_list_edit)
         self.event_tree.bind("<Return>", self._event_list_go_to)
+        self.inspector = ttk.LabelFrame(self.main_content, text="INSPECTOR", padding=10)
+        self.inspector_heading = tk.StringVar(value="No selection")
+        self.inspector_position = tk.StringVar(value="")
+        ttk.Label(self.inspector, textvariable=self.inspector_heading,
+                  font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+        ttk.Label(self.inspector, textvariable=self.inspector_position).pack(anchor="w", pady=(4, 10))
+        self.inspector_fields = ttk.Frame(self.inspector); self.inspector_fields.pack(fill="both", expand=True)
+        ttk.Button(self.inspector, text="Edit…", command=self._inspector_edit).pack(anchor="e", pady=(8, 0))
         self._update_zoom_label()
         ttk.Label(self, textvariable=self.status, style="Status.TLabel", anchor="w", padding=5).pack(fill="x")
 
@@ -270,12 +284,27 @@ class ReapcaseEditor(tk.Tk):
         view.add_radiobutton(label="Event List", variable=self.current_view, value="event_list",
                              command=lambda: self.switch_view("event_list"), accelerator="Ctrl+2")
         view.add_separator()
+        view.add_checkbutton(label="Inspector", variable=self.inspector_visible,
+                             command=self.toggle_inspector)
         view.add_command(label="Lane Manager...", command=self.open_lane_manager)
         view.add_command(label="Marker / Region Manager...", command=self.open_marker_manager)
+        view.add_separator()
+        view.add_command(label="Zoom Entire Song", command=self.fit_song, accelerator="F")
+        view.add_command(label="Zoom to Selection", command=self.fit_selection, accelerator="Shift+F")
+        view.add_command(label="Exit Lane Focus", command=self.exit_lane_focus)
         bar.add_cascade(label="View", menu=view)
         self.configure(menu=bar)
         self.bind_all("<Control-Key-1>", lambda _e: self.switch_view("timeline"))
         self.bind_all("<Control-Key-2>", lambda _e: self.switch_view("event_list"))
+        self.bind_all("<Control-d>", self.duplicate_selected)
+        self.bind_all("<Key-f>", lambda e: self.fit_song() if not isinstance(e.widget, (tk.Entry, ttk.Entry)) else None)
+        self.bind_all("<Shift-Key-F>", lambda e: self.fit_selection() if not isinstance(e.widget, (tk.Entry, ttk.Entry)) else None)
+        self.bind_all("<Tab>", lambda e: self.navigate_event(1))
+        self.bind_all("<Shift-Tab>", lambda e: self.navigate_event(-1))
+        self.bind_all("<bracketright>", lambda e: self.navigate_marker(1))
+        self.bind_all("<bracketleft>", lambda e: self.navigate_marker(-1))
+        self.bind_all("<Home>", lambda e: self.go_song_edge(False))
+        self.bind_all("<End>", lambda e: self.go_song_edge(True))
 
     def switch_view(self, view):
         self.view_state.switch(view); self.current_view.set(view)
@@ -285,6 +314,78 @@ class ReapcaseEditor(tk.Tk):
         else:
             self.timeline_frame.grid_forget(); self.event_list_frame.grid(row=0, column=0, sticky="nsew")
             self._refresh_event_list()
+
+    def toggle_inspector(self):
+        if self.inspector_visible.get():
+            self.inspector.grid(row=0, column=1, sticky="nsew")
+            self.main_content.columnconfigure(1, minsize=240)
+            self._refresh_inspector()
+        else:
+            self.inspector.grid_forget()
+            self.main_content.columnconfigure(1, minsize=0)
+
+    def _refresh_inspector(self):
+        if not hasattr(self, "inspector_fields") or not self.inspector_visible.get():
+            return
+        for child in self.inspector_fields.winfo_children():
+            child.destroy()
+        projection = inspector_projection(self.model, self.model.selected) if self.model else None
+        self.inspector_heading.set(projection.heading if projection else "No selection")
+        self.inspector_position.set(projection.position if projection else "")
+        if projection:
+            for row, (label, value) in enumerate(projection.fields):
+                ttk.Label(self.inspector_fields, text=label).grid(row=row, column=0, sticky="nw", pady=2)
+                ttk.Label(self.inspector_fields, text=value, wraplength=150).grid(
+                    row=row, column=1, sticky="nw", padx=(10, 0), pady=2)
+
+    def _inspector_edit(self):
+        if self.model and len(self.model.selected) == 1:
+            self.edit_event(next(iter(self.model.selected)))
+
+    def _effective_lane_visibility(self):
+        normal = {lane: var.get() for lane, var in self.lane_visibility.items()}
+        return focused_lane_visibility(normal, self._lane_focus) if self._lane_focus else normal
+
+    def focus_lane(self, lane):
+        if self._lane_focus == lane:
+            self.exit_lane_focus(); return
+        if self._lane_focus is None:
+            self._focus_visibility = {name: var.get() for name, var in self.lane_visibility.items()}
+        self._lane_focus = lane
+        self.status.set(f"Focus: {lane}"); self.redraw()
+
+    def exit_lane_focus(self):
+        self._lane_focus = None
+        # Normal BooleanVars were never changed; this snapshot documents and
+        # enforces that focus remains a temporary presentation overlay.
+        if self._focus_visibility:
+            for name, value in self._focus_visibility.items():
+                self.lane_visibility[name].set(value)
+        self._focus_visibility = None; self.redraw()
+
+    def _navigate_to_index(self, index):
+        if index is None or not self.model:
+            return "break"
+        self.model.selected = {index}
+        units = self.model._units(self.model.timeline.events[index].position)
+        self.seek_units(units); self.jump_to_units(units); self._refresh_inspector(); self.redraw()
+        return "break"
+
+    def navigate_event(self, direction):
+        if not self.model: return "break"
+        current = self.model._units(self.model.cursor)
+        visible = [lane for lane, shown in self._effective_lane_visibility().items() if shown]
+        return self._navigate_to_index(adjacent_event_index(self.model, current, direction, visible))
+
+    def navigate_marker(self, direction):
+        if not self.model: return "break"
+        return self._navigate_to_index(adjacent_marker_index(
+            self.model, self.model._units(self.model.cursor), direction))
+
+    def go_song_edge(self, end):
+        if not self.model: return "break"
+        units = self.model.song_end_units if end else 0
+        self.seek_units(units); self.jump_to_units(units); self.redraw(); return "break"
 
     def _refresh_event_list(self):
         if not hasattr(self, "event_tree"): return
@@ -302,7 +403,9 @@ class ReapcaseEditor(tk.Tk):
         for index, (_, item) in enumerate(values): self.event_tree.move(item, "", index)
 
     def _event_list_selected(self, _event=None):
-        if self.model: self.model.selected = {int(item) for item in self.event_tree.selection()}
+        if self.model:
+            self.model.selected = {int(item) for item in self.event_tree.selection()}
+            self._refresh_inspector()
 
     def _event_list_edit(self, _event=None):
         selected = self.event_tree.selection()
@@ -720,7 +823,7 @@ class ReapcaseEditor(tk.Tk):
         m = self.model
         total_beats = m.song_end_units / m.song.ppqn + 2
         width = HEADER_WIDTH + total_beats * self.pixels_per_beat
-        visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
+        visibility = self._effective_lane_visibility()
         layout = visible_lane_layout(self.lane_order, visibility)
         visible_lanes = layout.lanes
         audio_visible = visibility.get("AUDIO", True)
@@ -1118,7 +1221,7 @@ class ReapcaseEditor(tk.Tk):
                            self.pixels_per_beat)
             if not preview.valid:
                 x += preview.delta_units / self.model.song.ppqn * self.pixels_per_beat
-            visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
+            visibility = self._effective_lane_visibility()
             layout = visible_lane_layout(self.lane_order, visibility)
             event_lane = self.model.lane(event)
             if event_lane not in layout.lanes: continue
@@ -1206,13 +1309,14 @@ class ReapcaseEditor(tk.Tk):
             else:
                 self.model.select_for_drag(index, toggle=bool(event.state & 0x4))
             self.drag_x = x
+            self.drag_copy = bool(event.state & 0x20000)
             self.drag_preview = self.model.preview_shift(0)
         else:
             y = self.canvas.canvasy(event.y)
             self.marquee_anchor = self.marquee_point = (x, y)
             self.marquee_base = set(self.model.selected)
             self.marquee_mode = "toggle" if event.state & 0x4 else ("add" if event.state & 0x1 else "replace")
-        self.redraw()
+        self._refresh_inspector(); self.redraw()
 
     def timeline_hover(self, event):
         """Advertise the ruler seek affordance and update its position readout."""
@@ -1256,7 +1360,7 @@ class ReapcaseEditor(tk.Tk):
             return
         if event.x < HEADER_WIDTH:
             return
-        visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
+        visibility = self._effective_lane_visibility()
         layout = visible_lane_layout(self.lane_order, visibility)
         lane = next((lane for lane in layout.lanes
                      if layout.tops[lane] <= y < layout.tops[lane] + lane_height(lane)), None)
@@ -1360,7 +1464,7 @@ class ReapcaseEditor(tk.Tk):
             menu.grab_release()
 
     def edit_at_pointer(self, event):
-        """Double-click edits only a concrete semantic event; empty lanes are inert."""
+        """Edit an event, focus a header, or dispatch lane-aware creation."""
         if self.app_mode.get() == "LIVE" or not self.model:
             return
         tags = self.canvas.gettags("current")
@@ -1371,6 +1475,15 @@ class ReapcaseEditor(tk.Tk):
         index = self._event_index(event)
         if index is not None and self.model.edit_capability(index):
             self.edit_event(index)
+            return
+        y = self.canvas.canvasy(event.y)
+        layout = visible_lane_layout(self.lane_order, self._effective_lane_visibility())
+        lane = next((name for name in layout.lanes
+                     if layout.tops[name] <= y < layout.tops[name] + lane_height(name)), None)
+        if lane and event.x < HEADER_WIDTH:
+            self.focus_lane(lane)
+        elif lane and event.x >= HEADER_WIDTH:
+            self.context_menu(event)
 
     def edit_instruction(self, identity):
         item = next(item for item in self.model.instructions if item.id == identity)
@@ -1563,7 +1676,7 @@ class ReapcaseEditor(tk.Tk):
         if self.audio_drag:
             source, _ = self.audio_drag
             y = self.canvas.canvasy(event.y)
-            visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
+            visibility = self._effective_lane_visibility()
             top = visible_lane_layout(self.lane_order, visibility).audio_top
             target = max(0, min(len(self.model.audio_tracks) - 1,
                                 int((y - top + LANE_HEIGHT / 2) // LANE_HEIGHT)))
@@ -1621,11 +1734,17 @@ class ReapcaseEditor(tk.Tk):
         if self.drag_x is None: return
         preview = self.drag_preview
         if preview and preview.valid:
-            self.model.commit_preview(preview)
+            if self.drag_copy:
+                anchor = min(self.model._units(position) for position in preview.original)
+                self.model.duplicate_events(preview.indices, anchor + preview.delta_units,
+                                            anchor_units=anchor)
+            else:
+                self.model.commit_preview(preview)
             self._refresh_navigation()
         self.drag_x = None
+        self.drag_copy = False
         self.drag_preview = None
-        self.redraw()
+        self._refresh_inspector(); self.redraw()
 
     @staticmethod
     def _wheel_direction(event):
@@ -1665,6 +1784,21 @@ class ReapcaseEditor(tk.Tk):
         self.redraw()
         self.canvas.xview_moveto(0)
         self.redraw()
+
+    def fit_selection(self):
+        if not self.model or not self.model.selected:
+            return
+        units = [self.model._units(self.model.timeline.events[i].position)
+                 for i in self.model.selected]
+        start, end = min(units), max(units)
+        self.pixels_per_beat = fit_range_scale(start, end, self.model.song.ppqn,
+                                               self.canvas.winfo_width())
+        self.redraw()
+        left = jump_viewport_left(start, self.model.song.ppqn, self.pixels_per_beat,
+                                  self.canvas.winfo_width(), .08)
+        region = self.canvas.cget("scrollregion").split()
+        width = float(region[2]) if len(region) == 4 else 1
+        self.canvas.xview_moveto(left / max(1, width)); self.redraw()
 
     def _update_zoom_label(self):
         self.zoom_label.set(f"{self.pixels_per_beat / DEFAULT_PIXELS_PER_BEAT:.0%}")
@@ -1727,7 +1861,7 @@ class ReapcaseEditor(tk.Tk):
 
     def _audio_index_at_y(self, y):
         if not self.model: return None
-        visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
+        visibility = self._effective_lane_visibility()
         if not visibility.get("AUDIO", True): return None
         top = visible_lane_layout(self.lane_order, visibility).audio_top
         index = int((y - top) // LANE_HEIGHT)
@@ -1752,10 +1886,12 @@ class ReapcaseEditor(tk.Tk):
             self.model.delete_selected()
             self._redraw_after_model_change()
 
-    def duplicate_selected(self):
+    def duplicate_selected(self, _event=None):
         if self.app_mode.get() == "LIVE": return
         if self.model:
-            self.model.duplicate_selected()
+            count = self.model.duplicate_selected()
+            if count:
+                self.status.set(f"{count} {'event' if count == 1 else 'events'} duplicated")
             self._redraw_after_model_change()
 
     def seek_units(self, units):

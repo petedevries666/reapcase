@@ -106,6 +106,16 @@ def fit_song_scale(song_end_units: int, ppqn: int, viewport_width: float,
     return clamp_zoom(usable / beats, minimum, maximum)
 
 
+def fit_range_scale(start_units: int, end_units: int, ppqn: int,
+                    viewport_width: float, *, single_window_beats: float = 8.0,
+                    minimum: float = MIN_PIXELS_PER_BEAT,
+                    maximum: float = MAX_PIXELS_PER_BEAT) -> float:
+    """Fit a selected musical range, keeping point selections useful and finite."""
+    span_beats = max(single_window_beats, abs(end_units - start_units) / ppqn)
+    usable = max(1.0, viewport_width - HEADER_WIDTH - 32)
+    return clamp_zoom(usable / (span_beats * 1.1), minimum, maximum)
+
+
 def normalized_rectangle(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float]:
     """Return direction-independent left, top, right, bottom bounds."""
     return min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)

@@ -141,3 +141,30 @@ def jump_viewport_left(units: int, ppqn: int, pixels_per_beat: float,
     """Place a musical target near the first third of the viewport."""
     x = timeline_x(units, ppqn, pixels_per_beat)
     return max(0.0, x - max(1.0, viewport_width) * target)
+
+
+def focused_lane_visibility(normal: dict[str, bool], lane: str) -> dict[str, bool]:
+    """Apply temporary focus without mutating the preference mapping."""
+    return {name: bool(name == lane or (name == "STRUCTURE" and lane != "STRUCTURE"))
+            for name in normal}
+
+
+def adjacent_event_index(model, current_units: int, direction: int,
+                         visible_lanes=None) -> int | None:
+    """Return the canonical chronological neighbour in visible semantic lanes."""
+    visible = set(visible_lanes or ())
+    ordered = sorted(((model._units(event.position), i) for i, event in enumerate(model.timeline.events)
+                      if not visible or model.lane(event) in visible))
+    candidates = [(units, i) for units, i in ordered
+                  if units > current_units] if direction > 0 else [
+                      (units, i) for units, i in ordered if units < current_units]
+    return (candidates[0][1] if direction > 0 else candidates[-1][1]) if candidates else None
+
+
+def adjacent_marker_index(model, current_units: int, direction: int) -> int | None:
+    rows = marker_region_rows(model)
+    candidates = [row for row in rows if (row.units > current_units if direction > 0
+                                           else row.units < current_units)]
+    if not candidates:
+        return None
+    return (candidates[0] if direction > 0 else candidates[-1]).indices[0]
