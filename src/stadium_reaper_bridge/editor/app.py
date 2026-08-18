@@ -40,6 +40,8 @@ from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTra
 from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
                        raster_ppm, timeline_units_to_x, viewport_columns)
 from .ergonomics import BackupError, DialogPositions, follow_scroll
+from .navigation import (ViewState, event_list_rows, jump_viewport_left,
+                         marker_region_rows, visible_lane_layout)
 
 
 class Tooltip:
@@ -93,6 +95,11 @@ class ReapcaseEditor(tk.Tk):
         self.playhead_drag = False
         self._follow_suspended_until = 0.0
         self._dialog_positions = DialogPositions({})
+        self.view_state = ViewState()
+        self.current_view = tk.StringVar(value="timeline")
+        self.lane_visibility = {lane: tk.BooleanVar(value=True) for lane in LANES + ("AUDIO",)}
+        self._manager_windows = {}
+        self._event_rows = {}
         self.audio_drag: tuple[int, int] | None = None
         self.marquee_anchor: tuple[float, float] | None = None
         self.marquee_point: tuple[float, float] | None = None
@@ -134,6 +141,7 @@ class ReapcaseEditor(tk.Tk):
         self.after(33, self._transport_tick)
 
     def _build(self):
+        self._build_menu()
         toolbar = ttk.Frame(self, padding=6); toolbar.pack(fill="x")
         for icon, tip, command in (("▣", "Open Song JSON", self.open_json),
                                    ("▥", "Save Song JSON", self.save),
@@ -190,7 +198,10 @@ class ReapcaseEditor(tk.Tk):
         ttk.Button(transport, text="Play / Pause", command=self.play_pause).pack(side="left", padx=3)
         ttk.Button(transport, text="Stop", command=self.stop_playback).pack(side="left")
         ttk.Label(transport, textvariable=self.transport_position, font=("TkFixedFont", 10)).pack(side="left", padx=14)
-        frame = ttk.Frame(self); frame.pack(fill="both", expand=True)
+        self.main_content = ttk.Frame(self); self.main_content.pack(fill="both", expand=True)
+        frame = ttk.Frame(self.main_content); frame.grid(row=0, column=0, sticky="nsew")
+        self.timeline_frame = frame
+        self.main_content.rowconfigure(0, weight=1); self.main_content.columnconfigure(0, weight=1)
         self.canvas = tk.Canvas(frame, background=TIMELINE.base, highlightthickness=0)
         xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self._scroll_horizontal)
         yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.canvas.yview)
@@ -215,8 +226,148 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.bind("<Motion>", self.timeline_hover)
         self.canvas.bind("<Control-c>", self.copy_events)
         self.canvas.bind("<Control-v>", self.paste_events)
+        self.event_list_frame = ttk.Frame(self.main_content)
+        columns = ("position", "lane", "type", "name", "details")
+        self.event_tree = ttk.Treeview(self.event_list_frame, columns=columns, show="headings", selectmode="extended")
+        for column, title, width in (("position", "Position", 110), ("lane", "Lane", 130),
+                                     ("type", "Type", 120), ("name", "Name / Action", 220),
+                                     ("details", "Details", 260)):
+            self.event_tree.heading(column, text=title, command=lambda c=column: self._sort_event_list(c))
+            self.event_tree.column(column, width=width, anchor="w")
+        event_scroll = ttk.Scrollbar(self.event_list_frame, orient="vertical", command=self.event_tree.yview)
+        self.event_tree.configure(yscrollcommand=event_scroll.set)
+        self.event_tree.pack(side="left", fill="both", expand=True); event_scroll.pack(side="right", fill="y")
+        self.event_tree.bind("<<TreeviewSelect>>", self._event_list_selected)
+        self.event_tree.bind("<Double-Button-1>", self._event_list_edit)
+        self.event_tree.bind("<Return>", self._event_list_go_to)
         self._update_zoom_label()
         ttk.Label(self, textvariable=self.status, style="Status.TLabel", anchor="w", padding=5).pack(fill="x")
+
+    def _build_menu(self):
+        bar = tk.Menu(self)
+        file_menu = tk.Menu(bar, tearoff=False)
+        file_menu.add_command(label="Open JSON...", command=self.open_json)
+        file_menu.add_command(label="Save", command=self.save)
+        file_menu.add_command(label="Save As...", command=self.save_as)
+        bar.add_cascade(label="File", menu=file_menu)
+        edit = tk.Menu(bar, tearoff=False)
+        for label, command, shortcut in (("Undo", self.undo, "Ctrl+Z"), ("Copy", self.copy_events, "Ctrl+C"),
+                                          ("Paste", self.paste_events, "Ctrl+V"), ("Duplicate", self.duplicate_selected, ""),
+                                          ("Delete", self.delete_selected, "Delete")):
+            edit.add_command(label=label, command=command, accelerator=shortcut)
+        bar.add_cascade(label="Edit", menu=edit)
+        view = tk.Menu(bar, tearoff=False)
+        view.add_radiobutton(label="Timeline", variable=self.current_view, value="timeline",
+                             command=lambda: self.switch_view("timeline"), accelerator="Ctrl+1")
+        view.add_radiobutton(label="Event List", variable=self.current_view, value="event_list",
+                             command=lambda: self.switch_view("event_list"), accelerator="Ctrl+2")
+        view.add_separator()
+        view.add_command(label="Lane Manager...", command=self.open_lane_manager)
+        view.add_command(label="Marker / Region Manager...", command=self.open_marker_manager)
+        bar.add_cascade(label="View", menu=view)
+        self.configure(menu=bar)
+        self.bind_all("<Control-Key-1>", lambda _e: self.switch_view("timeline"))
+        self.bind_all("<Control-Key-2>", lambda _e: self.switch_view("event_list"))
+
+    def switch_view(self, view):
+        self.view_state.switch(view); self.current_view.set(view)
+        if view == "timeline":
+            self.event_list_frame.grid_forget(); self.timeline_frame.grid(row=0, column=0, sticky="nsew")
+            self.redraw()
+        else:
+            self.timeline_frame.grid_forget(); self.event_list_frame.grid(row=0, column=0, sticky="nsew")
+            self._refresh_event_list()
+
+    def _refresh_event_list(self):
+        if not hasattr(self, "event_tree"): return
+        self.event_tree.delete(*self.event_tree.get_children()); self._event_rows = {}
+        if not self.model: return
+        for row in event_list_rows(self.model):
+            item = self.event_tree.insert("", "end", iid=str(row.index),
+                values=(row.position, row.lane, row.kind, row.name, row.details))
+            self._event_rows[item] = row
+        self.event_tree.selection_set([str(i) for i in self.model.selected if str(i) in self._event_rows])
+
+    def _sort_event_list(self, column):
+        values = [(self.event_tree.set(item, column), item) for item in self.event_tree.get_children("")]
+        values.sort(key=lambda pair: pair[0].casefold())
+        for index, (_, item) in enumerate(values): self.event_tree.move(item, "", index)
+
+    def _event_list_selected(self, _event=None):
+        if self.model: self.model.selected = {int(item) for item in self.event_tree.selection()}
+
+    def _event_list_edit(self, _event=None):
+        selected = self.event_tree.selection()
+        if selected: self.edit_event(int(selected[0]))
+
+    def _event_list_go_to(self, _event=None):
+        selected = self.event_tree.selection()
+        if selected and self.model: self.jump_to_units(self._event_rows[selected[0]].units)
+        return "break"
+
+    def jump_to_units(self, units):
+        if not self.model: return
+        self.seek_units(units); self.redraw()
+        region = self.canvas.cget("scrollregion").split()
+        total = float(region[2]) if len(region) == 4 else 1.0
+        left = jump_viewport_left(units, self.model.song.ppqn, self.pixels_per_beat,
+                                  self.canvas.winfo_width())
+        self.canvas.xview_moveto(left / max(1.0, total)); self.redraw()
+
+    def _manager(self, family, title, build):
+        existing = self._manager_windows.get(family)
+        if existing and existing.winfo_exists(): existing.deiconify(); existing.lift(); existing.focus_force(); return existing
+        win = tk.Toplevel(self); win.title(title); self._manager_windows[family] = win
+        build(win)
+        self._prepare_dialog(win, family)
+        return win
+
+    def open_lane_manager(self):
+        def build(win):
+            body = ttk.Frame(win, padding=12); body.pack(fill="both", expand=True)
+            for lane in LANES + ("AUDIO",):
+                ttk.Checkbutton(body, text=lane, variable=self.lane_visibility[lane], command=self.redraw).pack(anchor="w")
+            controls = ttk.Frame(body); controls.pack(fill="x", pady=(10, 0))
+            def set_all(value):
+                for variable in self.lane_visibility.values(): variable.set(value)
+                self.redraw()
+            ttk.Button(controls, text="All", command=lambda: set_all(True)).pack(side="left")
+            ttk.Button(controls, text="None", command=lambda: set_all(False)).pack(side="left", padx=5)
+        self._manager("lane_manager", "Lane Manager", build)
+
+    def open_marker_manager(self):
+        def build(win):
+            tree = ttk.Treeview(win, columns=("position", "kind", "name", "end"), show="headings")
+            for col, title, width in (("position", "Position", 110), ("kind", "Kind", 100),
+                                      ("name", "Name", 220), ("end", "End / Duration", 130)):
+                tree.heading(col, text=title); tree.column(col, width=width)
+            tree.pack(fill="both", expand=True)
+            def refresh():
+                tree.delete(*tree.get_children())
+                if self.model:
+                    for n, row in enumerate(marker_region_rows(self.model)):
+                        tree.insert("", "end", iid=str(n), values=(row.position, row.kind, row.name, row.end), tags=(str(row.units),))
+            def jump(_event=None):
+                selected=tree.selection()
+                if selected: self.jump_to_units(int(tree.item(selected[0], "tags")[0]))
+            tree.bind("<Double-Button-1>", jump); ttk.Button(win, text="Jump", command=jump).pack(pady=6)
+            win._refresh_rows = refresh; refresh()
+        self._manager("marker_region_manager", "Marker / Region Manager", build)
+
+    def _refresh_navigation(self):
+        """Rebuild model-derived utility rows after a structural model change.
+
+        This deliberately is not part of :meth:`redraw`: transport animation,
+        scrolling, and playhead motion repaint the canvas without touching Tk
+        Treeviews.
+        """
+        if self.current_view.get() == "event_list": self._refresh_event_list()
+        win = self._manager_windows.get("marker_region_manager")
+        if win and win.winfo_exists() and hasattr(win, "_refresh_rows"): win._refresh_rows()
+
+    def _redraw_after_model_change(self):
+        self._refresh_navigation()
+        self.redraw()
 
     def _show_changed(self):
         self.setlist.delete(0, "end")
@@ -351,7 +502,7 @@ class ReapcaseEditor(tk.Tk):
         if self.manual_audio_root:
             self.model.resolve_audio(self.manual_audio_root)
         self._configure_audio()
-        self.redraw()
+        self._redraw_after_model_change()
 
     def _save_to(self, path):
         try:
@@ -482,18 +633,21 @@ class ReapcaseEditor(tk.Tk):
         m = self.model
         total_beats = m.song_end_units / m.song.ppqn + 2
         width = HEADER_WIDTH + total_beats * self.pixels_per_beat
-        all_lanes = list(LANES) + [f"AUDIO {track.number}" for track in m.audio_tracks]
-        editor_height = sum(lane_height(lane) for lane in LANES)
-        height = RULER_HEIGHT + editor_height + len(m.audio_tracks) * LANE_HEIGHT
+        visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
+        layout = visible_lane_layout(LANES, visibility)
+        visible_lanes = layout.lanes
+        audio_visible = visibility.get("AUDIO", True)
+        all_lanes = list(visible_lanes) + ([f"AUDIO {track.number}" for track in m.audio_tracks] if audio_visible else [])
+        editor_height = layout.event_bottom - RULER_HEIGHT
+        height = layout.event_bottom + (len(m.audio_tracks) * LANE_HEIGHT if audio_visible else 0)
         # The ruler is a dedicated seek surface, deliberately separate from
         # both the transport above and the editable lanes below.
         self.canvas.create_rectangle(HEADER_WIDTH, 0, width, RULER_HEIGHT,
                                      fill=TIMELINE.ruler, outline=TIMELINE.ruler_edge, tags=("ruler",))
-        lane_tops = []
+        lane_tops = dict(layout.tops)
         y = RULER_HEIGHT
         for lane_index, lane in enumerate(all_lanes):
             current_height = lane_height(lane) if lane in LANES else LANE_HEIGHT
-            lane_tops.append(y)
             if lane in LANES:
                 lane_style = lane_colors(lane)
                 background = lane_style.background
@@ -533,10 +687,10 @@ class ReapcaseEditor(tk.Tk):
         region_sources = {i for region in structure_layout.regions for i in region.source_event_indices}
         view_left = self.canvas.canvasx(0) + HEADER_WIDTH
         colors = lane_colors("STRUCTURE")
-        for region in structure_layout.regions:
+        for region in structure_layout.regions if "STRUCTURE" in visible_lanes else ():
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
-            sub_y = lane_tops[0] if region.kind == "marker" else lane_tops[0] + MARKERS_HEIGHT + PAUSES_HEIGHT
+            sub_y = lane_tops["STRUCTURE"] if region.kind == "marker" else lane_tops["STRUCTURE"] + MARKERS_HEIGHT + PAUSES_HEIGHT
             source = region.source_event_indices[0]
             selected = any(index in m.selected for index in region.source_event_indices)
             fill = colors.selected if selected else colors.normal
@@ -561,10 +715,11 @@ class ReapcaseEditor(tk.Tk):
         looper_sources = {region.source_event_indices[0] for region in looper_regions}
         state_fill = LOOPER_STATE_FILLS
         for region in looper_regions:
+            if region.system not in visible_lanes: continue
             lane = LANES.index(region.system)
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
-            bounds = looper_item_bounds(LANES, region.system, x1, x2)
+            bounds = looper_item_bounds(visible_lanes, region.system, x1, x2)
             _, y1, _, y2 = bounds
             source = region.source_event_indices[0]
             selected = source in m.selected
@@ -585,10 +740,10 @@ class ReapcaseEditor(tk.Tk):
         lighting_sources = {region.source_event_index for region in lighting_regions}
         lights_lane = LANES.index("LIGHTS")
         palette = lane_colors("LIGHTS")
-        for region in lighting_regions:
+        for region in lighting_regions if "LIGHTS" in visible_lanes else ():
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
-            y1, y2 = lane_tops[lights_lane] + 5, lane_tops[lights_lane] + LANE_HEIGHT - 5
+            y1, y2 = lane_tops["LIGHTS"] + 5, lane_tops["LIGHTS"] + LANE_HEIGHT - 5
             source = region.source_event_index
             selected = source in m.selected
             tags = (f"event:{source}",)
@@ -605,9 +760,9 @@ class ReapcaseEditor(tk.Tk):
         sequence = m.sequence_layout
         visible_left = self.canvas.canvasx(0)
         visible_right = visible_left + max(1, self.canvas.winfo_width())
-        click_y = lane_tops[LANES.index("SEQCLICK")]
+        click_y = lane_tops.get("SEQCLICK", 0)
         click_palette = lane_colors("SEQCLICK")
-        for point in sequence.clicks:
+        for point in sequence.clicks if "SEQCLICK" in visible_lanes else ():
             x = timeline_x(point.units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(point.end_units, m.song.ppqn, self.pixels_per_beat)
             if x2 < visible_left or x > visible_right:
@@ -634,9 +789,9 @@ class ReapcaseEditor(tk.Tk):
                 tags=mute_tags)
             self.canvas.create_text((button_left + x2 - 2) / 2, y1 + 11, text="M",
                 fill=THEME.text, font=("TkDefaultFont", 7, "bold"), tags=mute_tags)
-        instruction_y = lane_tops[LANES.index("SEQ INSTRUCTIONS")]
+        instruction_y = lane_tops.get("SEQ INSTRUCTIONS", 0)
         instruction_palette = lane_colors("SEQ INSTRUCTIONS")
-        for clip in sequence.instructions:
+        for clip in sequence.instructions if "SEQ INSTRUCTIONS" in visible_lanes else ():
             x = timeline_x(clip.units, m.song.ppqn, self.pixels_per_beat)
             next_position = m.timing_map.shift_position(clip.position, beats=1)
             x2 = timeline_x(m._units(next_position), m.song.ppqn, self.pixels_per_beat)
@@ -671,16 +826,18 @@ class ReapcaseEditor(tk.Tk):
                         bounds[3], fill=TIMELINE.drag_fill, outline=TIMELINE.drag_outline, stipple="gray50",
                         width=2, tags=("sequence-drag-preview",))
         for i, event in enumerate(m.timeline.events):
+            if m.lane(event) not in visible_lanes:
+                continue
             if i in region_sources or i in looper_sources or i in lighting_sources:
                 continue
             lane = LANES.index(m.lane(event)); x = timeline_x(m._units(event.position), m.song.ppqn, self.pixels_per_beat)
-            y = lane_tops[lane] + 27
+            y = lane_tops[m.lane(event)] + 27
             if lane == 0:
                 sublane = structure_sublane(event)
-                y = lane_tops[0] + {"markers": 3, "pauses": MARKERS_HEIGHT + 1,
+                y = lane_tops["STRUCTURE"] + {"markers": 3, "pauses": MARKERS_HEIGHT + 1,
                                     "cycles": MARKERS_HEIGHT + PAUSES_HEIGHT + 3}[sublane]
             elif m.lane(event) in COMPOSITE_LANES:
-                row_top, _ = sublane_bounds(LANES, m.lane(event),
+                row_top, _ = sublane_bounds(visible_lanes, m.lane(event),
                                              event_sublane(event, m.lane(event)))
                 y = row_top + 3
             selected = i in m.selected
@@ -692,7 +849,7 @@ class ReapcaseEditor(tk.Tk):
                     else m.label(event))
             if is_looper_point:
                 looper_y1, looper_y2 = sublane_content_bounds(
-                    LANES, event_lane, "looper")
+                    visible_lanes, event_lane, "looper")
                 text_y = (looper_y1 + looper_y2) / 2
             else:
                 text_y = y + 10
@@ -701,7 +858,7 @@ class ReapcaseEditor(tk.Tk):
                                            tags=(f"event:{i}",))
             box = self.canvas.bbox(item)
             palette = lane_colors(m.lane(event))
-            bounds = (looper_item_bounds(LANES, event_lane, x, box[2] + 4)
+            bounds = (looper_item_bounds(visible_lanes, event_lane, x, box[2] + 4)
                       if is_looper_point else
                       (box[0]-4, box[1]-3, box[2]+4, box[3]+3))
             rect = self.canvas.create_rectangle(*bounds,
@@ -711,8 +868,8 @@ class ReapcaseEditor(tk.Tk):
                                                 tags=(f"event:{i}",))
             self.event_bounds[i] = bounds
             self.canvas.tag_raise(item)
-        for lane_offset, track in enumerate(m.audio_tracks):
-            y = RULER_HEIGHT + editor_height + lane_offset * LANE_HEIGHT
+        for lane_offset, track in enumerate(m.audio_tracks if audio_visible else ()):
+            y = layout.audio_top + lane_offset * LANE_HEIGHT
             flags = " ".join(word for enabled, word in ((track.source.get("mute"), "MUTE"),
                                                           (track.source.get("solo"), "SOLO")) if enabled)
             levels = f"trim {track.source.get('trim', '?')}  gain {track.source.get('gain', '?')}"
@@ -782,9 +939,11 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.create_rectangle(view_left, 0, view_left + HEADER_WIDTH, RULER_HEIGHT,
                                      fill=THEME.app, outline=TIMELINE.separator,
                                      tags=("fixed-header",))
+        header_y = RULER_HEIGHT
         for lane_index, lane in enumerate(all_lanes):
-            y = lane_tops[lane_index]
+            y = header_y
             current_height = lane_height(lane) if lane in LANES else LANE_HEIGHT
+            header_y += current_height
             if lane in LANES:
                 lane_style = lane_colors(lane)
                 background = lane_style.background
@@ -815,8 +974,8 @@ class ReapcaseEditor(tk.Tk):
                                             anchor="nw", fill=TIMELINE.sublane_text,
                                             font=("TkDefaultFont", 7),
                                             tags=("fixed-header",))
-            if lane_index >= len(LANES):
-                audio_index = lane_index - len(LANES)
+            if lane not in LANES:
+                audio_index = lane_index - len(visible_lanes)
                 track = m.audio_tracks[audio_index]
                 flags = " ".join(word for enabled, word in
                                  ((track.source.get("mute"), "MUTE"),
@@ -874,11 +1033,14 @@ class ReapcaseEditor(tk.Tk):
                            self.pixels_per_beat)
             if not preview.valid:
                 x += preview.delta_units / self.model.song.ppqn * self.pixels_per_beat
-            lane_index = LANES.index(self.model.lane(event))
-            y = lane_top(lane_index) + 27
-            if lane_index == 0:
-                y = lane_top(0) + {"markers": 3, "pauses": MARKERS_HEIGHT + 1,
-                                   "cycles": MARKERS_HEIGHT + PAUSES_HEIGHT + 3}[structure_sublane(event)]
+            visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
+            layout = visible_lane_layout(LANES, visibility)
+            event_lane = self.model.lane(event)
+            if event_lane not in layout.lanes: continue
+            y = layout.tops[event_lane] + 27
+            if event_lane == "STRUCTURE":
+                y = layout.tops[event_lane] + {"markers": 3, "pauses": MARKERS_HEIGHT + 1,
+                    "cycles": MARKERS_HEIGHT + PAUSES_HEIGHT + 3}[structure_sublane(event)]
             text = self.model.label(event)
             item = self.canvas.create_text(x + 5, y + 10, text=text, anchor="w",
                                            fill=TIMELINE.invalid_fill if not preview.valid else THEME.surface_raised,
@@ -1009,11 +1171,12 @@ class ReapcaseEditor(tk.Tk):
             return
         if event.x < HEADER_WIDTH:
             return
-        lane_index = next((i for i, lane in enumerate(LANES)
-                           if lane_top(i) <= y < lane_top(i) + lane_height(lane)), -1)
-        if lane_index < 0 or lane_index >= len(LANES):
-            return  # Ruler and audio lanes deliberately have no creation menu.
-        lane = LANES[lane_index]
+        visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
+        layout = visible_lane_layout(LANES, visibility)
+        lane = next((lane for lane in layout.lanes
+                     if layout.tops[lane] <= y < layout.tops[lane] + lane_height(lane)), None)
+        if lane is None:
+            return  # Ruler, hidden lanes, and audio have no creation menu.
         x = self.canvas.canvasx(event.x)
         units = snapped_units_at_x(x, self.model.song.ppqn, self.pixels_per_beat,
                                    self.grid_choice.get(), self.model.numerator,
@@ -1038,7 +1201,7 @@ class ReapcaseEditor(tk.Tk):
             menu.add_separator()
         menu.add_cascade(label="ADD NEW", menu=add)
         if lane == "STRUCTURE":
-            pause_default = y >= lane_top(0) + MARKERS_HEIGHT and y < lane_top(0) + MARKERS_HEIGHT + PAUSES_HEIGHT
+            pause_default = y >= layout.tops["STRUCTURE"] + MARKERS_HEIGHT and y < layout.tops["STRUCTURE"] + MARKERS_HEIGHT + PAUSES_HEIGHT
             add.add_command(label="Marker...", command=lambda: self._marker_dialog(position, pause_default))
             cycle = tk.Menu(add, tearoff=False)
             cycle.add_command(label="Cycle Start", command=lambda: self._create(create_cycle_start, position))
@@ -1214,7 +1377,7 @@ class ReapcaseEditor(tk.Tk):
                 self.model.edit_event(index, edited)
             except (ValueError, KeyError) as exc:
                 messagebox.showerror("Cannot edit event", str(exc), parent=dialog); return
-            dialog.destroy(); self.redraw()
+            dialog.destroy(); self._redraw_after_model_change()
         primary = ttk.Button(buttons, text="Save", command=save, default="active")
         primary.pack(side="left", padx=4)
         self._prepare_dialog(dialog, f"event_edit:{family}", save)
@@ -1226,7 +1389,7 @@ class ReapcaseEditor(tk.Tk):
         except ValueError as exc:
             messagebox.showerror("Cannot create event", str(exc))
             return
-        self.redraw()
+        self._redraw_after_model_change()
 
     def _marker_dialog(self, position, pause_default=False):
         dialog = tk.Toplevel(self)
@@ -1373,6 +1536,7 @@ class ReapcaseEditor(tk.Tk):
         preview = self.drag_preview
         if preview and preview.valid:
             self.model.commit_preview(preview)
+            self._refresh_navigation()
         self.drag_x = None
         self.drag_preview = None
         self.redraw()
@@ -1448,7 +1612,7 @@ class ReapcaseEditor(tk.Tk):
         def apply():
             try: self.model.shift_selected(*(int(e.get()) for e in entries))
             except ValueError as exc: messagebox.showerror("Invalid shift", str(exc)); return
-            win.destroy(); self.redraw()
+            win.destroy(); self._redraw_after_model_change()
         ttk.Button(win, text="Shift", command=apply, default="active").grid(row=3, columnspan=2, pady=8)
         self._prepare_dialog(win, "shift_selected", apply)
     def undo(self):
@@ -1457,6 +1621,7 @@ class ReapcaseEditor(tk.Tk):
             changed = self.model.undo()
             if changed and before != tuple(track.source for track in self.model.audio_tracks):
                 self._configure_audio()
+            if changed: self._refresh_navigation()
             self.redraw()
 
     def copy_events(self, _event=None):
@@ -1469,14 +1634,16 @@ class ReapcaseEditor(tk.Tk):
     def paste_events(self, _event=None):
         if self.model and self.app_mode.get() != "LIVE":
             count = self.model.paste_at_cursor()
-            if count: self.redraw()
+            if count: self._redraw_after_model_change()
             self.status.set(f"Pasted {count} event{'s' if count != 1 else ''} at playhead" if count else
                             "Event clipboard is empty")
         return "break"
 
     def _audio_index_at_y(self, y):
         if not self.model: return None
-        top = RULER_HEIGHT + sum(lane_height(lane) for lane in LANES)
+        visibility = {lane: var.get() for lane, var in self.lane_visibility.items()}
+        if not visibility.get("AUDIO", True): return None
+        top = visible_lane_layout(LANES, visibility).audio_top
         index = int((y - top) // LANE_HEIGHT)
         return index if top <= y and 0 <= index < len(self.model.audio_tracks) else None
 
@@ -1497,13 +1664,13 @@ class ReapcaseEditor(tk.Tk):
         if self.app_mode.get() == "LIVE": return
         if self.model:
             self.model.delete_selected()
-            self.redraw()
+            self._redraw_after_model_change()
 
     def duplicate_selected(self):
         if self.app_mode.get() == "LIVE": return
         if self.model:
             self.model.duplicate_selected()
-            self.redraw()
+            self._redraw_after_model_change()
 
     def seek_units(self, units):
         if self.model and self.model.tempo_map:
