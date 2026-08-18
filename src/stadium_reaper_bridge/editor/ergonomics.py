@@ -12,6 +12,31 @@ from pathlib import Path
 import shutil
 
 
+_TEXT_INPUT_CLASSES = {
+    "entry", "tentry", "text", "spinbox", "tspinbox", "combobox", "tcombobox",
+}
+_NATIVE_NAVIGATION_CLASSES = {"treeview", "ttreeview", "listbox"}
+
+
+def editor_shortcuts_allowed(widget, timeline_widget=None) -> bool:
+    """Return whether a DAW key binding may consume an event from *widget*.
+
+    DAW navigation is intentionally a timeline-focused command layer.  Native
+    text editing, dialog traversal, combobox selection and Event List
+    navigation must win everywhere else.  ``winfo_class`` keeps this helper
+    usable with both classic Tk and themed ttk controls without importing Tk.
+    """
+    if widget is None:
+        return False
+    try:
+        widget_class = str(widget.winfo_class()).casefold()
+    except (AttributeError, TypeError):
+        return False
+    if widget_class in _TEXT_INPUT_CLASSES | _NATIVE_NAVIGATION_CLASSES:
+        return False
+    return timeline_widget is not None and widget is timeline_widget
+
+
 def centered_position(parent: tuple[int, int, int, int], size: tuple[int, int]) -> tuple[int, int]:
     """Center a child of *size* in parent ``(x, y, width, height)``."""
     x, y, width, height = parent

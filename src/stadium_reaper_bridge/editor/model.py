@@ -65,6 +65,7 @@ class EditorModel:
         self._original_positions = [event.position for event in self.timeline.events]
         self._undo: list[tuple] = []
         self._event_clipboard: tuple[TimelineEvent, ...] = ()
+        self._last_duplicate_offset_units: int | None = None
         self._created = 0
         self._structural_edits = 0
         self._audio_edits = 0
@@ -584,26 +585,72 @@ class EditorModel:
         self._structural_edits += 1
         return len(indices)
 
-    def duplicate_selected(self) -> int:
-        """Append independent lossless copies, preserving group offsets and order."""
-        indices = sorted(i for i in self.selected if 0 <= i < len(self.timeline.events))
-        if not indices or not self.selection_is_editable():
+    def duplicate_events(self, source_indices: Iterable[int], destination_units: int,
+                         *, anchor_units: int | None = None) -> int:
+        """Clone eligible canonical events as one undoable transaction.
+
+        ``destination_units`` locates the source anchor, rather than each event,
+        so tempo/signature changes and snapping can never deform a copied group.
+        This is the common primitive used by paste, DAW duplication, Alt-drag and
+        region duplication.
+        """
+        indices = sorted(set(source_indices),
+                         key=lambda i: self._units(self.timeline.events[i].position)
+                         if 0 <= i < len(self.timeline.events) else -1)
+        if not indices or any(not 0 <= i < len(self.timeline.events) or
+                              self.timeline.events[i].source.type in NON_COPYABLE
+                              for i in indices):
             return 0
         before = list(self.timeline.events)
         previous_selection = set(self.selected)
-        self._undo.append(("replace", before, previous_selection))
+        anchor = (min(self._units(before[i].position) for i in indices)
+                  if anchor_units is None else anchor_units)
+        if destination_units < 0 or any(destination_units + self._units(before[i].position) - anchor < 0
+                                        for i in indices):
+            return 0
         next_source = max((event.source_index for event in before
                            if event.source_index is not None), default=-1) + 1
         copies = []
         for offset, index in enumerate(indices):
             duplicate = copy.deepcopy(before[index])
+            duplicate.position = self._position(
+                destination_units + self._units(before[index].position) - anchor)
             duplicate.source_index = next_source + offset
             copies.append(duplicate)
+        self._undo.append(("replace", before, previous_selection))
         first = len(self.timeline.events)
         self.timeline.events.extend(copies)
         self.selected = set(range(first, first + len(copies)))
         self._structural_edits += 1
         return len(copies)
+
+    def _suggest_duplicate_offset(self, indices: list[int]) -> int:
+        """Choose a stable, bar-shaped offset for DAW-style repetition."""
+        if self._last_duplicate_offset_units:
+            return self._last_duplicate_offset_units
+        units = sorted(self._units(self.timeline.events[i].position) for i in indices)
+        if len(units) == 1:
+            return max(1, self._units(self.timing_map.shift_position(
+                self.timeline.events[indices[0]].position, bars=1)) - units[0])
+        span = max(1, units[-1] - units[0])
+        # A power-of-two number of bars is predictable for repeated sections.
+        anchor_position = self._position(units[0])
+        bars = 1
+        while self._units(self.timing_map.shift_position(anchor_position, bars=bars)) - units[0] <= span:
+            bars *= 2
+        return self._units(self.timing_map.shift_position(anchor_position, bars=bars)) - units[0]
+
+    def duplicate_selected(self, offset_units: int | None = None) -> int:
+        """Duplicate after the selection; repeated calls retain the same spacing."""
+        indices = sorted(i for i in self.selected if 0 <= i < len(self.timeline.events))
+        if not indices:
+            return 0
+        offset = offset_units if offset_units is not None else self._suggest_duplicate_offset(indices)
+        anchor = min(self._units(self.timeline.events[i].position) for i in indices)
+        count = self.duplicate_events(indices, anchor + offset, anchor_units=anchor)
+        if count:
+            self._last_duplicate_offset_units = offset
+        return count
 
     def copy_selected(self) -> int:
         """Capture semantic/native event data without source index identity."""
@@ -624,10 +671,10 @@ class EditorModel:
         """Paste the clipboard at the playhead, preserving musical-unit offsets."""
         if not self._event_clipboard:
             return 0
-        before = list(self.timeline.events)
-        previous_selection = set(self.selected)
         anchor = min(self._units(event.position) for event in self._event_clipboard)
         destination = self._units(self.cursor)
+        before = list(self.timeline.events)
+        previous_selection = set(self.selected)
         next_source = max((event.source_index for event in before
                            if event.source_index is not None), default=-1) + 1
         copies = []
@@ -642,6 +689,17 @@ class EditorModel:
         self.selected = set(range(first, first + len(copies)))
         self._structural_edits += 1
         return len(copies)
+
+    def duplicate_region(self, start_units: int, end_units: int,
+                         destination_units: int) -> int:
+        """Duplicate editable contents of an unambiguous half-open region."""
+        if end_units <= start_units:
+            raise ValueError("Region end must follow its start")
+        indices = [i for i, event in enumerate(self.timeline.events)
+                   if start_units <= self._units(event.position) < end_units
+                   and self.lane(event) != "STRUCTURE"
+                   and event.source.type not in NON_COPYABLE]
+        return self.duplicate_events(indices, destination_units, anchor_units=start_units)
 
     def insert_event(self, event: TimelineEvent) -> int:
         """Append a created event with stable source order as one undo operation."""
