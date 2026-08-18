@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from stadium_reaper_bridge.editor.ergonomics import (
     BackupError, DialogPositions, backup_existing, centered_position,
-    clamp_dialog_position, follow_scroll,
+    clamp_dialog_position, editor_shortcuts_allowed, follow_scroll,
 )
 from stadium_reaper_bridge.editor.layout import snapped_units_at_x, timeline_x
 from stadium_reaper_bridge.editor.model import EditorModel
@@ -17,6 +17,20 @@ FIXTURE = Path(__file__).parent / "fixtures" / "perfect_picture_336.json"
 
 
 class GeometryAndFollowTests(unittest.TestCase):
+    def test_daw_shortcuts_are_scoped_to_timeline_canvas(self):
+        class Widget:
+            def __init__(self, widget_class): self.widget_class = widget_class
+            def winfo_class(self): return self.widget_class
+
+        canvas = Widget("Canvas")
+        self.assertTrue(editor_shortcuts_allowed(canvas, canvas))
+        self.assertFalse(editor_shortcuts_allowed(Widget("Canvas"), canvas))
+        for widget_class in ("Entry", "TEntry", "Text", "Spinbox", "TSpinbox",
+                             "Combobox", "TCombobox", "Treeview", "Listbox"):
+            with self.subTest(widget_class=widget_class):
+                widget = Widget(widget_class)
+                self.assertFalse(editor_shortcuts_allowed(widget, widget))
+
     def test_dialog_first_open_remember_and_clamp(self):
         store = DialogPositions({})
         self.assertEqual((400, 350), centered_position((100, 100, 800, 600), (200, 100)))

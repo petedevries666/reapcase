@@ -42,7 +42,8 @@ from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
                        raster_ppm, timeline_units_to_x, viewport_columns)
-from .ergonomics import BackupError, DialogPositions, follow_scroll
+from .ergonomics import (BackupError, DialogPositions, editor_shortcuts_allowed,
+                         follow_scroll)
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
                          adjacent_event_index, adjacent_marker_index, focused_lane_visibility,
                          marker_region_rows, move_visible_lane,
@@ -296,15 +297,24 @@ class ReapcaseEditor(tk.Tk):
         self.configure(menu=bar)
         self.bind_all("<Control-Key-1>", lambda _e: self.switch_view("timeline"))
         self.bind_all("<Control-Key-2>", lambda _e: self.switch_view("event_list"))
-        self.bind_all("<Control-d>", self.duplicate_selected)
-        self.bind_all("<Key-f>", lambda e: self.fit_song() if not isinstance(e.widget, (tk.Entry, ttk.Entry)) else None)
-        self.bind_all("<Shift-Key-F>", lambda e: self.fit_selection() if not isinstance(e.widget, (tk.Entry, ttk.Entry)) else None)
-        self.bind_all("<Tab>", lambda e: self.navigate_event(1))
-        self.bind_all("<Shift-Tab>", lambda e: self.navigate_event(-1))
-        self.bind_all("<bracketright>", lambda e: self.navigate_marker(1))
-        self.bind_all("<bracketleft>", lambda e: self.navigate_marker(-1))
-        self.bind_all("<Home>", lambda e: self.go_song_edge(False))
-        self.bind_all("<End>", lambda e: self.go_song_edge(True))
+        # bind_all is needed because transient dialogs share the Tk binding
+        # table, but every DAW command is centrally gated to canvas focus.
+        self.bind_all("<Control-d>", lambda e: self._editor_shortcut(e, self.duplicate_selected))
+        self.bind_all("<Key-f>", lambda e: self._editor_shortcut(e, self.fit_song))
+        self.bind_all("<Shift-Key-F>", lambda e: self._editor_shortcut(e, self.fit_selection))
+        self.bind_all("<Tab>", lambda e: self._editor_shortcut(e, self.navigate_event, 1))
+        self.bind_all("<Shift-Tab>", lambda e: self._editor_shortcut(e, self.navigate_event, -1))
+        self.bind_all("<bracketright>", lambda e: self._editor_shortcut(e, self.navigate_marker, 1))
+        self.bind_all("<bracketleft>", lambda e: self._editor_shortcut(e, self.navigate_marker, -1))
+        self.bind_all("<Home>", lambda e: self._editor_shortcut(e, self.go_song_edge, False))
+        self.bind_all("<End>", lambda e: self._editor_shortcut(e, self.go_song_edge, True))
+
+    def _editor_shortcut(self, event, command, *args):
+        """Run and consume a DAW shortcut only in the timeline canvas."""
+        if not editor_shortcuts_allowed(getattr(event, "widget", None), self.canvas):
+            return None
+        command(*args)
+        return "break"
 
     def switch_view(self, view):
         self.view_state.switch(view); self.current_view.set(view)
