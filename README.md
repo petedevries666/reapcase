@@ -47,8 +47,16 @@ on disk for recovery.
 Utilisez **Open JSON** pour charger une Song, sélectionnez les flags dans les
 lanes STRUCTURE, STADIUM, SECOND HELIX, VIDEO et MIDI / OTHER, puis déplacez-les
 par glisser-déposer ou avec **Shift Selected**. **Save As JSON** exige une
-nouvelle destination et affiche le bilan lossless avant export. Le panneau du
+destination et affiche le bilan lossless avant export. **Save** met à jour la
+Song courante ; avant tout remplacement, la version précédente de la Song et
+de son sidecar est copiée dans `.reapcase-backups`. Le panneau du
 bas indique sélection, curseur, modifications et types non pris en charge.
+
+La tête de lecture sert également de curseur d'insertion : son placement sur la
+règle respecte la grille **Snap**, puis **Ctrl+C / Ctrl+V** copie la sélection et
+la colle à cette position en conservant les lanes et les espacements musicaux.
+Pendant la lecture, la vue suit la tête seulement lorsqu'elle approche du bord
+droit ; un défilement manuel suspend brièvement ce suivi.
 
 Glisser depuis un espace vide trace une sélection rectangulaire : sans
 modificateur elle remplace la sélection, **Ctrl** bascule les flags touchés et

@@ -19,11 +19,13 @@ from ..timing import TimingMap
 from .display import badge_text
 from .lighting import (LightingEventSource, create_lighting_event,
                        normalized_cue_id)
+from .ergonomics import backup_existing
 
 EVENT_LANES = ("STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER")
 LANES = EVENT_LANES + ("SEQCLICK", "SEQ INSTRUCTIONS")
 STRUCTURE = {"START", "END", "TIME", "MARKER", "CYCLE_START", "CYCLE_END"}
 KNOWN = STRUCTURE | {"PRESETSNAP", "LOOPER", "MIDI_CC", "MIDI_BANK_PROGRAM", "LIGHTS"}
+NON_COPYABLE = {"START", "TIME", "END", "SEQCLICK"}
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class EditorModel:
         self.cursor = MusicalPosition(1, 1, 1)
         self._original_positions = [event.position for event in self.timeline.events]
         self._undo: list[tuple] = []
+        self._event_clipboard: tuple[TimelineEvent, ...] = ()
         self._created = 0
         self._structural_edits = 0
         self._audio_edits = 0
@@ -577,6 +580,44 @@ class EditorModel:
         self._structural_edits += 1
         return len(copies)
 
+    def copy_selected(self) -> int:
+        """Capture semantic/native event data without source index identity."""
+        indices = sorted((i for i in self.selected if 0 <= i < len(self.timeline.events)),
+                         key=lambda i: self._units(self.timeline.events[i].position))
+        if not indices or any(self.timeline.events[i].source.type in NON_COPYABLE for i in indices):
+            self._event_clipboard = ()
+            return 0
+        copied = []
+        for index in indices:
+            event = copy.deepcopy(self.timeline.events[index])
+            event.source_index = None
+            copied.append(event)
+        self._event_clipboard = tuple(copied)
+        return len(copied)
+
+    def paste_at_cursor(self) -> int:
+        """Paste the clipboard at the playhead, preserving musical-unit offsets."""
+        if not self._event_clipboard:
+            return 0
+        before = list(self.timeline.events)
+        previous_selection = set(self.selected)
+        anchor = min(self._units(event.position) for event in self._event_clipboard)
+        destination = self._units(self.cursor)
+        next_source = max((event.source_index for event in before
+                           if event.source_index is not None), default=-1) + 1
+        copies = []
+        for offset, original in enumerate(self._event_clipboard):
+            event = copy.deepcopy(original)
+            event.position = self._position(destination + self._units(original.position) - anchor)
+            event.source_index = next_source + offset
+            copies.append(event)
+        self._undo.append(("replace", before, previous_selection))
+        first = len(self.timeline.events)
+        self.timeline.events.extend(copies)
+        self.selected = set(range(first, first + len(copies)))
+        self._structural_edits += 1
+        return len(copies)
+
     def insert_event(self, event: TimelineEvent) -> int:
         """Append a created event with stable source order as one undo operation."""
         previous_selection = set(self.selected)
@@ -594,10 +635,15 @@ class EditorModel:
         # Serialize a timeline projection without turning it into new source
         # state.  This keeps Undo after Save As capable of restoring the exact
         # opened document.
+        path = Path(path)
+        sidecar = self.show_path(path)
+        # The complete native/sidecar generation is secured before either file
+        # can be replaced. A failed copy therefore leaves both originals intact.
+        backup_existing([path, sidecar])
         source_flags = self.song.flags
         try:
             self.song.flags = timeline_source_flags(self.timeline)
-            Path(path).write_text(self.song.to_json_text(), encoding="utf-8")
+            song_text = self.song.to_json_text()
         finally:
             self.song.flags = source_flags
         lights = [
@@ -605,7 +651,6 @@ class EditorModel:
              "name": event.source.cue.name, "kind": event.source.cue.kind.value}
             for event in self.timeline.events if isinstance(event.source, LightingEventSource)
         ]
-        sidecar = self.show_path(path)
         show_document = copy.deepcopy(self._show_document)
         if lights or show_document or self.instructions or self.click_mutes:
             reapcase = show_document.setdefault("reapcase", {})
@@ -618,9 +663,20 @@ class EditorModel:
                 "click_mutes": sorted(self.click_mutes),
                 "instructions": [item.to_dict() for item in self.instructions],
             }
-            sidecar.write_text(json.dumps(show_document, ensure_ascii=False, indent=2) + "\n",
-                               encoding="utf-8")
+            sidecar_text = json.dumps(show_document, ensure_ascii=False, indent=2) + "\n"
+        else:
+            sidecar_text = None
+        # Same-directory temporary files make replacement atomic on normal
+        # desktop filesystems and prevent a partial direct write.
+        song_temp = path.with_name(path.name + ".reapcase-tmp")
+        song_temp.write_text(song_text, encoding="utf-8")
+        song_temp.replace(path)
+        if sidecar_text is not None:
+            sidecar_temp = sidecar.with_name(sidecar.name + ".reapcase-tmp")
+            sidecar_temp.write_text(sidecar_text, encoding="utf-8")
+            sidecar_temp.replace(sidecar)
         elif sidecar.exists():
             sidecar.unlink()
+        self.path = path
         return SaveSummary(sum(e.position != p for e, p in zip(self.timeline.events, self._original_positions)),
                            tracks_changed=self._audio_edits)

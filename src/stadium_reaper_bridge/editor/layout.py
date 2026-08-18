@@ -68,6 +68,7 @@ def snap_drag_delta(anchor_units: int, raw_delta: int, mode: str,
     if timing_map and mode == "1 beat":
         return timing_map.nearest_beat_units(destination) - anchor_units
     grids = {"1 bar": ppqn * beats_per_bar, "1 beat": ppqn,
+             "half beat": max(1, round(ppqn / 2)),
              "quarter beat": max(1, round(ppqn / 4)), "no snap": 1}
     if mode not in grids:
         raise ValueError(f"Unknown snap mode: {mode}")
