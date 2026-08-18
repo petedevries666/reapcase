@@ -6,6 +6,7 @@ Launch with ``PYTHONPATH=src python -m stadium_reaper_bridge.editor.app``.
 from __future__ import annotations
 
 import tkinter as tk
+import time
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from concurrent.futures import ThreadPoolExecutor
 from ..show import MidiRoute, ReapcaseShow, SHOW_SUFFIX
@@ -38,6 +39,7 @@ from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
                        raster_ppm, timeline_units_to_x, viewport_columns)
+from .ergonomics import BackupError, DialogPositions, follow_scroll
 
 
 class Tooltip:
@@ -88,6 +90,9 @@ class ReapcaseEditor(tk.Tk):
         self.pixels_per_beat = DEFAULT_PIXELS_PER_BEAT
         self.drag_x: float | None = None
         self.drag_preview: MovePreview | None = None
+        self.playhead_drag = False
+        self._follow_suspended_until = 0.0
+        self._dialog_positions = DialogPositions({})
         self.audio_drag: tuple[int, int] | None = None
         self.marquee_anchor: tuple[float, float] | None = None
         self.marquee_point: tuple[float, float] | None = None
@@ -131,6 +136,7 @@ class ReapcaseEditor(tk.Tk):
     def _build(self):
         toolbar = ttk.Frame(self, padding=6); toolbar.pack(fill="x")
         for icon, tip, command in (("▣", "Open Song JSON", self.open_json),
+                                   ("▥", "Save Song JSON", self.save),
                                    ("▤", "Save Song JSON As...", self.save_as),
                                    ("⌕+", "Zoom In", lambda: self.zoom_step(1.25)),
                                    ("⌕−", "Zoom Out", lambda: self.zoom_step(1 / 1.25))):
@@ -147,7 +153,7 @@ class ReapcaseEditor(tk.Tk):
             ttk.Button(toolbar, text=text, command=command).pack(side="left", padx=2)
         ttk.Label(toolbar, text=" Grid:").pack(side="left")
         ttk.Combobox(toolbar, textvariable=self.grid_choice, state="readonly", width=12,
-                     values=("1 bar", "1 beat", "quarter beat", "no snap")).pack(side="left")
+                     values=("1 bar", "1 beat", "half beat", "quarter beat", "no snap")).pack(side="left")
         ttk.Checkbutton(toolbar, text="Audio grid", variable=self.audio_grid_overlay,
                         command=self.redraw).pack(side="left")
         ttk.Label(toolbar, textvariable=self.zoom_label, width=8, anchor="e").pack(side="left", padx=5)
@@ -207,6 +213,8 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.bind("<Button-2>", lambda event: self.canvas.scan_mark(event.x, event.y))
         self.canvas.bind("<B2-Motion>", lambda event: self.canvas.scan_dragto(event.x, event.y, gain=1))
         self.canvas.bind("<Motion>", self.timeline_hover)
+        self.canvas.bind("<Control-c>", self.copy_events)
+        self.canvas.bind("<Control-v>", self.paste_events)
         self._update_zoom_label()
         ttk.Label(self, textvariable=self.status, style="Status.TLabel", anchor="w", padding=5).pack(fill="x")
 
@@ -332,6 +340,7 @@ class ReapcaseEditor(tk.Tk):
                 self.show.validate(); window.destroy()
             except Exception as exc: messagebox.showerror("Invalid MIDI routing", str(exc), parent=window)
         ttk.Button(window, text="Save Settings", command=apply).grid(row=4, column=0, columnspan=5, pady=8)
+        self._prepare_dialog(window, "midi_settings", apply)
 
     def open_json(self):
         path = filedialog.askopenfilename(filetypes=(("JSON", "*.json"), ("All files", "*")))
@@ -344,17 +353,43 @@ class ReapcaseEditor(tk.Tk):
         self._configure_audio()
         self.redraw()
 
+    def _save_to(self, path):
+        try:
+            summary = self.model.save_as(path)
+        except BackupError as exc:
+            messagebox.showerror("Cannot save Song", str(exc)); return
+        except Exception as exc:
+            messagebox.showerror("Cannot save Song", str(exc)); return
+        messagebox.showinfo("Save complete", f"{summary.events_moved} events moved\n"
+                            f"{summary.payloads_changed} payloads changed\n"
+                            f"{summary.tracks_changed} track operations")
+        self.redraw()
+
+    def save(self):
+        if self.model:
+            self._save_to(self.model.path)
+
     def save_as(self):
         if not self.model: return
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=(("JSON", "*.json"),))
-        if path and str(self.model.path.resolve()) == str(__import__('pathlib').Path(path).resolve()):
-            messagebox.showerror("Choose a new file", "Save As never overwrites the original source file."); return
         if path:
-            summary = self.model.save_as(path)
-            messagebox.showinfo("Export complete", f"{summary.events_moved} events moved\n"
-                                f"{summary.payloads_changed} payloads changed\n"
-                                f"{summary.tracks_changed} track operations")
-            self.redraw()
+            self._save_to(path)
+
+    def _prepare_dialog(self, dialog, family, primary=None, cancel=None):
+        """Apply one modal geometry and keyboard policy to an editor form."""
+        dialog.transient(self); dialog.grab_set()
+        dialog.update_idletasks()
+        size = (dialog.winfo_reqwidth(), dialog.winfo_reqheight())
+        parent = (self.winfo_rootx(), self.winfo_rooty(), self.winfo_width(), self.winfo_height())
+        screen = (0, 0, dialog.winfo_screenwidth(), dialog.winfo_screenheight())
+        x, y = self._dialog_positions.position(family, parent, size, screen)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.bind("<Configure>", lambda _event: self._dialog_positions.remember(
+            family, (dialog.winfo_x(), dialog.winfo_y())), add=True)
+        if primary:
+            dialog.bind("<Return>", lambda _event: (primary(), "break")[1])
+        cancel = cancel or dialog.destroy
+        dialog.bind("<Escape>", lambda _event: (cancel(), "break")[1])
 
     def locate_audio(self):
         if not self.model: return
@@ -874,8 +909,11 @@ class ReapcaseEditor(tk.Tk):
 
     def click(self, event):
         if not self.model: return
+        self.canvas.focus_set()
         index = self._event_index(event); x = self.canvas.canvasx(event.x)
-        units = units_at_x(x, self.model.song.ppqn, self.pixels_per_beat)
+        units = snapped_units_at_x(x, self.model.song.ppqn, self.pixels_per_beat,
+                                   self.grid_choice.get(), self.model.numerator,
+                                   self.model.timing_map)
         self.model.cursor = self.model._position(units)
         tags = self.canvas.gettags("current")
         click_mute = next((tag.split(":", 1)[1] for tag in tags if tag.startswith("seqmute:")), None)
@@ -911,6 +949,7 @@ class ReapcaseEditor(tk.Tk):
             self.redraw(); return
         if (self.canvas.canvasy(event.y) < RULER_HEIGHT and
                 event.x >= HEADER_WIDTH):
+            self.playhead_drag = True
             self.seek_units(units); self.redraw(); return
         if index is not None:
             sources = self.semantic_sources.get(index, (index,))
@@ -936,8 +975,7 @@ class ReapcaseEditor(tk.Tk):
         over_ruler = y < RULER_HEIGHT and event.x >= HEADER_WIDTH
         self.canvas.configure(cursor="crosshair" if over_ruler else "")
         if over_ruler:
-            self.model.cursor = self.model._position(
-                units_at_x(x, self.model.song.ppqn, self.pixels_per_beat))
+            units_at_x(x, self.model.song.ppqn, self.pixels_per_beat)
 
     def context_menu(self, event):
         """Open a compact lane-specific creation menu at the clicked position."""
@@ -1103,7 +1141,9 @@ class ReapcaseEditor(tk.Tk):
             except ValueError as exc:
                 messagebox.showerror("Cannot edit instruction", str(exc), parent=dialog); return
             dialog.destroy(); self.redraw()
-        ttk.Button(frame, text="Save", command=save).grid(row=3, column=1, pady=(14, 0))
+        primary = ttk.Button(frame, text="Save", command=save, default="active")
+        primary.grid(row=3, column=1, pady=(14, 0))
+        self._prepare_dialog(dialog, "instruction_edit", save)
 
     def edit_event(self, index):
         """Render a form from the central semantic descriptor (never raw payload)."""
@@ -1175,7 +1215,9 @@ class ReapcaseEditor(tk.Tk):
             except (ValueError, KeyError) as exc:
                 messagebox.showerror("Cannot edit event", str(exc), parent=dialog); return
             dialog.destroy(); self.redraw()
-        ttk.Button(buttons, text="Save", command=save).pack(side="left", padx=4)
+        primary = ttk.Button(buttons, text="Save", command=save, default="active")
+        primary.pack(side="left", padx=4)
+        self._prepare_dialog(dialog, f"event_edit:{family}", save)
 
     def _create(self, factory, *args):
         try:
@@ -1202,7 +1244,9 @@ class ReapcaseEditor(tk.Tk):
             self._create(create_structure_marker, position, MarkerOptions(name.get(), pause.get()))
             if len(self.model.timeline.events) > before:
                 dialog.destroy()
-        ttk.Button(frame, text="Create", command=create).grid(row=3, column=1, pady=(14, 0))
+        primary = ttk.Button(frame, text="Create", command=create, default="active")
+        primary.grid(row=3, column=1, pady=(14, 0))
+        self._prepare_dialog(dialog, "structure_marker", create)
         entry.focus_set()
 
     def _video_dialog(self, position, action):
@@ -1253,6 +1297,11 @@ class ReapcaseEditor(tk.Tk):
         if self.app_mode.get() == "LIVE": return
         if not self.model:
             return
+        if self.playhead_drag:
+            units = snapped_units_at_x(self.canvas.canvasx(event.x), self.model.song.ppqn,
+                                       self.pixels_per_beat, self.grid_choice.get(),
+                                       self.model.numerator, self.model.timing_map)
+            self.seek_units(units); self.redraw(); return
         if self.sequence_drag:
             start_x, identities = self.sequence_drag
             raw = drag_units(self.canvas.canvasx(event.x) - start_x,
@@ -1293,6 +1342,9 @@ class ReapcaseEditor(tk.Tk):
     def drop(self, event):
         if self.app_mode.get() == "LIVE": return
         if not self.model: return
+        if self.playhead_drag:
+            self.playhead_drag = False
+            return
         if self.sequence_drag:
             _, identities = self.sequence_drag
             self.model.move_instructions(identities, self.sequence_drag_delta)
@@ -1368,11 +1420,13 @@ class ReapcaseEditor(tk.Tk):
         self.zoom_label.set(f"{self.pixels_per_beat / DEFAULT_PIXELS_PER_BEAT:.0%}")
 
     def horizontal_wheel(self, event):
+        self._follow_suspended_until = time.monotonic() + 1.5
         self.canvas.xview_scroll(horizontal_wheel_units(self._wheel_direction(event)), "units")
         self.redraw()
         return "break"
 
     def _scroll_horizontal(self, *args):
+        self._follow_suspended_until = time.monotonic() + 1.5
         self.canvas.xview(*args)
         self.redraw()
 
@@ -1385,6 +1439,7 @@ class ReapcaseEditor(tk.Tk):
         win = tk.Toplevel(self); win.title("Select lane")
         for lane in LANES:
             ttk.Button(win, text=lane, command=lambda x=lane: (self.model.select_lane(x), win.destroy(), self.redraw())).pack(fill="x", padx=12, pady=3)
+        self._prepare_dialog(win, "select_lane")
     def shift_dialog(self):
         if not self.model: return
         win = tk.Toplevel(self); win.title("Shift Selected"); entries = []
@@ -1394,7 +1449,8 @@ class ReapcaseEditor(tk.Tk):
             try: self.model.shift_selected(*(int(e.get()) for e in entries))
             except ValueError as exc: messagebox.showerror("Invalid shift", str(exc)); return
             win.destroy(); self.redraw()
-        ttk.Button(win, text="Shift", command=apply).grid(row=3, columnspan=2, pady=8)
+        ttk.Button(win, text="Shift", command=apply, default="active").grid(row=3, columnspan=2, pady=8)
+        self._prepare_dialog(win, "shift_selected", apply)
     def undo(self):
         if self.model:
             before = tuple(track.source for track in self.model.audio_tracks)
@@ -1402,6 +1458,21 @@ class ReapcaseEditor(tk.Tk):
             if changed and before != tuple(track.source for track in self.model.audio_tracks):
                 self._configure_audio()
             self.redraw()
+
+    def copy_events(self, _event=None):
+        if self.model and self.app_mode.get() != "LIVE":
+            count = self.model.copy_selected()
+            self.status.set(f"Copied {count} event{'s' if count != 1 else ''}" if count else
+                            "Selection contains no copyable events")
+        return "break"
+
+    def paste_events(self, _event=None):
+        if self.model and self.app_mode.get() != "LIVE":
+            count = self.model.paste_at_cursor()
+            if count: self.redraw()
+            self.status.set(f"Pasted {count} event{'s' if count != 1 else ''} at playhead" if count else
+                            "Event clipboard is empty")
+        return "break"
 
     def _audio_index_at_y(self, y):
         if not self.model: return None
@@ -1453,7 +1524,19 @@ class ReapcaseEditor(tk.Tk):
             minutes, remainder = divmod(seconds, 60)
             position = self.model.tempo_map.seconds_to_musical_position(seconds)
             self.transport_position.set(f"{int(minutes):02d}:{remainder:06.3f}   |   {position.render()}")
-            if self.audio_engine.state is PlaybackState.PLAYING: self.redraw()
+            if self.audio_engine.state is PlaybackState.PLAYING:
+                self.redraw()
+                play_units = self.model.tempo_map.seconds_to_units(seconds)
+                playhead_x = timeline_x(play_units, self.model.song.ppqn, self.pixels_per_beat)
+                left = self.canvas.canvasx(0)
+                width = self.canvas.winfo_width()
+                destination = follow_scroll(
+                    playhead_x, left, width, playing=True,
+                    suspended=time.monotonic() < self._follow_suspended_until)
+                if destination is not None:
+                    region = self.canvas.cget("scrollregion").split()
+                    total = float(region[2]) if len(region) == 4 else 1.0
+                    self.canvas.xview_moveto(destination / max(1.0, total))
         self.after(33, self._transport_tick)
 
     def destroy(self):
