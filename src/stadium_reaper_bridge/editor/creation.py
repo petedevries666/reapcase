@@ -31,6 +31,7 @@ class MarkerOptions:
 
     name: str
     pause_at_marker: bool = False
+    cycle_marker: bool = False
 
 
 def serialize_marker(options: MarkerOptions) -> str:
@@ -40,14 +41,17 @@ def serialize_marker(options: MarkerOptions) -> str:
     if any(character in name for character in ";|\r\n"):
         raise ValueError("Marker name cannot contain semicolons, pipes, or line breaks")
     pause = "On" if options.pause_at_marker else "Off"
-    return f"MARKER;{name};7;Off;{pause};Off;false;[Current];[Current];[Current]"
+    cycle = "On" if options.cycle_marker else "Off"
+    return f"MARKER;{name};7;Off;{pause};{cycle};false;[Current];[Current];[Current]"
 
 
 def parse_marker(flag: StadiumFlag) -> MarkerOptions:
     fields = flag.fields
     if flag.type != "MARKER" or len(fields) != 10 or fields[4] not in {"On", "Off"}:
         raise ValueError("Marker does not use the proven ten-field option layout")
-    return MarkerOptions(fields[1], fields[4] == "On")
+    if fields[5] not in {"On", "Off"}:
+        raise ValueError("Marker cycle option is not a proven On/Off value")
+    return MarkerOptions(fields[1], fields[4] == "On", fields[5] == "On")
 
 
 def create_structure_marker(position: MusicalPosition, name: str | MarkerOptions,
@@ -116,16 +120,16 @@ def create_cycle_end(position: MusicalPosition, events: Iterable[TimelineEvent])
 
 # Parseability is intentionally distinct from safe authoring capability.
 FLAG_CAPABILITIES = {
-    "MARKER": {"parseable": True, "creatable": True, "editable": False},
-    "PRESETSNAP": {"parseable": True, "creatable": True, "editable": False},
-    "CYCLE_START": {"parseable": True, "creatable": True, "editable": False},
+    "MARKER": {"parseable": True, "creatable": True, "editable": True},
+    "PRESETSNAP": {"parseable": True, "creatable": True, "editable": True},
+    "CYCLE_START": {"parseable": True, "creatable": True, "editable": True},
     "CYCLE_END": {"parseable": True, "creatable": True, "editable": False},
     "START": {"parseable": True, "creatable": False, "editable": False},
     "TIME": {"parseable": True, "creatable": False, "editable": False},
     "END": {"parseable": True, "creatable": False, "editable": False},
-    "LOOPER": {"parseable": True, "creatable": True, "editable": False},
-    "MIDI_CC": {"parseable": True, "creatable": True, "editable": False},
-    "MIDI_BANK_PROGRAM": {"parseable": True, "creatable": True, "editable": False},
+    "LOOPER": {"parseable": True, "creatable": True, "editable": True},
+    "MIDI_CC": {"parseable": True, "creatable": True, "editable": True},
+    "MIDI_BANK_PROGRAM": {"parseable": True, "creatable": True, "editable": True},
 }
 
 

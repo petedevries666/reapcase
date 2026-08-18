@@ -339,6 +339,24 @@ class EditorModel:
         self._sequence_edits += 1
         return item.muted
 
+    def edit_instruction(self, identity: str, *, label: str, sample_id: str,
+                         muted: bool) -> bool:
+        """Replace instruction properties while retaining its stable identity/position."""
+        item = next(item for item in self.instructions if item.id == identity)
+        label, sample_id = label.strip(), sample_id.strip()
+        if not label:
+            raise ValueError("Instruction label is required")
+        if not sample_id:
+            raise ValueError("Sample ID is required")
+        state = (item.label, item.sample_id, item.muted)
+        target = (label, sample_id, bool(muted))
+        if state == target:
+            return False
+        self._undo.append(("instruction_edit", identity, state))
+        item.label, item.sample_id, item.muted = target
+        self._sequence_edits += 1
+        return True
+
     def preview_instruction_shift(self, identities: Iterable[str], delta_units: int):
         ids = tuple(identities)
         items = [next(item for item in self.instructions if item.id == identity) for identity in ids]
@@ -458,6 +476,12 @@ class EditorModel:
                 item.position, item.units = position, self._units(position)
             self._sequence_edits -= 1
             return True
+        if operation[0] == "instruction_edit":
+            _, identity, state = operation
+            item = next(item for item in self.instructions if item.id == identity)
+            item.label, item.sample_id, item.muted = state
+            self._sequence_edits -= 1
+            return True
         if operation[0] == "audio_tracks":
             self.song.tracks = operation[1]
             self._structural_edits -= 1
@@ -476,6 +500,12 @@ class EditorModel:
             self.selected = selection
             self._structural_edits -= 1
             return True
+        if operation[0] == "event_edit":
+            _, index, event, selection = operation
+            self.timeline.events[index] = event
+            self.selected = selection
+            self._structural_edits -= 1
+            return True
         _, indices, positions, previous_selection = operation
         for index, position in zip(indices, positions):
             self.timeline.events[index].position = position
@@ -485,6 +515,32 @@ class EditorModel:
     def selection_is_editable(self) -> bool:
         return bool(self.selected) and not any(
             self.timeline.events[i].source.type in {"START", "END"} for i in self.selected)
+
+    def edit_capability(self, index: int):
+        from .editing import editor_for_event
+        if not 0 <= index < len(self.timeline.events):
+            return None
+        return editor_for_event(self.timeline.events[index], self)
+
+    def edit_event(self, index: int, values: dict) -> bool:
+        """Atomically replace one event at the same index as one undoable edit."""
+        from .editing import apply_semantic_edit
+        capability = self.edit_capability(index)
+        if capability is None:
+            raise ValueError("This event has no safe semantic editor")
+        original = self.timeline.events[index]
+        updated = apply_semantic_edit(original, self, capability, values)
+        same_payload = (getattr(updated.source, "payload", None) ==
+                        getattr(original.source, "payload", None))
+        if (same_payload and updated.position == original.position and updated.data == original.data
+                and type(updated.source) is type(original.source)):
+            return False
+        previous_selection = set(self.selected)
+        self._undo.append(("event_edit", index, copy.deepcopy(original), previous_selection))
+        self.timeline.events[index] = updated
+        self.selected = ({index} if index not in previous_selection else previous_selection)
+        self._structural_edits += 1
+        return True
 
     def delete_selected(self) -> int:
         """Delete a safe selection as one undoable, lossless operation."""

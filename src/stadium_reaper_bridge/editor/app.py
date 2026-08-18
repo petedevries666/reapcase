@@ -194,6 +194,7 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.bind("<Button-1>", self.click); self.canvas.bind("<B1-Motion>", self.drag)
         self.canvas.bind("<ButtonRelease-1>", self.drop)
         self.canvas.bind("<Button-3>", self.context_menu)
+        self.canvas.bind("<Double-Button-1>", self.edit_at_pointer)
         self.canvas.bind("<Control-MouseWheel>", self.mouse_zoom)
         self.canvas.bind("<Control-Button-4>", self.mouse_zoom)
         self.canvas.bind("<Control-Button-5>", self.mouse_zoom)
@@ -945,6 +946,15 @@ class ReapcaseEditor(tk.Tk):
             return
         if not self.model:
             return
+        tags = self.canvas.gettags("current")
+        instruction = next((tag.split(":", 1)[1] for tag in tags
+                            if tag.startswith("seqinstruction:")), None)
+        if instruction:
+            menu = tk.Menu(self, tearoff=False)
+            menu.add_command(label="Edit...", command=lambda: self.edit_instruction(instruction))
+            try: menu.tk_popup(event.x_root, event.y_root)
+            finally: menu.grab_release()
+            return
         y = self.canvas.canvasy(event.y)
         audio_index = self._audio_index_at_y(y)
         if event.x < HEADER_WIDTH and audio_index is not None:
@@ -980,6 +990,9 @@ class ReapcaseEditor(tk.Tk):
                 self.model.selected = sources
                 self.redraw()
             editable = self.model.selection_is_editable()
+            capability = self.model.edit_capability(clicked)
+            menu.add_command(label="Edit...", command=lambda index=clicked: self.edit_event(index),
+                             state="normal" if capability else "disabled")
             menu.add_command(label="Duplicate", command=self.duplicate_selected,
                              state="normal" if editable else "disabled")
             menu.add_command(label="Delete", command=self.delete_selected,
@@ -1059,6 +1072,110 @@ class ReapcaseEditor(tk.Tk):
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def edit_at_pointer(self, event):
+        """Double-click edits only a concrete semantic event; empty lanes are inert."""
+        if self.app_mode.get() == "LIVE" or not self.model:
+            return
+        tags = self.canvas.gettags("current")
+        instruction = next((tag.split(":", 1)[1] for tag in tags
+                            if tag.startswith("seqinstruction:")), None)
+        if instruction:
+            self.edit_instruction(instruction); return
+        index = self._event_index(event)
+        if index is not None and self.model.edit_capability(index):
+            self.edit_event(index)
+
+    def edit_instruction(self, identity):
+        item = next(item for item in self.model.instructions if item.id == identity)
+        dialog = tk.Toplevel(self); dialog.title("EDIT INSTRUCTION")
+        dialog.transient(self); dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=14); frame.pack(fill="both", expand=True)
+        label, sample = tk.StringVar(value=item.label), tk.StringVar(value=item.sample_id or "")
+        muted = tk.BooleanVar(value=item.muted)
+        for row, (text_value, variable) in enumerate((("Label", label), ("Sample ID", sample))):
+            ttk.Label(frame, text=text_value).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
+            ttk.Entry(frame, textvariable=variable, width=28).grid(row=row, column=1, pady=4)
+        ttk.Checkbutton(frame, text="Muted", variable=muted).grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Button(frame, text="Cancel", command=dialog.destroy).grid(row=3, column=0, pady=(14, 0))
+        def save():
+            try: self.model.edit_instruction(identity, label=label.get(), sample_id=sample.get(), muted=muted.get())
+            except ValueError as exc:
+                messagebox.showerror("Cannot edit instruction", str(exc), parent=dialog); return
+            dialog.destroy(); self.redraw()
+        ttk.Button(frame, text="Save", command=save).grid(row=3, column=1, pady=(14, 0))
+
+    def edit_event(self, index):
+        """Render a form from the central semantic descriptor (never raw payload)."""
+        capability = self.model.edit_capability(index)
+        if capability is None:
+            return
+        values = dict(capability.values)
+        family = capability.family
+        schemas = {
+            "marker": (("name", "Name", "text"), ("pause_at_marker", "Pause at Marker", "bool"),
+                       ("cycle_marker", "Cycle Marker", "bool")),
+            "stadium_snapshot": (("snapshot", "Snapshot", tuple(range(1, 9))),
+                                  ("context", "Active Preset Context", "readonly")),
+            "cycle": (("repeat_count", "Cycle Count", ("Infinite",)),
+                      ("option", "Retrigger Flags", ("Off",))),
+            "stadium_looper": (("action", "Action", ("Clear Loop", "Record", "Stop", "Play", "Play Once")),),
+            "helix_snapshot": (("snapshot", "Snapshot", self.model.decoder.second_helix_snapshots()),
+                               ("channel", "MIDI Channel", "int")),
+            "helix_expression": (("expression", "Expression", (1, 2, 3)),
+                                 ("value", "Value", (0, 127)), ("channel", "MIDI Channel", "int")),
+            "helix_preset": (("bank_msb", "Bank MSB (blank = Off)", "optional_int"),
+                             ("bank_lsb", "Bank LSB (blank = Off)", "optional_int"),
+                             ("program", "Program", "int"), ("channel", "MIDI Channel", "int")),
+            "midi_cc": (("channel", "Channel", "int"), ("cc", "CC", "int"),
+                        ("value", "Value", "int")),
+            "lighting": (("name", "Name", "text"),),
+        }
+        if family == "video":
+            schemas[family] = (("video", "Video", "optional_int"),
+                               ("action", "Action", self.model.decoder.video_actions()),
+                               ("channel", "MIDI Channel", "int"))
+        elif family.startswith("helix_") and family not in schemas:
+            schemas[family] = (("action", "Action", self.model.decoder.second_helix_actions()),
+                               ("channel", "MIDI Channel", "int"))
+        schema = schemas.get(family)
+        if not schema:
+            return
+        dialog = tk.Toplevel(self); dialog.title(capability.title)
+        dialog.transient(self); dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=14); frame.pack(fill="both", expand=True)
+        variables = {}
+        for row, (key, label, kind) in enumerate(schema):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
+            if kind == "bool":
+                variable = tk.BooleanVar(value=values[key]); widget = ttk.Checkbutton(frame, variable=variable)
+            elif isinstance(kind, tuple):
+                variable = tk.StringVar(value=str(values.get(key, "")))
+                widget = ttk.Combobox(frame, textvariable=variable, state="readonly",
+                                      values=tuple(str(item) for item in kind), width=25)
+            else:
+                current = values.get(key, "")
+                variable = tk.StringVar(value="" if current is None else str(current))
+                widget = ttk.Entry(frame, textvariable=variable, width=28,
+                                   state="readonly" if kind == "readonly" else "normal")
+            variables[key] = (variable, kind); widget.grid(row=row, column=1, sticky="ew", pady=4)
+        buttons = ttk.Frame(frame); buttons.grid(row=len(schema), column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="left", padx=4)
+        def save():
+            edited = dict(values)
+            try:
+                for key, (variable, kind) in variables.items():
+                    if kind == "readonly": continue
+                    raw = variable.get()
+                    if kind == "bool": edited[key] = bool(raw)
+                    elif kind in {"int", "optional_int"} or (isinstance(kind, tuple) and kind and isinstance(kind[0], int)):
+                        edited[key] = None if kind == "optional_int" and not raw.strip() else int(raw)
+                    else: edited[key] = raw
+                self.model.edit_event(index, edited)
+            except (ValueError, KeyError) as exc:
+                messagebox.showerror("Cannot edit event", str(exc), parent=dialog); return
+            dialog.destroy(); self.redraw()
+        ttk.Button(buttons, text="Save", command=save).pack(side="left", padx=4)
 
     def _create(self, factory, *args):
         try:
