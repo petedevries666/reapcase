@@ -8,7 +8,7 @@ from stadium_reaper_bridge.editor.layout import HEADER_WIDTH, RULER_HEIGHT
 from stadium_reaper_bridge.editor.model import EditorModel, LANES
 from stadium_reaper_bridge.editor.navigation import (
     ViewState, event_list_rows, jump_viewport_left, marker_region_rows,
-    visible_lane_layout,
+    move_visible_lane, normalized_lane_order, visible_lane_layout,
 )
 
 
@@ -37,6 +37,28 @@ def test_visible_lane_layout_is_contiguous_and_audio_follows(hidden):
         cursor += lane_height(lane)
     assert layout.event_bottom == cursor
     assert layout.audio_top == cursor
+
+
+def test_lane_reorder_swaps_adjacent_visible_lanes_deterministically():
+    order = ["STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO"]
+    visible = {lane: True for lane in order}
+    order = move_visible_lane(order, visible, "VIDEO", -1)
+    assert order == ["STRUCTURE", "STADIUM", "VIDEO", "SECOND HELIX"]
+    order = move_visible_lane(order, visible, "VIDEO", -1)
+    assert order == ["STRUCTURE", "VIDEO", "STADIUM", "SECOND HELIX"]
+
+
+def test_lane_reorder_skips_hidden_lane_without_losing_it():
+    order = ["STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS"]
+    visible = {lane: lane != "SECOND HELIX" for lane in order}
+    moved = move_visible_lane(order, visible, "VIDEO", -1)
+    assert moved == ["STRUCTURE", "VIDEO", "SECOND HELIX", "STADIUM", "LIGHTS"]
+    assert [lane for lane in moved if not visible[lane]] == ["SECOND HELIX"]
+
+
+def test_normalized_lane_order_repairs_stale_preferences():
+    assert normalized_lane_order(["VIDEO", "VIDEO", "OLD"], LANES) == [
+        "VIDEO", *[lane for lane in LANES if lane != "VIDEO"]]
 
 
 def test_event_list_is_a_semantic_projection_and_does_not_filter_hidden_lanes():

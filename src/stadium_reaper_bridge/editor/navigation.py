@@ -12,6 +12,39 @@ from .layout import HEADER_WIDTH, RULER_HEIGHT, timeline_x
 from .structure import is_pause_marker
 
 
+def normalized_lane_order(order, available) -> list[str]:
+    """Return a complete, duplicate-free presentation order.
+
+    Unknown preference entries are discarded and newly introduced lanes are
+    appended, so an old UI preference can never hide application lanes.
+    """
+    available = tuple(available)
+    result = [lane for lane in order if lane in available]
+    result = list(dict.fromkeys(result))
+    return result + [lane for lane in available if lane not in result]
+
+
+def move_visible_lane(order, visible, lane: str, direction: int) -> list[str]:
+    """Swap *lane* with its adjacent visible neighbour.
+
+    Hidden entries are never selected as neighbours and retain their order
+    relative to one another.  The returned list is a new presentation-only
+    value; no Song or event state is involved.
+    """
+    result = list(order)
+    shown = [item for item in result if visible.get(item, True)]
+    if lane not in shown or direction not in (-1, 1):
+        return result
+    shown_index = shown.index(lane)
+    target_index = shown_index + direction
+    if not 0 <= target_index < len(shown):
+        return result
+    other = shown[target_index]
+    first, second = result.index(lane), result.index(other)
+    result[first], result[second] = result[second], result[first]
+    return result
+
+
 @dataclass
 class ViewState:
     current_view: str = "timeline"

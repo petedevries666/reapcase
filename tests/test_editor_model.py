@@ -20,6 +20,23 @@ class EditorModelTests(unittest.TestCase):
         path = FIXTURES / name
         return EditorModel(StadiumSong.from_json_text(path.read_text()), path, DECODER)
 
+    def test_phased_open_reports_work_before_returning_candidate(self):
+        phases = []
+        model = EditorModel.open_phased(FIXTURES / "perfect_picture_336.json", phases.append)
+        self.assertEqual(model.path.name, "perfect_picture_336.json")
+        self.assertEqual(phases, ["Parsing song…",
+                                 "Loading sidecar and building timeline…",
+                                 "Resolving audio…", "Preparing views…"])
+
+    def test_failed_phased_open_never_produces_a_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            invalid = Path(directory) / "invalid.json"
+            invalid.write_text("not json", encoding="utf-8")
+            phases = []
+            with self.assertRaises(ValueError):
+                EditorModel.open_phased(invalid, phases.append)
+            self.assertEqual(phases, ["Parsing song…"])
+
     def test_real_song_lane_inventory(self):
         monzter = self.load("monzter_332.json")
         self.assertEqual(monzter.lane_counts(), {"STRUCTURE": 4, "STADIUM": 4,
