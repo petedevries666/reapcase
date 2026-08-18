@@ -124,7 +124,7 @@ class CreationTests(unittest.TestCase):
         for item in (bass, stadium, marker, video):
             self.assertNotIn(item.position.render(), badge_text(item))
         self.assertEqual(FLAG_CAPABILITIES["PRESETSNAP"],
-                         {"parseable": True, "creatable": True, "editable": False})
+                         {"parseable": True, "creatable": True, "editable": True})
 
     def test_second_helix_snapshots_use_rig_mapping(self):
         for snapshot, value in ((1, 0), (3, 2), (8, 7)):
