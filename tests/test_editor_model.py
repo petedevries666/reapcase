@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.editor.layout import (MAX_PIXELS_PER_BEAT, MIN_PIXELS_PER_BEAT,
@@ -36,6 +39,23 @@ class EditorModelTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 EditorModel.open_phased(invalid, phases.append)
             self.assertEqual(phases, ["Parsing song…"])
+
+    def test_phased_open_resolves_manual_audio_root_on_worker(self):
+        calls = []
+
+        def record_resolution(_model, root):
+            calls.append((root, threading.current_thread().name))
+
+        with patch.object(EditorModel, "resolve_audio", autospec=True,
+                          side_effect=record_resolution):
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="song-open-test") as pool:
+                candidate = pool.submit(
+                    EditorModel.open_phased,
+                    FIXTURES / "perfect_picture_336.json",
+                    audio_root="/manual/audio").result()
+
+        self.assertIsInstance(candidate, EditorModel)
+        self.assertEqual(calls, [("/manual/audio", "song-open-test_0")])
 
     def test_real_song_lane_inventory(self):
         monzter = self.load("monzter_332.json")

@@ -96,7 +96,8 @@ class EditorModel:
 
     @classmethod
     def open_phased(cls, path: str | Path, progress=lambda _phase: None,
-                    decoder_path: str | Path = "config/rig_midi.json") -> "EditorModel":
+                    decoder_path: str | Path = "config/rig_midi.json",
+                    audio_root: str | Path | None = None) -> "EditorModel":
         """Build and validate a candidate model with observable load phases.
 
         This method owns no Tk objects and is therefore safe to run on a
@@ -109,7 +110,7 @@ class EditorModel:
         decoder = RigMidiDecoder.from_file(decoder_path)
         candidate = cls(song, path, decoder, resolve_audio_on_init=False)
         progress("Resolving audio…")
-        candidate.resolve_audio()
+        candidate.resolve_audio(audio_root)
         progress("Preparing views…")
         # Force the projections used immediately by the UI while still on the
         # worker; their results remain derived, not serialized state.

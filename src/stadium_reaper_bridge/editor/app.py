@@ -9,6 +9,7 @@ import tkinter as tk
 import time
 import json
 from pathlib import Path
+from queue import Empty, Queue
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from concurrent.futures import ThreadPoolExecutor
 from ..show import MidiRoute, ReapcaseShow, SHOW_SUFFIX
@@ -536,16 +537,20 @@ class ReapcaseEditor(tk.Tk):
         ttk.Label(win, textvariable=phase, padding=(18, 6, 18, 14)).pack(fill="x")
         win.protocol("WM_DELETE_WINDOW", lambda: None)
         self._prepare_dialog(win, "song_loading", cancel=lambda: None); bar.start(12)
-        updates = []
-        future = self._loading_pool.submit(EditorModel.open_phased, path, updates.append)
+        updates = Queue()
+        future = self._loading_pool.submit(
+            EditorModel.open_phased, path, updates.put,
+            audio_root=self.manual_audio_root)
         def poll():
             if not self.loading: return
-            while updates: phase.set(updates.pop(0))
+            try:
+                while True: phase.set(updates.get_nowait())
+            except Empty:
+                pass
             if not future.done(): self.after(35, poll); return
             error = None
             try:
                 candidate = future.result()
-                if self.manual_audio_root: candidate.resolve_audio(self.manual_audio_root)
                 phase.set("Finalizing UI…")
                 self.audio_engine.close()
                 self.model = candidate
