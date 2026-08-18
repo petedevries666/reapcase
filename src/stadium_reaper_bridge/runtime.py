@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 import threading
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Optional, Union
 
 from .editor.audio import AudioResolver, AudioTrackView, audio_track_views, stadium_backup_audio_paths
 from .editor.lighting import LightingEventSource, create_lighting_event
@@ -70,8 +70,8 @@ class PreparedSong:
     song_id: str
     title: str
     path: Path
-    stadium_song: StadiumSong | None
-    timing_map: TimingMap | None
+    stadium_song: Optional[StadiumSong]
+    timing_map: Optional[TimingMap]
     timeline_events: tuple[TimelineEvent, ...]
     audio_tracks: tuple[AudioTrackView, ...]
     duration_seconds: float
@@ -94,7 +94,7 @@ class PreparedSong:
         return sum(track.resolved_path is not None and track.file_info is not None for track in self.audio_tracks)
 
     @property
-    def sample_rate(self) -> int | None:
+    def sample_rate(self) -> Optional[int]:
         rates = {t.file_info.sample_rate for t in self.audio_tracks if t.file_info}
         return next(iter(rates)) if len(rates) == 1 else None
 
@@ -136,7 +136,7 @@ def _runtime_commands(events: Iterable[TimelineEvent]) -> tuple[RuntimeCommand, 
 class SongPreparer:
     """Parse JSON and headers only; WAV PCM and waveforms are never loaded."""
 
-    def __init__(self, decoder: RigMidiDecoder | None = None):
+    def __init__(self, decoder: Optional[RigMidiDecoder] = None):
         config = Path(__file__).resolve().parents[2] / "config" / "rig_midi.json"
         self.decoder = decoder or RigMidiDecoder.from_file(config)
 
@@ -203,7 +203,7 @@ class PreparedSongCache:
         self._items: OrderedDict[str, PreparedSong] = OrderedDict()
         self._lock = threading.Lock()
 
-    def get(self, song_id: str) -> PreparedSong | None:
+    def get(self, song_id: str) -> Optional[PreparedSong]:
         with self._lock:
             item = self._items.get(song_id)
             if item and item.is_stale():
@@ -226,7 +226,7 @@ class PreparedSongCache:
 
 class ShowPreloader:
     """Single-worker, cancellable metadata preloader, isolated from Tk/audio callbacks."""
-    def __init__(self, preparer: SongPreparer | Any = None, cache: PreparedSongCache | None = None):
+    def __init__(self, preparer: Union[SongPreparer, Any] = None, cache: Optional[PreparedSongCache] = None):
         self.preparer = preparer or SongPreparer(); self.cache = cache or PreparedSongCache()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="show-preflight")
         self._generation = 0; self._futures: dict[str, Future] = {}
@@ -235,7 +235,7 @@ class ShowPreloader:
         cached = self.cache.get(song.id)
         return cached or self.cache.put(self.preparer.prepare(show, song))
 
-    def prepare(self, show: ReapcaseShow, song: ShowSong, callback: Callable[[PreparedSong], None] | None = None) -> Future:
+    def prepare(self, show: ReapcaseShow, song: ShowSong, callback: Optional[Callable[[PreparedSong], None]] = None) -> Future:
         cached = self.cache.get(song.id)
         if cached:
             future = Future(); future.set_result(cached); return future
@@ -257,12 +257,12 @@ class ShowPreloader:
 
 
 class LiveRuntime:
-    def __init__(self, show: ReapcaseShow, preloader: ShowPreloader | None = None,
-                 stop_callback: Callable[[], None] | None = None):
+    def __init__(self, show: ReapcaseShow, preloader: Optional[ShowPreloader] = None,
+                 stop_callback: Optional[Callable[[], None]] = None):
         self.show, self.preloader = show, preloader or ShowPreloader()
         self.stop_callback = stop_callback or (lambda: None)
-        self.state = TransportState.STOPPED; self.current_index: int | None = None
-        self.current_song: PreparedSong | None = None; self.next_song: PreparedSong | None = None
+        self.state = TransportState.STOPPED; self.current_index: Optional[int] = None
+        self.current_song: Optional[PreparedSong] = None; self.next_song: Optional[PreparedSong] = None
         self.current_time_seconds = 0.0; self.current_units = 0
 
     @property
@@ -281,7 +281,7 @@ class LiveRuntime:
             self.preloader.prepare(self.show, self.show.songs[index + 1], lambda item: setattr(self, "next_song", item))
         return self.current_song
 
-    def next(self) -> PreparedSong | None:
+    def next(self) -> Optional[PreparedSong]:
         if self.current_index is None or self.current_index + 1 >= len(self.show.songs): return None
         target = self.preloader.cache.get(self.show.songs[self.current_index + 1].id)
         if target is None: return None
@@ -293,7 +293,7 @@ class LiveRuntime:
             self.preloader.prepare(self.show, self.show.songs[following], lambda item: setattr(self, "next_song", item))
         return target
 
-    def previous(self) -> PreparedSong | None:
+    def previous(self) -> Optional[PreparedSong]:
         if self.current_index is None or self.current_index == 0: return None
         target = self.preloader.cache.get(self.show.songs[self.current_index - 1].id)
         if target is None: return None
@@ -302,7 +302,7 @@ class LiveRuntime:
         return target
 
 
-def preflight_show(show: ReapcaseShow, preparer: SongPreparer | None = None) -> tuple[PreparedSong, ...]:
+def preflight_show(show: ReapcaseShow, preparer: Optional[SongPreparer] = None) -> tuple[PreparedSong, ...]:
     """Synchronous core used by the background service and command-line tests."""
     show.validate()
     loader = preparer or SongPreparer()

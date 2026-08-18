@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional, Union
 
 from ..midi import RigMidiDecoder
 from ..stadium import MusicalPosition, StadiumFlag
 from ..timeline import TimelineEvent, TimelineEventKind
 
 
-def _event(position: MusicalPosition, payload: str, decoder: RigMidiDecoder | None = None) -> TimelineEvent:
+def _event(position: MusicalPosition, payload: str, decoder: Optional[RigMidiDecoder] = None) -> TimelineEvent:
     flag = StadiumFlag(position, payload)
     data = flag.semantic_data()
     if flag.type == "MIDI_CC" and decoder:
@@ -54,7 +54,7 @@ def parse_marker(flag: StadiumFlag) -> MarkerOptions:
     return MarkerOptions(fields[1], fields[4] == "On", fields[5] == "On")
 
 
-def create_structure_marker(position: MusicalPosition, name: str | MarkerOptions,
+def create_structure_marker(position: MusicalPosition, name: Union[str, MarkerOptions],
                             pause_at_marker: bool = False) -> TimelineEvent:
     options = name if isinstance(name, MarkerOptions) else MarkerOptions(name, pause_at_marker)
     return _event(position, serialize_marker(options))
@@ -66,14 +66,14 @@ class StadiumContext:
     preset: str
 
 
-def stadium_context_at(events: Iterable[TimelineEvent], position: MusicalPosition) -> StadiumContext | None:
+def stadium_context_at(events: Iterable[TimelineEvent], position: MusicalPosition) -> Optional[StadiumContext]:
     """Return the last explicit preset context at or before *position*.
 
     START and PRESETSNAP share the fixture-proven setlist/preset fields. A
     ``[Current]`` value preserves an already-known component but cannot create
     knowledge where none exists.
     """
-    context: StadiumContext | None = None
+    context: Optional[StadiumContext] = None
     for event in sorted(events, key=lambda item: item.position):
         if event.position > position:
             break
@@ -175,8 +175,8 @@ def create_second_helix_looper(position: MusicalPosition, action: str,
     return _midi_cc(position, midi, f"BASS {action.upper()}", decoder)
 
 
-def create_second_helix_preset(position: MusicalPosition, bank_msb: int | None,
-                               bank_lsb: int | None, program: int,
+def create_second_helix_preset(position: MusicalPosition, bank_msb: Optional[int],
+                               bank_lsb: Optional[int], program: int,
                                decoder: RigMidiDecoder) -> TimelineEvent:
     channel = decoder.second_helix_channel
     values: list[Any] = [bank_msb, bank_lsb, program]
@@ -190,7 +190,7 @@ def create_second_helix_preset(position: MusicalPosition, bank_msb: int | None,
     return _event(position, f"MIDI_BANK_PROGRAM;BASS PRESET {program};5;Bank/Prog;{channel};{msb};{lsb};{program}")
 
 
-def create_video_command(position: MusicalPosition, video_number: int | None, action: str,
+def create_video_command(position: MusicalPosition, video_number: Optional[int], action: str,
                          decoder: RigMidiDecoder) -> TimelineEvent:
     command: dict[str, Any] = {"system": "video", "action": action}
     if action == "rescan_playlist":

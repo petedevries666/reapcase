@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import copy
 import json
 import re
-from typing import Any
+from typing import Any, Optional
 
 
 _POSITION = re.compile(r"^(?P<bar>\d+)-(?P<beat>\d+)\.(?P<tick>\d+)$")
@@ -28,14 +28,14 @@ class MusicalPosition:
     bar: int
     beat: int
     tick: int
-    original: str | None = field(default=None, compare=False)
+    original: Optional[str] = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if self.bar < 1 or self.beat < 1 or self.tick < 1:
             raise ValueError("Stadium bar, beat, and tick values must be one-based")
 
     @classmethod
-    def parse(cls, value: str, *, ppqn: int | None = None) -> "MusicalPosition":
+    def parse(cls, value: str, *, ppqn: Optional[int] = None) -> "MusicalPosition":
         match = _POSITION.fullmatch(value)
         if not match:
             raise ValueError(f"Invalid Stadium musical position: {value!r}")
@@ -46,7 +46,7 @@ class MusicalPosition:
         position.validate(ppqn)
         return position
 
-    def validate(self, ppqn: int | None = None) -> None:
+    def validate(self, ppqn: Optional[int] = None) -> None:
         """Validate the tick against a Song PPQN when one is available."""
         if ppqn is not None:
             if isinstance(ppqn, bool) or not isinstance(ppqn, int) or ppqn < 1:
@@ -72,10 +72,10 @@ class StadiumFlag:
 
     position: MusicalPosition
     payload: str
-    original: str | None = field(default=None, compare=False)
+    original: Optional[str] = field(default=None, compare=False)
 
     @classmethod
-    def parse(cls, value: str, *, ppqn: int | None = None) -> "StadiumFlag":
+    def parse(cls, value: str, *, ppqn: Optional[int] = None) -> "StadiumFlag":
         position, separator, payload = value.partition("|")
         if not separator:
             raise ValueError(f"Stadium flag has no payload delimiter: {value!r}")
@@ -117,7 +117,7 @@ class StadiumFlag:
                 return {"label": f[1], "channel": int(f[4]), "cc": int(f[5]),
                         "value": int(f[6])}
             if self.type == "MIDI_BANK_PROGRAM" and len(f) >= 8:
-                def bank(value: str) -> int | None:
+                def bank(value: str) -> Optional[int]:
                     return None if value == "Off" else int(value)
                 return {"label": f[1], "channel": int(f[4]), "bank_msb": bank(f[5]),
                         "bank_lsb": bank(f[6]), "program": int(f[7])}
@@ -149,7 +149,7 @@ class StadiumSong:
     flags: list[StadiumFlag]
     tracks: Any
     _document: dict[str, Any] = field(repr=False)
-    _original_text: str | None = field(default=None, repr=False)
+    _original_text: Optional[str] = field(default=None, repr=False)
 
     @classmethod
     def from_dict(cls, document: dict[str, Any]) -> "StadiumSong":

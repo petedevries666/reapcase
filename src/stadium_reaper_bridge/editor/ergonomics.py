@@ -5,6 +5,7 @@ stable and testable on headless build machines.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -71,7 +72,7 @@ class DialogPositions:
 
 def follow_scroll(playhead_x: float, viewport_left: float, viewport_width: float,
                   *, playing: bool, suspended: bool = False,
-                  trigger: float = .78, target: float = .30) -> float | None:
+                  trigger: float = .78, target: float = .30) -> Optional[float]:
     """Return a new viewport left edge only when threshold following is needed."""
     if not playing or viewport_width <= 0:
         return None
@@ -87,7 +88,7 @@ class BackupError(OSError):
     """Raised before writing when an overwrite backup cannot be secured."""
 
 
-def backup_existing(paths: list[Path], *, now: datetime | None = None,
+def backup_existing(paths: list[Path], *, now: Optional[datetime] = None,
                     copy=shutil.copy2) -> tuple[Path, ...]:
     """Back up every existing file as one timestamp generation before overwrite."""
     existing = [Path(path) for path in paths if Path(path).exists()]

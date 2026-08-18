@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import re
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional, Union
 
 from ..stadium import MusicalPosition
 from ..timeline import TimelineEvent, TimelineEventKind
@@ -67,8 +67,8 @@ class LightingRegion:
     open_ended: bool = False
 
 
-def create_lighting_event(position: MusicalPosition, name: str, kind: LightingKind | str,
-                          cue_id: str | None = None) -> TimelineEvent:
+def create_lighting_event(position: MusicalPosition, name: str, kind: Union[LightingKind, str],
+                          cue_id: Optional[str] = None) -> TimelineEvent:
     name = validate_cue_name(name)
     kind = LightingKind(kind)
     identity = cue_id or normalized_cue_id(name)

@@ -4,6 +4,7 @@ Nothing in this module owns events: rows and manager entries are rebuilt from
 ``EditorModel.timeline`` whenever the UI refreshes.
 """
 
+from typing import Optional
 from dataclasses import dataclass
 
 from .composite import lane_height
@@ -150,7 +151,7 @@ def focused_lane_visibility(normal: dict[str, bool], lane: str) -> dict[str, boo
 
 
 def adjacent_event_index(model, current_units: int, direction: int,
-                         visible_lanes=None) -> int | None:
+                         visible_lanes=None) -> Optional[int]:
     """Return the canonical chronological neighbour in visible semantic lanes."""
     visible = set(visible_lanes or ())
     ordered = sorted(((model._units(event.position), i) for i, event in enumerate(model.timeline.events)
@@ -161,7 +162,7 @@ def adjacent_event_index(model, current_units: int, direction: int,
     return (candidates[0][1] if direction > 0 else candidates[-1][1]) if candidates else None
 
 
-def adjacent_marker_index(model, current_units: int, direction: int) -> int | None:
+def adjacent_marker_index(model, current_units: int, direction: int) -> Optional[int]:
     rows = marker_region_rows(model)
     candidates = [row for row in rows if (row.units > current_units if direction > 0
                                            else row.units < current_units)]

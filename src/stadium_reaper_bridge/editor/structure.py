@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Optional
 
 from ..timeline import TimelineEvent
 
@@ -90,7 +90,7 @@ def derive_structure_layout(events: Iterable[TimelineEvent], units_for,
 
 
 def sticky_label_x(region_start: float, region_end: float, viewport_left: float,
-                   label_width: float, padding: float = 6) -> float | None:
+                   label_width: float, padding: float = 6) -> Optional[float]:
     """Clamp one label to the visible edge while keeping it inside its region."""
     available = region_end - region_start - 2 * padding
     if available < label_width or available <= 0:

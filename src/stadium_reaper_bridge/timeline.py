@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 from .stadium import MusicalPosition, StadiumFlag, StadiumSong
 
@@ -24,7 +24,7 @@ class TimelineEvent:
     position: MusicalPosition
     data: dict[str, Any] = field(default_factory=dict)
     source: Any = None
-    source_index: int | None = None
+    source_index: Optional[int] = None
 
 
 @dataclass

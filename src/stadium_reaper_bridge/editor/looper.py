@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
 
 from ..timeline import TimelineEvent
 
@@ -20,7 +20,7 @@ class LooperRegion:
     open_ended: bool = False
 
 
-def looper_action(event: TimelineEvent, system: str) -> str | None:
+def looper_action(event: TimelineEvent, system: str) -> Optional[str]:
     """Return a normalized action from semantic data without changing its source label."""
     if system == "STADIUM":
         if event.source.type != "LOOPER":
@@ -38,7 +38,7 @@ def looper_action(event: TimelineEvent, system: str) -> str | None:
     return action.strip().replace("_", " ").upper()
 
 
-def looper_display_label(event: TimelineEvent, system: str) -> str | None:
+def looper_display_label(event: TimelineEvent, system: str) -> Optional[str]:
     """Return the device-independent label used within a dedicated LOOPER row."""
     return looper_action(event, system)
 
@@ -54,7 +54,7 @@ def derive_looper_regions(events: Iterable[TimelineEvent], units_for: Callable,
     relevant.sort(key=lambda item: (item[0], item[1]))
 
     regions: list[LooperRegion] = []
-    active: tuple[int, int, str] | None = None
+    active: Optional[tuple[int, int, str]] = None
     for units, index, action in relevant:
         if action == "STOP":
             if active is not None:

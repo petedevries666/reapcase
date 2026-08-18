@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -13,7 +14,7 @@ class InspectorProjection:
     count: int = 1
 
 
-def inspector_projection(model, indices) -> InspectorProjection | None:
+def inspector_projection(model, indices) -> Optional[InspectorProjection]:
     """Describe canonical selection without parsing display labels or payloads."""
     valid = sorted({i for i in indices if 0 <= i < len(model.timeline.events)},
                    key=lambda i: model._units(model.timeline.events[i].position))

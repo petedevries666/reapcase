@@ -4,6 +4,7 @@ Launch with ``PYTHONPATH=src python -m stadium_reaper_bridge.editor.app``.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import tkinter as tk
 import time
@@ -95,10 +96,10 @@ class ReapcaseEditor(tk.Tk):
         apply_ttk_theme(self)
         self.title("Reapcase Desktop Editor")
         self.geometry("1180x680")
-        self.model: EditorModel | None = None
+        self.model: Optional[EditorModel] = None
         self.pixels_per_beat = DEFAULT_PIXELS_PER_BEAT
-        self.drag_x: float | None = None
-        self.drag_preview: MovePreview | None = None
+        self.drag_x: Optional[float] = None
+        self.drag_preview: Optional[MovePreview] = None
         self.drag_copy = False
         self.playhead_drag = False
         self._follow_suspended_until = 0.0
@@ -106,8 +107,8 @@ class ReapcaseEditor(tk.Tk):
         self.view_state = ViewState()
         self.current_view = tk.StringVar(value="timeline")
         self.inspector_visible = tk.BooleanVar(value=False)
-        self._lane_focus: str | None = None
-        self._focus_visibility: dict[str, bool] | None = None
+        self._lane_focus: Optional[str] = None
+        self._focus_visibility: Optional[dict[str, bool]] = None
         self.lane_visibility = {lane: tk.BooleanVar(value=True) for lane in LANES + ("AUDIO",)}
         self.lane_order = self._load_lane_order()
         self.loading = False
@@ -115,14 +116,14 @@ class ReapcaseEditor(tk.Tk):
         self._loading_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="song-open")
         self._manager_windows = {}
         self._event_rows = {}
-        self.audio_drag: tuple[int, int] | None = None
-        self.marquee_anchor: tuple[float, float] | None = None
-        self.marquee_point: tuple[float, float] | None = None
+        self.audio_drag: Optional[tuple[int, int]] = None
+        self.marquee_anchor: Optional[tuple[float, float]] = None
+        self.marquee_point: Optional[tuple[float, float]] = None
         self.marquee_base: set[int] = set()
         self.marquee_mode = "replace"
         self.event_bounds: dict[int, tuple[float, float, float, float]] = {}
         self.sequence_bounds: dict[str, tuple[float, float, float, float]] = {}
-        self.sequence_drag: tuple[float, tuple[str, ...]] | None = None
+        self.sequence_drag: Optional[tuple[float, tuple[str, ...]]] = None
         self.sequence_drag_delta = 0
         self.semantic_sources: dict[int, tuple[int, ...]] = {}
         self.grid_choice = tk.StringVar(value="1 beat")
@@ -131,9 +132,9 @@ class ReapcaseEditor(tk.Tk):
         self.zoom_label = tk.StringVar()
         self.transport_position = tk.StringVar(value="00:00.000   |   001-01.001")
         self.audio_engine = AudioEngine()
-        self.show: ReapcaseShow | None = None
+        self.show: Optional[ReapcaseShow] = None
         self.show_preloader = ShowPreloader()
-        self.live_runtime: LiveRuntime | None = None
+        self.live_runtime: Optional[LiveRuntime] = None
         self.app_mode = tk.StringVar(value="EDIT")
         self.auto_advance = tk.BooleanVar(value=False)
         self.show_name = tk.StringVar(value="SHOW: No show open")

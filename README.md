@@ -24,7 +24,7 @@ Stadium JSON -> modèle Stadium lossless -> timeline neutre -> adaptateur REAPER
 
 ## Démarrage
 
-Python 3.11+ suffit pour le modèle et les tests. La lecture desktop utilise la
+Python 3.9+ suffit pour le modèle, l'éditeur et les tests. La lecture desktop utilise la
 petite API callback `sounddevice` (PortAudio) :
 
 ```bash
