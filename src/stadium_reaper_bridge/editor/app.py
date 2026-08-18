@@ -355,9 +355,19 @@ class ReapcaseEditor(tk.Tk):
         self._manager("marker_region_manager", "Marker / Region Manager", build)
 
     def _refresh_navigation(self):
+        """Rebuild model-derived utility rows after a structural model change.
+
+        This deliberately is not part of :meth:`redraw`: transport animation,
+        scrolling, and playhead motion repaint the canvas without touching Tk
+        Treeviews.
+        """
         if self.current_view.get() == "event_list": self._refresh_event_list()
         win = self._manager_windows.get("marker_region_manager")
         if win and win.winfo_exists() and hasattr(win, "_refresh_rows"): win._refresh_rows()
+
+    def _redraw_after_model_change(self):
+        self._refresh_navigation()
+        self.redraw()
 
     def _show_changed(self):
         self.setlist.delete(0, "end")
@@ -492,7 +502,7 @@ class ReapcaseEditor(tk.Tk):
         if self.manual_audio_root:
             self.model.resolve_audio(self.manual_audio_root)
         self._configure_audio()
-        self.redraw()
+        self._redraw_after_model_change()
 
     def _save_to(self, path):
         try:
@@ -617,7 +627,6 @@ class ReapcaseEditor(tk.Tk):
         self.after(40, poll)
 
     def redraw(self):
-        self._refresh_navigation()
         self.canvas.delete("all")
         self._waveform_images = []
         if not self.model: return
@@ -1368,7 +1377,7 @@ class ReapcaseEditor(tk.Tk):
                 self.model.edit_event(index, edited)
             except (ValueError, KeyError) as exc:
                 messagebox.showerror("Cannot edit event", str(exc), parent=dialog); return
-            dialog.destroy(); self.redraw()
+            dialog.destroy(); self._redraw_after_model_change()
         primary = ttk.Button(buttons, text="Save", command=save, default="active")
         primary.pack(side="left", padx=4)
         self._prepare_dialog(dialog, f"event_edit:{family}", save)
@@ -1380,7 +1389,7 @@ class ReapcaseEditor(tk.Tk):
         except ValueError as exc:
             messagebox.showerror("Cannot create event", str(exc))
             return
-        self.redraw()
+        self._redraw_after_model_change()
 
     def _marker_dialog(self, position, pause_default=False):
         dialog = tk.Toplevel(self)
@@ -1527,6 +1536,7 @@ class ReapcaseEditor(tk.Tk):
         preview = self.drag_preview
         if preview and preview.valid:
             self.model.commit_preview(preview)
+            self._refresh_navigation()
         self.drag_x = None
         self.drag_preview = None
         self.redraw()
@@ -1602,7 +1612,7 @@ class ReapcaseEditor(tk.Tk):
         def apply():
             try: self.model.shift_selected(*(int(e.get()) for e in entries))
             except ValueError as exc: messagebox.showerror("Invalid shift", str(exc)); return
-            win.destroy(); self.redraw()
+            win.destroy(); self._redraw_after_model_change()
         ttk.Button(win, text="Shift", command=apply, default="active").grid(row=3, columnspan=2, pady=8)
         self._prepare_dialog(win, "shift_selected", apply)
     def undo(self):
@@ -1611,6 +1621,7 @@ class ReapcaseEditor(tk.Tk):
             changed = self.model.undo()
             if changed and before != tuple(track.source for track in self.model.audio_tracks):
                 self._configure_audio()
+            if changed: self._refresh_navigation()
             self.redraw()
 
     def copy_events(self, _event=None):
@@ -1623,7 +1634,7 @@ class ReapcaseEditor(tk.Tk):
     def paste_events(self, _event=None):
         if self.model and self.app_mode.get() != "LIVE":
             count = self.model.paste_at_cursor()
-            if count: self.redraw()
+            if count: self._redraw_after_model_change()
             self.status.set(f"Pasted {count} event{'s' if count != 1 else ''} at playhead" if count else
                             "Event clipboard is empty")
         return "break"
@@ -1653,13 +1664,13 @@ class ReapcaseEditor(tk.Tk):
         if self.app_mode.get() == "LIVE": return
         if self.model:
             self.model.delete_selected()
-            self.redraw()
+            self._redraw_after_model_change()
 
     def duplicate_selected(self):
         if self.app_mode.get() == "LIVE": return
         if self.model:
             self.model.duplicate_selected()
-            self.redraw()
+            self._redraw_after_model_change()
 
     def seek_units(self, units):
         if self.model and self.model.tempo_map:

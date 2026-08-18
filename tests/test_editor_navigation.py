@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 import pytest
@@ -62,3 +63,16 @@ def test_jump_scroll_uses_units_and_first_third_lookahead():
     left = jump_viewport_left(units, ppqn, scale, viewport)
     target_x = HEADER_WIDTH + units / ppqn * scale
     assert target_x - left == pytest.approx(viewport * .28)
+
+
+def test_visual_redraw_and_transport_do_not_rebuild_navigation_treeviews():
+    """Keep the 30 FPS transport path independent from structural projections."""
+    source = Path("src/stadium_reaper_bridge/editor/app.py").read_text(encoding="utf-8")
+    editor = next(node for node in ast.parse(source).body
+                  if isinstance(node, ast.ClassDef) and node.name == "ReapcaseEditor")
+    methods = {node.name: node for node in editor.body if isinstance(node, ast.FunctionDef)}
+    for method_name in ("redraw", "_transport_tick"):
+        called = {node.func.attr for node in ast.walk(methods[method_name])
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+        assert "_refresh_navigation" not in called
+        assert "_refresh_event_list" not in called
