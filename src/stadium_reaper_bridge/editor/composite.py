@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Union
+
 from ..timeline import TimelineEvent
 from .layout import LANE_HEIGHT, RULER_HEIGHT
 from .structure import STRUCTURE_HEIGHT
@@ -26,7 +28,7 @@ def lane_height(lane: str) -> int:
     return LANE_HEIGHT
 
 
-def lane_top(lanes: tuple[str, ...], lane_or_index: str | int) -> int:
+def lane_top(lanes: tuple[str, ...], lane_or_index: Union[str, int]) -> int:
     """Return a lane top using the same cumulative geometry as the canvas."""
     index = lanes.index(lane_or_index) if isinstance(lane_or_index, str) else lane_or_index
     return RULER_HEIGHT + sum(lane_height(lane) for lane in lanes[:index])

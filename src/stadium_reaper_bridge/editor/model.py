@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import shutil
 import wave
-from typing import Iterable
+from typing import Iterable, Optional, Union
 
 from ..midi import RigMidiDecoder
 from ..stadium import MusicalPosition, StadiumSong
@@ -46,7 +46,7 @@ class MovePreview:
     valid: bool
 
     @property
-    def destination(self) -> MusicalPosition | None:
+    def destination(self) -> Optional[MusicalPosition]:
         return self.targets[0] if self.targets else None
 
 
@@ -65,7 +65,7 @@ class EditorModel:
         self._original_positions = [event.position for event in self.timeline.events]
         self._undo: list[tuple] = []
         self._event_clipboard: tuple[TimelineEvent, ...] = ()
-        self._last_duplicate_offset_units: int | None = None
+        self._last_duplicate_offset_units: Optional[int] = None
         self._created = 0
         self._structural_edits = 0
         self._audio_edits = 0
@@ -73,7 +73,7 @@ class EditorModel:
         self.tempo = start.data.get("tempo") if start else None
         self.numerator = start.data.get("time_signature_numerator", 4) if start else 4
         self.denominator = start.data.get("time_signature_denominator", 4) if start else 4
-        self.audio_root: Path | None = None
+        self.audio_root: Optional[Path] = None
         self.audio_tracks = ()
         self._audio_identities: dict[Path, tuple[int, int]] = {}
         has_start = any(flag.type == "START" for flag in song.flags)
@@ -90,15 +90,15 @@ class EditorModel:
             self.resolve_audio()
 
     @classmethod
-    def open(cls, path: str | Path, decoder_path: str | Path = "config/rig_midi.json") -> "EditorModel":
+    def open(cls, path: Union[str, Path], decoder_path: Union[str, Path] = "config/rig_midi.json") -> "EditorModel":
         path = Path(path)
         return cls(StadiumSong.from_json_text(path.read_text(encoding="utf-8")), path,
                    RigMidiDecoder.from_file(decoder_path))
 
     @classmethod
-    def open_phased(cls, path: str | Path, progress=lambda _phase: None,
-                    decoder_path: str | Path = "config/rig_midi.json",
-                    audio_root: str | Path | None = None) -> "EditorModel":
+    def open_phased(cls, path: Union[str, Path], progress=lambda _phase: None,
+                    decoder_path: Union[str, Path] = "config/rig_midi.json",
+                    audio_root: Optional[Union[str, Path]] = None) -> "EditorModel":
         """Build and validate a candidate model with observable load phases.
 
         This method owns no Tk objects and is therefore safe to run on a
@@ -119,7 +119,7 @@ class EditorModel:
         return candidate
 
     @staticmethod
-    def show_path(path: str | Path) -> Path:
+    def show_path(path: Union[str, Path]) -> Path:
         """Return the namespaced Reapcase sidecar beside a native Song."""
         path = Path(path)
         return path.with_name(path.name + ".reapcase.json")
@@ -208,7 +208,7 @@ class EditorModel:
     def lane_counts(self) -> dict[str, int]:
         return {lane: sum(self.lane(e) == lane for e in self.timeline.events) for lane in EVENT_LANES}
 
-    def resolve_audio(self, root: str | Path | None = None) -> set[Path]:
+    def resolve_audio(self, root: Optional[Union[str, Path]] = None) -> set[Path]:
         """Resolve audio and return files whose identity changed since the last scan."""
         if root is not None:
             self.audio_root = Path(root)
@@ -258,8 +258,8 @@ class EditorModel:
         self.song.tracks = tracks
         self.resolve_audio()
 
-    def add_audio_track(self, source_wav: str | Path, name: str | None = None,
-                        destination: str | Path | None = None) -> dict:
+    def add_audio_track(self, source_wav: Union[str, Path], name: Optional[str] = None,
+                        destination: Optional[Union[str, Path]] = None) -> dict:
         """Copy a PCM WAV into managed storage and append a fixture-safe track."""
         tracks = self.song.tracks
         if not isinstance(tracks, list):
@@ -586,7 +586,7 @@ class EditorModel:
         return len(indices)
 
     def duplicate_events(self, source_indices: Iterable[int], destination_units: int,
-                         *, anchor_units: int | None = None) -> int:
+                         *, anchor_units: Optional[int] = None) -> int:
         """Clone eligible canonical events as one undoable transaction.
 
         ``destination_units`` locates the source anchor, rather than each event,
@@ -640,7 +640,7 @@ class EditorModel:
             bars *= 2
         return self._units(self.timing_map.shift_position(anchor_position, bars=bars)) - units[0]
 
-    def duplicate_selected(self, offset_units: int | None = None) -> int:
+    def duplicate_selected(self, offset_units: Optional[int] = None) -> int:
         """Duplicate after the selection; repeated calls retain the same spacing."""
         indices = sorted(i for i in self.selected if 0 <= i < len(self.timeline.events))
         if not indices:
@@ -714,7 +714,7 @@ class EditorModel:
         self._created += 1
         return index
 
-    def save_as(self, path: str | Path) -> SaveSummary:
+    def save_as(self, path: Union[str, Path]) -> SaveSummary:
         # Serialize a timeline projection without turning it into new source
         # state.  This keeps Undo after Save As capable of restoring the exact
         # opened document.

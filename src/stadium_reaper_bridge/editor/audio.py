@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import wave
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Optional, Union
 
 from ..stadium import MusicalPosition
 
@@ -22,7 +22,7 @@ class AudioFileInfo:
     duration_seconds: float
 
 
-def read_wav_info(path: str | Path) -> AudioFileInfo:
+def read_wav_info(path: Union[str, Path]) -> AudioFileInfo:
     """Read only a WAV header; audio sample data is never loaded into memory."""
     path = Path(path)
     with wave.open(str(path), "rb") as source:
@@ -36,15 +36,15 @@ def read_wav_info(path: str | Path) -> AudioFileInfo:
 class AudioResolver:
     """Resolve Stadium references without ever guessing between duplicates."""
 
-    def __init__(self, song_directory: str | Path, audio_root: str | Path | None = None,
-                 automatic_audio_dir: str | Path | None = None,
-                 backup_audio_root: str | Path | None = None):
+    def __init__(self, song_directory: Union[str, Path], audio_root: Optional[Union[str, Path]] = None,
+                 automatic_audio_dir: Optional[Union[str, Path]] = None,
+                 backup_audio_root: Optional[Union[str, Path]] = None):
         self.song_directory = Path(song_directory)
         self.audio_root = Path(audio_root) if audio_root else None
         self.automatic_audio_dir = Path(automatic_audio_dir) if automatic_audio_dir else None
         self.backup_audio_root = Path(backup_audio_root) if backup_audio_root else None
 
-    def resolve(self, filename: Any) -> Path | None:
+    def resolve(self, filename: Any) -> Optional[Path]:
         if not isinstance(filename, str) or not filename:
             return None
         stored = Path(filename)
@@ -64,7 +64,7 @@ class AudioResolver:
         return self._unique_tail_match(filename, self.audio_root)
 
     @staticmethod
-    def _unique_tail_match(filename: str, root: Path | None) -> Path | None:
+    def _unique_tail_match(filename: str, root: Optional[Path]) -> Optional[Path]:
         if not root or not root.is_dir():
             return None
         # A root commonly points at .../workspace/Audio while the JSON contains
@@ -82,7 +82,7 @@ class AudioResolver:
         return files[0].resolve() if len(files) == 1 else None
 
 
-def stadium_backup_audio_paths(json_path: str | Path) -> tuple[Path, Path] | None:
+def stadium_backup_audio_paths(json_path: Union[str, Path]) -> Optional[tuple[Path, Path]]:
     """Return (Song audio directory, Audio root) for a real extracted backup.
 
     Recognition is suffix based and case-insensitive. Standalone JSON documents
@@ -104,8 +104,8 @@ def stadium_backup_audio_paths(json_path: str | Path) -> tuple[Path, Path] | Non
 class AudioTrackView:
     number: int
     source: dict[str, Any]
-    resolved_path: Path | None = None
-    file_info: AudioFileInfo | None = None
+    resolved_path: Optional[Path] = None
+    file_info: Optional[AudioFileInfo] = None
 
     @property
     def name(self) -> str:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from ..stadium import StadiumFlag
 from ..timeline import TimelineEvent
@@ -76,7 +76,7 @@ def update_stadium_looper(event: TimelineEvent, *, action: str) -> TimelineEvent
 
 
 def update_midi_cc(event: TimelineEvent, *, channel: int, cc: int, value: int,
-                   label: str | None = None, alias: dict | None = None) -> TimelineEvent:
+                   label: Optional[str] = None, alias: Optional[dict] = None) -> TimelineEvent:
     fields = _fields(event, "MIDI_CC", 7)
     fields[4] = str(_integer("MIDI channel", channel, 1, 16))
     fields[5] = str(_integer("CC", cc, 0, 127))
@@ -96,8 +96,8 @@ def update_second_helix(event: TimelineEvent, decoder, *, command: dict, channel
     return update_midi_cc(event, **midi, label=label, alias=command)
 
 
-def update_second_helix_preset(event: TimelineEvent, *, bank_msb: int | None,
-                               bank_lsb: int | None, program: int, channel: int) -> TimelineEvent:
+def update_second_helix_preset(event: TimelineEvent, *, bank_msb: Optional[int],
+                               bank_lsb: Optional[int], program: int, channel: int) -> TimelineEvent:
     fields = _fields(event, "MIDI_BANK_PROGRAM", 8)
     fields[4] = str(_integer("MIDI channel", channel, 1, 16))
     for index, name, value in ((5, "Bank MSB", bank_msb), (6, "Bank LSB", bank_lsb)):
@@ -122,7 +122,7 @@ class EditCapability:
     apply: Callable[..., TimelineEvent]
 
 
-def editor_for_event(event: TimelineEvent, model) -> EditCapability | None:
+def editor_for_event(event: TimelineEvent, model) -> Optional[EditCapability]:
     """Return one semantic editor descriptor; semantic aliases win over raw MIDI."""
     if isinstance(event.source, LightingEventSource):
         return EditCapability("lighting", f"EDIT LIGHTING {event.source.cue.kind.value}",

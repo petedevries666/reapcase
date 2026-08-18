@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 import threading
 import wave
-from typing import Protocol, Sequence
+from typing import Optional, Protocol, Sequence
 
 from .audio import AudioFileInfo, read_wav_info
 
@@ -59,7 +59,7 @@ class SoundDeviceBackend:
 class AudioEngine:
     """Mix at most eight WAVs against a single, locked master frame position."""
 
-    def __init__(self, backend: OutputBackend | None = None, blocksize: int = 1024):
+    def __init__(self, backend: Optional[OutputBackend] = None, blocksize: int = 1024):
         self.backend = backend
         self.blocksize = blocksize
         self.sample_rate = 0
@@ -120,8 +120,8 @@ class AudioEngine:
         self._muted = [False] * len(infos); self._solo = [False] * len(infos)
         self.diagnostic = f"Engine: ready | {self.sample_rate} Hz | Stereo | Buffer: {self.blocksize}"
 
-    def set_monitor(self, index: int, *, muted: bool | None = None,
-                    solo: bool | None = None) -> None:
+    def set_monitor(self, index: int, *, muted: Optional[bool] = None,
+                    solo: Optional[bool] = None) -> None:
         with self._lock:
             if muted is not None: self._muted[index] = muted
             if solo is not None: self._solo[index] = solo

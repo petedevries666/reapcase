@@ -6,6 +6,7 @@ END/song extent when no audio can be resolved.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 from dataclasses import dataclass
 from enum import Enum
@@ -43,7 +44,7 @@ class SequenceInstructionClip:
     label: str
     muted: bool = False
     origin: str = "generated_count"
-    sample_id: str | None = None
+    sample_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {"id": self.id, "position": self.position.render(), "label": self.label,

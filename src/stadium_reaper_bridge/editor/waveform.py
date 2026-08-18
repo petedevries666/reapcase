@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import time
 import wave
-from typing import Callable, Protocol
+from typing import Callable, Optional, Protocol, Union
 
 from .audio_engine import AudioEngine
 
@@ -76,10 +76,10 @@ def _next_level(source: PeakLevel) -> PeakLevel:
     return PeakLevel(source.frames_per_bucket * 2, low, high)
 
 
-def extract_waveform(path: str | Path, base_bucket_frames: int = DEFAULT_BASE_BUCKET_FRAMES,
+def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_BASE_BUCKET_FRAMES,
                      read_frames: int = DEFAULT_READ_FRAMES,
-                     pause_requested: Callable[[], bool] | None = None,
-                     buckets: int | None = None) -> WaveformPyramid:
+                     pause_requested: Optional[Callable[[], bool]] = None,
+                     buckets: Optional[int] = None) -> WaveformPyramid:
     """Scan PCM audio incrementally and build a compact float32 peak pyramid.
 
     At most ``read_frames`` of PCM and one base bucket of decoded samples are
@@ -225,7 +225,7 @@ def viewport_columns(summary: WaveformPyramid, tempo_map: _TempoMap, ppqn: int,
     left = max(round(origin_x), int(viewport_left) - margin)
     right = max(left + 1, int(viewport_left + viewport_width) + margin)
     width = right - left
-    columns: list[tuple[float, float] | None] = [None] * width
+    columns: list[Optional[tuple[float, float]]] = [None] * width
     full_width = frame_to_canvas_x(summary.total_frames, summary.sample_rate,
                                    tempo_map, ppqn, pixels_per_beat, origin_x) - origin_x
     level = choose_peak_level(summary, max(1, full_width), max_objects=2_000_000_000)
@@ -267,7 +267,7 @@ def raster_ppm(columns: list[tuple[float, float]], height: int = 40,
     return f"P6\n{width} {height}\n255\n".encode() + pixels
 
 
-def analyze_grid_sync(path: str | Path, tempo_map: _TempoMap, ppqn: int,
+def analyze_grid_sync(path: Union[str, Path], tempo_map: _TempoMap, ppqn: int,
                       units_to_position: Callable[[int], object],
                       threshold_ratio: float = 0.6) -> tuple[SyncTransient, ...]:
     """Find strong transient frames and measure them against nearest beats."""

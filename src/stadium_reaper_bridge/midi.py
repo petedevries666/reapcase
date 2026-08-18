@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Union
 
 
 def _midi_int(name: str, value: Any, minimum: int, maximum: int) -> int:
@@ -22,10 +22,10 @@ class RigMidiDecoder:
         self.config = config
 
     @classmethod
-    def from_file(cls, path: str | Path) -> "RigMidiDecoder":
+    def from_file(cls, path: Union[str, Path]) -> "RigMidiDecoder":
         return cls(json.loads(Path(path).read_text(encoding="utf-8")))
 
-    def decode(self, midi: dict[str, Any]) -> dict[str, Any] | None:
+    def decode(self, midi: dict[str, Any]) -> Optional[dict[str, Any]]:
         channel = _midi_int("channel", midi.get("channel"), 1, 16)
         cc = _midi_int("cc", midi.get("cc"), 0, 127)
         value = _midi_int("value", midi.get("value"), 0, 127)
@@ -208,7 +208,7 @@ class RigMidiDecoder:
         return {"channel": video["channel"], "cc": cc, "value": values[0]}
 
     @staticmethod
-    def _one_match(matches: list[tuple[int, int]], channel: int | None, action: str) -> dict[str, int]:
+    def _one_match(matches: list[tuple[int, int]], channel: Optional[int], action: str) -> dict[str, int]:
         if len(matches) != 1:
             reason = "unknown" if not matches else "ambiguous"
             raise ValueError(f"action {action!r} is {reason} in the configuration")

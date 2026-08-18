@@ -11,7 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Optional, Union
 
 
 SHOW_VERSION = 1
@@ -27,7 +27,7 @@ def _channel(value: Any) -> int:
 @dataclass(frozen=True)
 class MidiRoute:
     enabled: bool = False
-    port: str | None = None
+    port: Optional[str] = None
     channel: int = 1
 
     def __post_init__(self) -> None:
@@ -66,9 +66,9 @@ class ReapcaseShow:
     auto_advance: bool = False
     lights_mappings: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
-    console_profile: str | None = None
+    console_profile: Optional[str] = None
     panic: dict[str, Any] = field(default_factory=dict)
-    path: Path | None = field(default=None, repr=False)
+    path: Optional[Path] = field(default=None, repr=False)
 
     def resolve_song_path(self, song: ShowSong) -> Path:
         path = Path(song.song_json)
@@ -83,7 +83,7 @@ class ReapcaseShow:
                 pass
         return str(path)
 
-    def add_song(self, path: str | Path, title: str | None = None) -> ShowSong:
+    def add_song(self, path: Union[str, Path], title: Optional[str] = None) -> ShowSong:
         source = Path(path)
         stored = self._stored_path(source)
         base = re.sub(r"[^a-z0-9]+", "_", (title or source.stem).casefold()).strip("_") or "song"
@@ -105,7 +105,7 @@ class ReapcaseShow:
         item = self.songs.pop(index)
         self.songs.insert(max(0, min(destination, len(self.songs))), item)
 
-    def relocate_song(self, index: int, path: str | Path) -> None:
+    def relocate_song(self, index: int, path: Union[str, Path]) -> None:
         old = self.songs[index]
         self.songs[index] = ShowSong(old.id, old.title, self._stored_path(Path(path)))
 
@@ -126,7 +126,7 @@ class ReapcaseShow:
                 "lights": {"mappings": self.lights_mappings}, "notes": self.notes,
                 "console_profile": self.console_profile}}
 
-    def save(self, path: str | Path | None = None) -> Path:
+    def save(self, path: Optional[Union[str, Path]] = None) -> Path:
         target = Path(path) if path else self.path
         if target is None:
             raise ValueError("A show path is required")
@@ -138,7 +138,7 @@ class ReapcaseShow:
         return target
 
     @classmethod
-    def open(cls, path: str | Path) -> "ReapcaseShow":
+    def open(cls, path: Union[str, Path]) -> "ReapcaseShow":
         target = Path(path)
         document = json.loads(target.read_text(encoding="utf-8"))
         root = document.get("reapcase_show") if isinstance(document, dict) else None
