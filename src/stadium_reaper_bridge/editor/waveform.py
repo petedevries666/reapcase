@@ -60,6 +60,22 @@ class WaveformPyramid:
 WaveformSummary = WaveformPyramid
 
 
+def buffered_viewport(viewport_left: int, viewport_width: int,
+                      multiplier: int = 3) -> tuple[int, int]:
+    """Return a reusable raster window centered around a viewport."""
+    width = max(1, int(viewport_width))
+    raster_width = max(width, width * multiplier)
+    return max(0, int(viewport_left) - (raster_width - width) // 2), raster_width
+
+
+def viewport_exits_coverage(viewport_left: float, viewport_width: float,
+                            coverage: Optional[tuple[float, float]]) -> bool:
+    """Whether any of the visible viewport lies outside cached coverage."""
+    if coverage is None:
+        return True
+    return viewport_left < coverage[0] or viewport_left + viewport_width > coverage[1]
+
+
 def ghost_raster_cache_key(waveform_identity: Hashable, viewport_left: int,
                            viewport_width: int, pixels_per_beat: float,
                            ghost_bounds: tuple[int, int],

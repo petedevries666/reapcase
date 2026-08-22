@@ -148,11 +148,15 @@ def test_playback_follow_scroll_moves_view_without_redraw_or_rasterization():
         pixels_per_beat=100.0,
         canvas=canvas,
         _follow_suspended_until=0.0,
+        _ghost_refresh_pending=False,
+        _ghost_raster_coverage=(0.0, 1000.0),
         redraw=lambda: redraws.append(True),
+        after_idle=lambda _callback: pytest.fail("buffered raster should not refresh"),
         after=lambda *_args: None)
     editor._update_fixed_headers_for_scroll = (
         lambda previous: ReapcaseEditor._update_fixed_headers_for_scroll(editor, previous))
     editor._transport_tick = lambda: ReapcaseEditor._transport_tick(editor)
+    editor._refresh_ghost_waveform = lambda: None
 
     for _ in range(3):
         ReapcaseEditor._transport_tick(editor)
@@ -160,9 +164,20 @@ def test_playback_follow_scroll_moves_view_without_redraw_or_rasterization():
     expected_left = HEADER_WIDTH + 200.0 - 30.0
     assert canvas.left == pytest.approx(expected_left)
     assert redraws == []
-    assert canvas.moves == [("fixed-header", expected_left, 0),
-                            ("track-drag", expected_left, 0)]
+    assert canvas.moves == [("fixed-header", expected_left, 0)]
     assert canvas.playhead[0] == canvas.playhead[2] == pytest.approx(HEADER_WIDTH + 200.0)
+
+    # Once the viewport leaves coverage, transport schedules exactly one
+    # ghost-only refresh rather than rasterizing synchronously on every tick.
+    callbacks = []
+    canvas.left = 0.0
+    canvas.moves.clear()
+    editor._ghost_raster_coverage = (0.0, expected_left + 99.0)
+    editor.after_idle = callbacks.append
+    for _ in range(3):
+        ReapcaseEditor._transport_tick(editor)
+    assert callbacks == [editor._refresh_ghost_waveform]
+    assert redraws == []
 
 
 def test_menu_order_and_shared_manager_treeview_style_are_wired_in_app():
