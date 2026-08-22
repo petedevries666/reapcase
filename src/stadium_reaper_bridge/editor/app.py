@@ -114,6 +114,7 @@ class ReapcaseEditor(tk.Tk):
         self.view_state = ViewState()
         self.current_view = tk.StringVar(value="timeline")
         self.inspector_visible = tk.BooleanVar(value=False)
+        self.full_song_ghost_visible = tk.BooleanVar(value=False)
         self._lane_focus: Optional[str] = None
         self._focus_visibility: Optional[dict[str, bool]] = None
         defaults = default_lane_visibility(LANES + ("AUDIO",))
@@ -314,6 +315,9 @@ class ReapcaseEditor(tk.Tk):
         view.add_separator()
         view.add_checkbutton(label="Inspector", variable=self.inspector_visible,
                              command=self.toggle_inspector)
+        view.add_checkbutton(label="Show FULL-SONG Ghost Waveform",
+                             variable=self.full_song_ghost_visible,
+                             command=self.toggle_full_song_ghost)
         view.add_command(label="Lane Manager...", command=self.open_lane_manager)
         view.add_command(label="Marker / Region Manager...", command=self.open_marker_manager)
         view.add_separator()
@@ -406,6 +410,27 @@ class ReapcaseEditor(tk.Tk):
         self._focus_visibility = None
         for lane, shown in default_lane_visibility(self.lane_visibility).items():
             self.lane_visibility[lane].set(shown)
+
+    def _clear_ghost_waveform(self):
+        """Discard every rendered or cached ghost-waveform artifact."""
+        self.canvas.delete("ghost-waveform")
+        if self._ghost_waveform_image in self._waveform_images:
+            self._waveform_images.remove(self._ghost_waveform_image)
+        self._ghost_raster_cache.clear()
+        self._ghost_raster_coverage = None
+        self._ghost_refresh_pending = False
+        self._ghost_waveform_image = None
+
+    def _reset_full_song_ghost(self):
+        """Restore the lightweight presentation default for a newly loaded Song."""
+        self.full_song_ghost_visible.set(False)
+        self._clear_ghost_waveform()
+
+    def toggle_full_song_ghost(self):
+        """Apply the View preference without persisting it in Song data."""
+        if not self.full_song_ghost_visible.get():
+            self._clear_ghost_waveform()
+        self.redraw()
 
     def focus_lane(self, lane):
         if self._lane_focus == lane:
@@ -730,6 +755,7 @@ class ReapcaseEditor(tk.Tk):
                 self.audio_engine.close()
                 self.model = candidate
                 self._reset_lane_visibility()
+                self._reset_full_song_ghost()
                 self._update_song_header()
                 self._configure_audio()
                 self._redraw_after_model_change()
@@ -892,6 +918,9 @@ class ReapcaseEditor(tk.Tk):
 
     def _draw_ghost_waveform(self, layout, visible_lanes):
         """Draw one buffered FULL-SONG raster and record its canvas coverage."""
+        if not self.full_song_ghost_visible.get():
+            self._clear_ghost_waveform()
+            return
         m = self.model
         ghost_track = full_song_track(m.audio_tracks)
         ghost_bounds = ghost_waveform_lane_bounds(layout)
@@ -932,7 +961,8 @@ class ReapcaseEditor(tk.Tk):
     def _refresh_ghost_waveform(self):
         """Refresh only the buffered ghost after the transport callback yields."""
         self._ghost_refresh_pending = False
-        if not self.model:
+        if not self.model or not self.full_song_ghost_visible.get():
+            self._clear_ghost_waveform()
             return
         visibility = self._effective_lane_visibility()
         layout = visible_lane_layout(self.lane_order, visibility)
@@ -2085,7 +2115,8 @@ class ReapcaseEditor(tk.Tk):
                     # Only viewport-fixed overlays need a lightweight move.
                     self._update_fixed_headers_for_scroll(left)
                     current_left = self.canvas.canvasx(0)
-                    if (not self._ghost_refresh_pending and
+                    if (self.full_song_ghost_visible.get() and
+                            not self._ghost_refresh_pending and
                             viewport_exits_coverage(
                                 current_left, width, self._ghost_raster_coverage)):
                         self._ghost_refresh_pending = True

@@ -13,6 +13,7 @@ from stadium_reaper_bridge.editor.navigation import (
 )
 from stadium_reaper_bridge.editor.style import REAPCASE_TREEVIEW_STYLE
 from stadium_reaper_bridge.editor.app import ReapcaseEditor
+from stadium_reaper_bridge.editor import app as editor_app
 from stadium_reaper_bridge.editor.audio_engine import PlaybackState
 
 
@@ -54,6 +55,88 @@ def test_each_song_load_uses_the_default_working_lane_visibility():
     assert song_a == expected
     song_a["LIGHTS"] = True
     assert default_lane_visibility(available) == expected
+
+
+class Variable:
+    def __init__(self, value): self.value = value
+    def get(self): return self.value
+    def set(self, value): self.value = value
+
+
+class GhostCanvas:
+    def __init__(self): self.deleted = []; self.images = []
+    def delete(self, tag): self.deleted.append(tag)
+    def canvasx(self, _x): return 0
+    def winfo_width(self): return 100
+    def create_image(self, *args, **kwargs): self.images.append((args, kwargs))
+
+
+def ghost_editor(visible=False):
+    return SimpleNamespace(
+        full_song_ghost_visible=Variable(visible), canvas=GhostCanvas(),
+        _ghost_raster_cache={}, _ghost_raster_coverage=None,
+        _ghost_refresh_pending=False, _ghost_waveform_image=None,
+        _waveform_images=[])
+
+
+def bind_ghost_methods(editor):
+    editor._clear_ghost_waveform = lambda: ReapcaseEditor._clear_ghost_waveform(editor)
+
+
+def test_full_song_ghost_defaults_off_and_resets_for_each_song():
+    source = Path("src/stadium_reaper_bridge/editor/app.py").read_text(encoding="utf-8")
+    assert 'self.full_song_ghost_visible = tk.BooleanVar(value=False)' in source
+    editor = ghost_editor(True)
+    bind_ghost_methods(editor)
+    editor._ghost_raster_cache["old"] = object()
+    ReapcaseEditor._reset_full_song_ghost(editor)
+    assert not editor.full_song_ghost_visible.get()
+    assert editor._ghost_raster_cache == {}
+
+
+def test_disabled_full_song_ghost_does_no_raster_or_cache_work(monkeypatch):
+    editor = ghost_editor(False)
+    bind_ghost_methods(editor)
+    editor.model = SimpleNamespace(audio_tracks=())
+    monkeypatch.setattr(editor_app, "full_song_track",
+                        lambda *_args: pytest.fail("ghost track must not be inspected"))
+    monkeypatch.setattr(editor_app, "cached_ghost_raster",
+                        lambda *_args: pytest.fail("ghost raster must not be cached"))
+    ReapcaseEditor._draw_ghost_waveform(editor, object(), ())
+    assert editor.canvas.images == []
+
+
+def test_view_toggle_enables_rendering_and_disabling_clears_artifacts(monkeypatch):
+    editor = ghost_editor(True)
+    bind_ghost_methods(editor)
+    summary = object()
+    editor.model = SimpleNamespace(
+        audio_tracks=(object(),), tempo_map=object(), song=SimpleNamespace(ppqn=960))
+    editor.waveforms = {"full-song": summary}
+    editor.pixels_per_beat = 48.0
+    monkeypatch.setattr(editor_app, "full_song_track", lambda _tracks: object())
+    monkeypatch.setattr(editor_app, "waveform_cache_key", lambda _track: "full-song")
+    monkeypatch.setattr(editor_app, "ghost_waveform_lane_bounds", lambda _layout: (10, 50))
+    monkeypatch.setattr(editor_app, "buffered_viewport", lambda _left, _width: (0, 300))
+    monkeypatch.setattr(editor_app, "ghost_raster_cache_key", lambda *_args, **_kwargs: ("key",))
+    image = SimpleNamespace(width=lambda: 300)
+    raster_calls = []
+    monkeypatch.setattr(editor_app, "cached_ghost_raster",
+                        lambda cache, key, render: (raster_calls.append(key) or (0, image)))
+
+    ReapcaseEditor._draw_ghost_waveform(editor, object(), ("STRUCTURE",))
+    assert raster_calls == [("key",)]
+    assert editor.canvas.images
+
+    editor._ghost_raster_cache["old"] = image
+    editor.full_song_ghost_visible.set(False)
+    redraws = []
+    editor.redraw = lambda: redraws.append(True)
+    ReapcaseEditor.toggle_full_song_ghost(editor)
+    assert editor.canvas.deleted[-1] == "ghost-waveform"
+    assert editor._ghost_raster_cache == {}
+    assert editor._ghost_waveform_image is None
+    assert redraws == [True]
 
 
 def test_lane_reorder_swaps_adjacent_visible_lanes_deterministically():
@@ -147,6 +230,7 @@ def test_playback_follow_scroll_moves_view_without_redraw_or_rasterization():
         transport_position=SimpleNamespace(set=lambda _value: None),
         pixels_per_beat=100.0,
         canvas=canvas,
+        full_song_ghost_visible=Variable(True),
         _follow_suspended_until=0.0,
         _ghost_refresh_pending=False,
         _ghost_raster_coverage=(0.0, 1000.0),
@@ -178,6 +262,17 @@ def test_playback_follow_scroll_moves_view_without_redraw_or_rasterization():
         ReapcaseEditor._transport_tick(editor)
     assert callbacks == [editor._refresh_ghost_waveform]
     assert redraws == []
+
+    # The same follow-scroll path never schedules ghost work while the View
+    # preference is disabled, even with no buffered coverage.
+    callbacks.clear()
+    canvas.left = 0.0
+    editor._ghost_refresh_pending = False
+    editor._ghost_raster_coverage = None
+    editor.full_song_ghost_visible.set(False)
+    for _ in range(3):
+        ReapcaseEditor._transport_tick(editor)
+    assert callbacks == []
 
 
 def test_menu_order_and_shared_manager_treeview_style_are_wired_in_app():
