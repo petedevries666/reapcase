@@ -8,7 +8,7 @@ import wave
 
 from stadium_reaper_bridge.editor.layout import HEADER_WIDTH
 from stadium_reaper_bridge.editor.waveform import (
-    analyze_grid_sync, choose_peak_level, display_peaks, extract_waveform,
+    WaveformRenderCache, analyze_grid_sync, choose_peak_level, display_peaks, extract_waveform,
     frame_to_canvas_x, frame_x, raster_ppm, viewport_columns,
 )
 from stadium_reaper_bridge.editor.audio import TempoChange, TempoMap
@@ -181,6 +181,63 @@ class WaveformTests(unittest.TestCase):
                     pause_requested=lambda: next(states, False))
         self.assertEqual(summary.total_frames, 512)
         self.assertEqual(sleep.call_count, 2)
+
+    def test_tile_cache_reuses_playback_and_follow_scroll_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tiles.wav"
+            write_impulses(path, RATE * 20, {RATE: (1, 1)})
+            summary = extract_waveform(path)
+        tempo, _ = self.tempo()
+        cache = WaveformRenderCache(max_tiles=12, tile_width=256)
+        first = cache.visible_tiles("song", summary, tempo, 240, 100, 256, 300,
+                                    HEADER_WIDTH)
+        misses = cache.stats["tile_miss"]
+        # Playhead coordinates are intentionally not accepted by this API.
+        for _playhead in range(100):
+            again = cache.visible_tiles("song", summary, tempo, 240, 100, 280, 300,
+                                        HEADER_WIDTH)
+        self.assertEqual(cache.stats["tile_miss"], misses)
+        self.assertIs(first[0][1], again[0][1])
+
+        cache.visible_tiles("song", summary, tempo, 240, 100, 700, 300,
+                            HEADER_WIDTH)
+        self.assertEqual(cache.stats["tile_miss"], misses + 1)
+        before = cache.stats["tile_miss"]
+        cache.visible_tiles("song", summary, tempo, 240, 100, 256, 300,
+                            HEADER_WIDTH)
+        self.assertEqual(cache.stats["tile_miss"], before)
+
+    def test_display_level_is_shared_and_source_invalidation_is_precise(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "shared.wav"
+            write_impulses(path, RATE * 4, {})
+            summary = extract_waveform(path)
+        tempo, _ = self.tempo()
+        cache = WaveformRenderCache(max_tiles=4, tile_width=128)
+        normal = cache.tile("full-song", summary, tempo, 240, 100, 1, HEADER_WIDTH)[1]
+        # Ghost presentation asks for the same source tile and shares display data.
+        ghost = cache.tile("full-song", summary, tempo, 240, 100, 1, HEADER_WIDTH)[1]
+        self.assertIs(normal.display, ghost.display)
+        # Nearby zoom can select the same multi-resolution level even though its
+        # geometrically exact raster tile is distinct.
+        zoomed = cache.tile("full-song", summary, tempo, 240, 101, 1, HEADER_WIDTH)[1]
+        self.assertIs(normal.display, zoomed.display)
+        cache.invalidate_source("full-song")
+        self.assertEqual(cache.tile_count, 0)
+        rebuilt = cache.tile("full-song", summary, tempo, 240, 100, 1, HEADER_WIDTH)[1]
+        self.assertIsNot(rebuilt, normal)
+
+    def test_tile_cache_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bounded-tiles.wav"
+            write_impulses(path, RATE * 10, {})
+            summary = extract_waveform(path)
+        tempo, _ = self.tempo()
+        cache = WaveformRenderCache(max_tiles=3, tile_width=64)
+        for index in range(20):
+            cache.tile("song", summary, tempo, 240, 100, index, HEADER_WIDTH)
+        self.assertEqual(cache.tile_count, 3)
+        self.assertEqual(cache.stats["tile_evict"], 17)
 
 
 if __name__ == "__main__":

@@ -7,13 +7,16 @@ average summary, an impulse therefore survives every pyramid reduction.
 from __future__ import annotations
 
 from array import array
+from collections import OrderedDict, Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import struct
 import time
 import wave
 import zlib
-from typing import Callable, Hashable, MutableMapping, Optional, Protocol, TypeVar, Union
+from typing import Callable, Hashable, Iterator, MutableMapping, Optional, Protocol, TypeVar, Union
 
 from .audio_engine import AudioEngine
 
@@ -22,6 +25,137 @@ from .audio_engine import AudioEngine
 # while the upper pyramid levels keep long recordings compact to render.
 DEFAULT_BASE_BUCKET_FRAMES = 32
 DEFAULT_READ_FRAMES = 4096
+DEFAULT_TILE_WIDTH = 512
+
+
+@dataclass(frozen=True)
+class DisplayLevel:
+    """Reusable display resolution selected from an analysis pyramid.
+
+    This deliberately contains no Tk objects.  A future ``.reapwave`` reader
+    can provide the same object without changing the timeline renderer.
+    """
+
+    source_identity: Hashable
+    summary: "WaveformPyramid"
+    level: "PeakLevel"
+
+
+@dataclass(frozen=True)
+class WaveformTile:
+    """Toolkit-independent, raster-ready waveform tile."""
+
+    left: int
+    columns: tuple[tuple[float, float], ...]
+    display: DisplayLevel
+
+
+class WaveformRenderCache:
+    """Bounded cache shared by normal and ghost waveform presentations.
+
+    Analysis pyramids and selected display levels are authoritative and shared;
+    presentation (height/colour/ghost) belongs only in the tile key.  The class
+    has no dependency on Tk so preparation can later move off the UI thread.
+    """
+
+    def __init__(self, max_tiles: int = 96, tile_width: int = DEFAULT_TILE_WIDTH):
+        if max_tiles < 1 or tile_width < 1:
+            raise ValueError("Waveform cache limits must be positive")
+        self.max_tiles, self.tile_width = max_tiles, tile_width
+        self._levels: dict[tuple[Hashable, int], DisplayLevel] = {}
+        self._tiles: OrderedDict[tuple, WaveformTile] = OrderedDict()
+        self.stats = Counter()
+
+    def display_level(self, source_identity: Hashable, summary: "WaveformPyramid",
+                      full_pixel_width: float) -> DisplayLevel:
+        level = choose_peak_level(summary, full_pixel_width,
+                                  max_objects=2_000_000_000)
+        key = (source_identity, level.frames_per_bucket)
+        display = self._levels.get(key)
+        if display is None or display.summary is not summary:
+            display = DisplayLevel(source_identity, summary, level)
+            self._levels[key] = display
+            self.stats["display_miss"] += 1
+        else:
+            self.stats["display_hit"] += 1
+        return display
+
+    def tile(self, source_identity: Hashable, summary: "WaveformPyramid",
+             tempo_map: "_TempoMap", ppqn: int, pixels_per_beat: float,
+             tile_index: int, origin_x: float = 0.0) -> tuple[tuple, WaveformTile]:
+        full_width = frame_to_canvas_x(summary.total_frames, summary.sample_rate,
+                                       tempo_map, ppqn, pixels_per_beat, origin_x) - origin_x
+        display = self.display_level(source_identity, summary, max(1, full_width))
+        # Exact scale and tempo are presentation geometry. The selected level
+        # remains shared across nearby zoom values even when tile pixels differ.
+        key = (source_identity, id(summary), id(tempo_map), ppqn,
+               float(pixels_per_beat), int(origin_x), int(tile_index))
+        cached = self._tiles.get(key)
+        if cached is not None:
+            self._tiles.move_to_end(key); self.stats["tile_hit"] += 1
+            return key, cached
+        left = tile_index * self.tile_width
+        image_left, columns = viewport_columns(summary, tempo_map, ppqn,
+                                                pixels_per_beat, left,
+                                                self.tile_width, origin_x, margin=0)
+        cached = WaveformTile(image_left, tuple(columns), display)
+        self._tiles[key] = cached; self.stats["tile_miss"] += 1
+        while len(self._tiles) > self.max_tiles:
+            self._tiles.popitem(last=False); self.stats["tile_evict"] += 1
+        return key, cached
+
+    def visible_tiles(self, source_identity: Hashable, summary: "WaveformPyramid",
+                      tempo_map: "_TempoMap", ppqn: int, pixels_per_beat: float,
+                      viewport_left: float, viewport_width: float,
+                      origin_x: float = 0.0, prefetch: int = 1
+                      ) -> list[tuple[tuple, WaveformTile]]:
+        first = max(0, int(viewport_left) // self.tile_width - prefetch)
+        last = max(first, int(viewport_left + viewport_width) // self.tile_width + prefetch)
+        return [self.tile(source_identity, summary, tempo_map, ppqn,
+                          pixels_per_beat, index, origin_x)
+                for index in range(first, last + 1)]
+
+    def invalidate_source(self, source_identity: Hashable) -> None:
+        self._levels = {key: value for key, value in self._levels.items()
+                        if key[0] != source_identity}
+        for key in tuple(self._tiles):
+            if key[0] == source_identity:
+                del self._tiles[key]
+
+    def clear(self) -> None:
+        self._levels.clear(); self._tiles.clear()
+
+    @property
+    def tile_count(self) -> int:
+        return len(self._tiles)
+
+
+class WaveformPerformance:
+    """Opt-in aggregate timings; disabled measurements cost one branch."""
+
+    def __init__(self, enabled: bool = False):
+        self.enabled, self.totals, self.counts = enabled, Counter(), Counter()
+
+    @contextmanager
+    def measure(self, stage: str) -> Iterator[None]:
+        if not self.enabled:
+            yield; return
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.totals[stage] += time.perf_counter() - started
+            self.counts[stage] += 1
+
+    def log(self, logger: logging.Logger) -> None:
+        if self.enabled:
+            logger.debug("timeline waveform performance: %s", {
+                key: {"calls": self.counts[key], "seconds": round(value, 6)}
+                for key, value in self.totals.items()})
+
+    def record(self, stage: str, seconds: float) -> None:
+        if self.enabled:
+            self.totals[stage] += seconds; self.counts[stage] += 1
 
 
 @dataclass(frozen=True)

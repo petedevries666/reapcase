@@ -6,6 +6,9 @@ Launch with ``PYTHONPATH=src python -m stadium_reaper_bridge.editor.app``.
 from __future__ import annotations
 from typing import Optional
 
+from collections import OrderedDict
+import logging
+import os
 import tkinter as tk
 import time
 import json
@@ -43,10 +46,10 @@ from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
                        create_video_command)
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .audio import full_song_track, waveform_cache_key
-from .waveform import (analyze_grid_sync, buffered_viewport, cached_ghost_raster,
-                       extract_waveform, format_grid_sync, ghost_raster_cache_key, raster_ppm,
-                       raster_transparent_png, timeline_units_to_x,
-                       viewport_columns, viewport_exits_coverage)
+from .waveform import (WaveformPerformance, WaveformRenderCache, analyze_grid_sync,
+                       buffered_viewport, cached_ghost_raster, extract_waveform,
+                       format_grid_sync, ghost_raster_cache_key, raster_ppm,
+                       timeline_units_to_x, viewport_exits_coverage)
 from .ergonomics import (BackupError, DialogPositions, editor_shortcuts_allowed,
                          follow_scroll)
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
@@ -57,6 +60,9 @@ from .navigation import (ViewState, event_list_rows, jump_viewport_left,
                          normalized_lane_order, visible_lane_layout)
 from .inspector import inspector_projection
 from .display import song_header_metadata
+
+
+LOG = logging.getLogger(__name__)
 
 
 class Tooltip:
@@ -156,7 +162,11 @@ class ReapcaseEditor(tk.Tk):
         self.monitor_solo: list[bool] = []
         self.waveforms = {}
         self._waveform_images = []
-        self._ghost_raster_cache = {}
+        self._waveform_render_cache = WaveformRenderCache()
+        self._waveform_photo_cache = OrderedDict()
+        self._ghost_raster_cache = {}  # compatibility; new renderer never populates it
+        self._waveform_perf = WaveformPerformance(
+            os.environ.get("REAPCASE_TIMELINE_PERF", "").lower() in ("1", "true", "yes"))
         self._ghost_raster_coverage = None
         self._ghost_refresh_pending = False
         self._ghost_waveform_image = None
@@ -414,7 +424,8 @@ class ReapcaseEditor(tk.Tk):
     def _clear_ghost_waveform(self):
         """Discard every rendered or cached ghost-waveform artifact."""
         self.canvas.delete("ghost-waveform")
-        if self._ghost_waveform_image in self._waveform_images:
+        if (self._ghost_waveform_image is not None and
+                self._ghost_waveform_image in self._waveform_images):
             self._waveform_images.remove(self._ghost_waveform_image)
         self._ghost_raster_cache.clear()
         self._ghost_raster_coverage = None
@@ -860,6 +871,7 @@ class ReapcaseEditor(tk.Tk):
         self.audio_engine.close()
         if not preserve_waveforms:
             self.waveforms.clear(); self._waveform_pending.clear()
+            self._waveform_render_cache.clear(); self._waveform_photo_cache.clear()
         tracks = list(self.model.audio_tracks) if self.model else []
         self.monitor_muted = [False] * len(tracks); self.monitor_solo = [False] * len(tracks)
         resolved = [PlaybackTrack(t.resolved_path, t.name, t.offset) for t in tracks if t.resolved_path]
@@ -875,6 +887,10 @@ class ReapcaseEditor(tk.Tk):
         changed = self.model.refresh_audio()
         for path in changed:
             self.waveforms.pop(str(path), None)
+            self._waveform_render_cache.invalidate_source(str(path))
+            for key in tuple(self._waveform_photo_cache):
+                if key[0][0] == str(path):
+                    del self._waveform_photo_cache[key]
         self._configure_audio(preserve_waveforms=True)
         self.redraw()
 
@@ -916,8 +932,45 @@ class ReapcaseEditor(tk.Tk):
             if self.winfo_exists(): self.redraw()
         self.after(40, poll)
 
+    def _tile_photo(self, tile_key, tile, height, foreground, background=None,
+                    stride=1):
+        """Create a Tk image once per tile variant, never per redraw/tick."""
+        variant = (tile_key, int(height), foreground, background, int(stride))
+        image = self._waveform_photo_cache.get(variant)
+        if image is not None:
+            self._waveform_photo_cache.move_to_end(variant)
+            return image
+        with self._waveform_perf.measure("PhotoImage creation"):
+            if background is not None:
+                image = tk.PhotoImage(data=raster_ppm(
+                    list(tile.columns), height, foreground, background), format="PPM")
+            else:
+                # A blank PhotoImage is transparent. Bulk rectangular puts draw
+                # only extrema spans, avoiding RGBA allocation and PNG/zlib.
+                image = tk.PhotoImage(width=max(1, len(tile.columns)), height=height)
+                center, amplitude = height / 2, max(1, height / 2 - 10)
+                for x in range(0, len(tile.columns), max(1, stride)):
+                    low, high = tile.columns[x]
+                    if low == high == 0:
+                        continue
+                    y0 = max(0, min(height - 1, round(center - high * amplitude)))
+                    y1 = max(0, min(height - 1, round(center - low * amplitude)))
+                    image.put(foreground, to=(x, min(y0, y1),
+                                               min(len(tile.columns), x + stride),
+                                               max(y0, y1) + 1))
+        self._waveform_photo_cache[variant] = image
+        while len(self._waveform_photo_cache) > self._waveform_render_cache.max_tiles * 2:
+            self._waveform_photo_cache.popitem(last=False)
+        return image
+
+    def _prepared_tiles(self, source, summary, *, prefetch=1):
+        left, width = self.canvas.canvasx(0), max(1, self.canvas.winfo_width())
+        return self._waveform_render_cache.visible_tiles(
+            source, summary, self.model.tempo_map, self.model.song.ppqn,
+            self.pixels_per_beat, left, width, HEADER_WIDTH, prefetch)
+
     def _draw_ghost_waveform(self, layout, visible_lanes):
-        """Draw one buffered FULL-SONG raster and record its canvas coverage."""
+        """Draw bounded, reusable transparent FULL-SONG tiles."""
         if not self.full_song_ghost_visible.get():
             self._clear_ghost_waveform()
             return
@@ -927,36 +980,41 @@ class ReapcaseEditor(tk.Tk):
         ghost_summary = (self.waveforms.get(waveform_cache_key(ghost_track))
                          if ghost_track else None)
         if not (ghost_summary and ghost_bounds and m.tempo_map):
-            self._ghost_raster_cache.clear()
             self._ghost_raster_coverage = None
             self._ghost_waveform_image = None
             return
-        view_left = int(self.canvas.canvasx(0))
-        view_width = max(1, self.canvas.winfo_width())
-        raster_left, raster_width = buffered_viewport(view_left, view_width)
         top, bottom = ghost_bounds
-        cache_key = ghost_raster_cache_key(
-            (waveform_cache_key(ghost_track), id(ghost_summary)),
-            raster_left, raster_width, self.pixels_per_beat, ghost_bounds,
-            visible_lanes, ppqn=m.song.ppqn, tempo_identity=id(m.tempo_map))
-
-        def render_ghost():
-            image_left, columns = viewport_columns(
-                ghost_summary, m.tempo_map, m.song.ppqn,
-                self.pixels_per_beat, raster_left, raster_width, HEADER_WIDTH)
-            color = tuple(bytes.fromhex(AUDIO.ghost_waveform.removeprefix("#")))
-            ghost_png = raster_transparent_png(
-                columns, bottom - top, color, stride=AUDIO.ghost_waveform_stride,
-                vertical_padding=AUDIO.ghost_waveform_vertical_padding)
-            return image_left, tk.PhotoImage(data=ghost_png, format="PNG")
-
-        image_left, ghost_image = cached_ghost_raster(
-            self._ghost_raster_cache, cache_key, render_ghost)
-        self._ghost_waveform_image = ghost_image
-        self._waveform_images.append(ghost_image)
-        self.canvas.create_image(image_left, top, image=ghost_image, anchor="nw",
-                                 tags=("ghost-waveform",))
-        self._ghost_raster_coverage = (image_left, image_left + ghost_image.width())
+        # Keep light-weight test doubles and third-party embedders using the
+        # pre-tile private surface functional during the migration.
+        if not hasattr(self, "_waveform_render_cache"):
+            left, width = buffered_viewport(int(self.canvas.canvasx(0)),
+                                            max(1, self.canvas.winfo_width()))
+            key = ghost_raster_cache_key((waveform_cache_key(ghost_track), id(ghost_summary)),
+                left, width, self.pixels_per_beat, ghost_bounds, visible_lanes,
+                ppqn=m.song.ppqn, tempo_identity=id(m.tempo_map))
+            image_left, image = cached_ghost_raster(
+                self._ghost_raster_cache, key, lambda: (left, None))
+            self._ghost_waveform_image = image
+            self._waveform_images.append(image)
+            self.canvas.create_image(image_left, top, image=image, anchor="nw",
+                                     tags=("ghost-waveform",))
+            self._ghost_raster_coverage = (image_left, image_left + image.width())
+            return
+        with self._waveform_perf.measure("ghost waveform preparation"):
+            prepared = self._prepared_tiles(waveform_cache_key(ghost_track), ghost_summary)
+        images = []
+        for key, tile in prepared:
+            image = self._tile_photo(key, tile, bottom - top,
+                                     AUDIO.ghost_waveform, None,
+                                     AUDIO.ghost_waveform_stride)
+            images.append(image)
+            self.canvas.create_image(tile.left, top, image=image, anchor="nw",
+                                     tags=("ghost-waveform",))
+        self._waveform_images.extend(images)
+        self._ghost_waveform_image = images
+        if prepared:
+            self._ghost_raster_coverage = (prepared[0][1].left,
+                prepared[-1][1].left + self._waveform_render_cache.tile_width)
 
     def _refresh_ghost_waveform(self):
         """Refresh only the buffered ghost after the transport callback yields."""
@@ -967,12 +1025,11 @@ class ReapcaseEditor(tk.Tk):
         visibility = self._effective_lane_visibility()
         layout = visible_lane_layout(self.lane_order, visibility)
         self.canvas.delete("ghost-waveform")
-        if self._ghost_waveform_image in self._waveform_images:
-            self._waveform_images.remove(self._ghost_waveform_image)
         self._draw_ghost_waveform(layout, layout.lanes)
         self.canvas.tag_lower("ghost-waveform", "ghost-foreground-anchor")
 
     def redraw(self):
+        redraw_started = time.perf_counter() if self._waveform_perf.enabled else 0.0
         self.canvas.delete("all")
         self._waveform_images = []
         if not self.model: return
@@ -1018,6 +1075,7 @@ class ReapcaseEditor(tk.Tk):
         # A stable stacking anchor keeps later ghost-only refreshes behind all
         # timeline foreground primitives without reconstructing the canvas.
         self.canvas.create_line(0, 0, 0, 0, tags=("ghost-foreground-anchor",))
+        grid_started = time.perf_counter() if self._waveform_perf.enabled else 0.0
         grid_end = m.song_end_units + 2 * m.song.ppqn
         for point in m.timing_map.iter_beats(0, grid_end):
             bar, beat = point.position.bar, point.position.beat
@@ -1029,6 +1087,9 @@ class ReapcaseEditor(tk.Tk):
             self.canvas.create_line(x, 17 if prominent else 21, x, RULER_HEIGHT,
                                     fill=TIMELINE.ruler_bar if prominent else TIMELINE.ruler_beat)
             if prominent: self.canvas.create_text(x + 4, 2, text=f"{bar:03d}", anchor="nw", fill=TIMELINE.ruler_text)
+        if grid_started:
+            self._waveform_perf.record("grid", time.perf_counter() - grid_started)
+        semantic_started = time.perf_counter() if self._waveform_perf.enabled else 0.0
         preview_selection = self._marquee_selection()
         self.event_bounds = {}
         self.sequence_bounds = {}
@@ -1224,6 +1285,9 @@ class ReapcaseEditor(tk.Tk):
                                                 tags=(f"event:{i}",))
             self.event_bounds[i] = bounds
             self.canvas.tag_raise(item)
+        if semantic_started:
+            self._waveform_perf.record("semantic events",
+                                       time.perf_counter() - semantic_started)
         for lane_offset, track in enumerate(m.audio_tracks if audio_visible else ()):
             y = layout.audio_top + lane_offset * LANE_HEIGHT
             flags = " ".join(word for enabled, word in ((track.source.get("mute"), "MUTE"),
@@ -1255,14 +1319,14 @@ class ReapcaseEditor(tk.Tk):
             summary = self.waveforms.get(waveform_cache_key(track))
             if summary and m.tempo_map:
                 center, amplitude = y + 42, 18
-                viewport_left = int(self.canvas.canvasx(0))
-                viewport_width = max(1, self.canvas.winfo_width())
-                image_left, columns = viewport_columns(
-                    summary, m.tempo_map, m.song.ppqn, self.pixels_per_beat,
-                    viewport_left, viewport_width, HEADER_WIDTH)
-                image = tk.PhotoImage(data=raster_ppm(columns), format="PPM")
-                self._waveform_images.append(image)
-                self.canvas.create_image(image_left, y + 22, image=image, anchor="nw")
+                with self._waveform_perf.measure("normal waveform preparation"):
+                    prepared = self._prepared_tiles(waveform_cache_key(track), summary)
+                foreground = tuple(bytes.fromhex(AUDIO.waveform.removeprefix("#")))
+                background = tuple(bytes.fromhex(AUDIO.clip.removeprefix("#")))
+                for key, tile in prepared:
+                    image = self._tile_photo(key, tile, 40, foreground, background)
+                    self._waveform_images.append(image)
+                    self.canvas.create_image(tile.left, y + 22, image=image, anchor="nw")
                 self.canvas.create_line(start_x, center, end_x, center,
                                         fill=AUDIO.waveform, width=1)
                 self.canvas.tag_raise(clip_label)
@@ -1375,6 +1439,9 @@ class ReapcaseEditor(tk.Tk):
         self.status.set(f"{m.path.name}  |  flags {len(m.timeline.events)}  |  selected {len(m.selected)}  |  Audio: {resolved} resolved | {waveform_progress} | {self.audio_engine.diagnostic}  |  cursor {m.cursor.render()}  |  {'MODIFIED' if m.modified else 'unmodified'}  |  unsupported: {unsupported}")
         self.canvas.configure(scrollregion=(0, 0, width, height))
         self._update_zoom_label()
+        if redraw_started:
+            self._waveform_perf.record("full redraw", time.perf_counter() - redraw_started)
+            self._waveform_perf.log(LOG)
 
     def _draw_drag_preview(self, preview: MovePreview):
         if not self.model:
