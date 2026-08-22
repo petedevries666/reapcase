@@ -43,10 +43,10 @@ from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
                        create_video_command)
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .audio import full_song_track, waveform_cache_key
-from .waveform import (analyze_grid_sync, cached_ghost_raster, extract_waveform,
-                       format_grid_sync, ghost_raster_cache_key, raster_ppm,
+from .waveform import (analyze_grid_sync, buffered_viewport, cached_ghost_raster,
+                       extract_waveform, format_grid_sync, ghost_raster_cache_key, raster_ppm,
                        raster_transparent_png, timeline_units_to_x,
-                       viewport_columns)
+                       viewport_columns, viewport_exits_coverage)
 from .ergonomics import (BackupError, DialogPositions, editor_shortcuts_allowed,
                          follow_scroll)
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
@@ -156,6 +156,9 @@ class ReapcaseEditor(tk.Tk):
         self.waveforms = {}
         self._waveform_images = []
         self._ghost_raster_cache = {}
+        self._ghost_raster_coverage = None
+        self._ghost_refresh_pending = False
+        self._ghost_waveform_image = None
         self._lane_backgrounds = LaneBackgroundCache(self)
         self.manual_audio_root = None
         self.audio_grid_overlay = tk.BooleanVar(value=False)
@@ -887,6 +890,58 @@ class ReapcaseEditor(tk.Tk):
             if self.winfo_exists(): self.redraw()
         self.after(40, poll)
 
+    def _draw_ghost_waveform(self, layout, visible_lanes):
+        """Draw one buffered FULL-SONG raster and record its canvas coverage."""
+        m = self.model
+        ghost_track = full_song_track(m.audio_tracks)
+        ghost_bounds = ghost_waveform_lane_bounds(layout)
+        ghost_summary = (self.waveforms.get(waveform_cache_key(ghost_track))
+                         if ghost_track else None)
+        if not (ghost_summary and ghost_bounds and m.tempo_map):
+            self._ghost_raster_cache.clear()
+            self._ghost_raster_coverage = None
+            self._ghost_waveform_image = None
+            return
+        view_left = int(self.canvas.canvasx(0))
+        view_width = max(1, self.canvas.winfo_width())
+        raster_left, raster_width = buffered_viewport(view_left, view_width)
+        top, bottom = ghost_bounds
+        cache_key = ghost_raster_cache_key(
+            (waveform_cache_key(ghost_track), id(ghost_summary)),
+            raster_left, raster_width, self.pixels_per_beat, ghost_bounds,
+            visible_lanes, ppqn=m.song.ppqn, tempo_identity=id(m.tempo_map))
+
+        def render_ghost():
+            image_left, columns = viewport_columns(
+                ghost_summary, m.tempo_map, m.song.ppqn,
+                self.pixels_per_beat, raster_left, raster_width, HEADER_WIDTH)
+            color = tuple(bytes.fromhex(AUDIO.ghost_waveform.removeprefix("#")))
+            ghost_png = raster_transparent_png(
+                columns, bottom - top, color, stride=AUDIO.ghost_waveform_stride,
+                vertical_padding=AUDIO.ghost_waveform_vertical_padding)
+            return image_left, tk.PhotoImage(data=ghost_png, format="PNG")
+
+        image_left, ghost_image = cached_ghost_raster(
+            self._ghost_raster_cache, cache_key, render_ghost)
+        self._ghost_waveform_image = ghost_image
+        self._waveform_images.append(ghost_image)
+        self.canvas.create_image(image_left, top, image=ghost_image, anchor="nw",
+                                 tags=("ghost-waveform",))
+        self._ghost_raster_coverage = (image_left, image_left + ghost_image.width())
+
+    def _refresh_ghost_waveform(self):
+        """Refresh only the buffered ghost after the transport callback yields."""
+        self._ghost_refresh_pending = False
+        if not self.model:
+            return
+        visibility = self._effective_lane_visibility()
+        layout = visible_lane_layout(self.lane_order, visibility)
+        self.canvas.delete("ghost-waveform")
+        if self._ghost_waveform_image in self._waveform_images:
+            self._waveform_images.remove(self._ghost_waveform_image)
+        self._draw_ghost_waveform(layout, layout.lanes)
+        self.canvas.tag_lower("ghost-waveform", "ghost-foreground-anchor")
+
     def redraw(self):
         self.canvas.delete("all")
         self._waveform_images = []
@@ -929,39 +984,10 @@ class ReapcaseEditor(tk.Tk):
         # same tempo-aware viewport mapping as its ordinary audio track.  Draw
         # it directly over lane backgrounds so every semantic layer stays on
         # top, without an opaque raster background covering lane identity.
-        ghost_track = full_song_track(m.audio_tracks)
-        ghost_bounds = ghost_waveform_lane_bounds(layout)
-        ghost_summary = (self.waveforms.get(waveform_cache_key(ghost_track))
-                         if ghost_track else None)
-        if ghost_summary and ghost_bounds and m.tempo_map:
-            viewport_left = int(self.canvas.canvasx(0))
-            viewport_width = max(1, self.canvas.winfo_width())
-            top, bottom = ghost_bounds
-            cache_key = ghost_raster_cache_key(
-                (waveform_cache_key(ghost_track), id(ghost_summary)),
-                viewport_left, viewport_width, self.pixels_per_beat,
-                ghost_bounds, visible_lanes, ppqn=m.song.ppqn,
-                tempo_identity=id(m.tempo_map))
-
-            def render_ghost():
-                image_left, columns = viewport_columns(
-                    ghost_summary, m.tempo_map, m.song.ppqn,
-                    self.pixels_per_beat, viewport_left, viewport_width,
-                    HEADER_WIDTH)
-                color = tuple(bytes.fromhex(
-                    AUDIO.ghost_waveform.removeprefix("#")))
-                ghost_png = raster_transparent_png(
-                    columns, bottom - top, color,
-                    stride=AUDIO.ghost_waveform_stride,
-                    vertical_padding=AUDIO.ghost_waveform_vertical_padding)
-                return image_left, tk.PhotoImage(data=ghost_png, format="PNG")
-
-            image_left, ghost_image = cached_ghost_raster(
-                self._ghost_raster_cache, cache_key, render_ghost)
-            self._waveform_images.append(ghost_image)
-            self.canvas.create_image(image_left, top, image=ghost_image, anchor="nw")
-        else:
-            self._ghost_raster_cache.clear()
+        self._draw_ghost_waveform(layout, visible_lanes)
+        # A stable stacking anchor keeps later ghost-only refreshes behind all
+        # timeline foreground primitives without reconstructing the canvas.
+        self.canvas.create_line(0, 0, 0, 0, tags=("ghost-foreground-anchor",))
         grid_end = m.song_end_units + 2 * m.song.ppqn
         for point in m.timing_map.iter_beats(0, grid_end):
             bar, beat = point.position.bar, point.position.beat
@@ -2017,6 +2043,20 @@ class ReapcaseEditor(tk.Tk):
             else: self.audio_engine.play()
         except PlaybackError as exc: messagebox.showwarning("Audio unavailable", str(exc))
 
+    def _update_fixed_headers_for_scroll(self, previous_left):
+        """Keep viewport overlays fixed without reconstructing the timeline.
+
+        Canvas items use scrollregion coordinates, including the lane headers.
+        Moving those already-created items by the viewport delta is cheap and
+        leaves waveform rasters and all other timeline primitives untouched.
+        """
+        current_left = self.canvas.canvasx(0)
+        delta = current_left - previous_left
+        if delta:
+            self.canvas.move("fixed-header", delta, 0)
+            if self.canvas.find_withtag("track-drag"):
+                self.canvas.move("track-drag", delta, 0)
+
     def _transport_tick(self):
         if self.model and self.model.tempo_map:
             seconds = self.audio_engine.current_time
@@ -2041,9 +2081,17 @@ class ReapcaseEditor(tk.Tk):
                     region = self.canvas.cget("scrollregion").split()
                     total = float(region[2]) if len(region) == 4 else 1.0
                     self.canvas.xview_moveto(destination / max(1.0, total))
-                    # Viewport-sized waveform rasters and fixed headers must be
-                    # rebuilt after an actual follow-scroll, not every tick.
-                    self.redraw()
+                    # Scrolling reuses the existing canvas and ghost raster.
+                    # Only viewport-fixed overlays need a lightweight move.
+                    self._update_fixed_headers_for_scroll(left)
+                    current_left = self.canvas.canvasx(0)
+                    if (not self._ghost_refresh_pending and
+                            viewport_exits_coverage(
+                                current_left, width, self._ghost_raster_coverage)):
+                        self._ghost_refresh_pending = True
+                        # Raster mapping/compression runs only after this 33 ms
+                        # transport callback returns to Tk's event loop.
+                        self.after_idle(self._refresh_ghost_waveform)
         self.after(33, self._transport_tick)
 
     def destroy(self):

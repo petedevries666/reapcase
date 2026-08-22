@@ -12,7 +12,8 @@ from stadium_reaper_bridge.editor.navigation import (
 from stadium_reaper_bridge.stadium import MusicalPosition
 from stadium_reaper_bridge.timing import TimingMap
 from stadium_reaper_bridge.editor.waveform import (
-    cached_ghost_raster, ghost_raster_cache_key, raster_transparent_png,
+    buffered_viewport, cached_ghost_raster, ghost_raster_cache_key,
+    raster_transparent_png, viewport_exits_coverage,
 )
 
 
@@ -112,6 +113,23 @@ def test_repeated_playback_redraw_requests_reuse_ghost_raster():
 
     cached_ghost_raster(cache, ghost_key(viewport_left=200), render)
     assert len(raster_calls) == 2
+
+
+def test_buffered_ghost_coverage_spans_three_viewports_and_refreshes_once_at_exit():
+    left, width = buffered_viewport(1000, 500)
+    coverage = (left, left + width)
+    assert (left, width) == (500, 1500)
+    assert not viewport_exits_coverage(600, 500, coverage)
+    assert not viewport_exits_coverage(1000, 500, coverage)
+    assert viewport_exits_coverage(1501, 500, coverage)
+
+    refreshes = []
+    pending = False
+    for viewport_left in (600, 1000, 1500, 1501, 1600):
+        if not pending and viewport_exits_coverage(viewport_left, 500, coverage):
+            pending = True
+            refreshes.append(viewport_left)
+    assert refreshes == [1501]
 
 
 def test_ghost_bounds_use_first_three_visible_reordered_semantic_lanes():
