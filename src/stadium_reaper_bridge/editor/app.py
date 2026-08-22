@@ -721,7 +721,7 @@ class ReapcaseEditor(tk.Tk):
                 phase.set("Finalizing UI…")
                 self.audio_engine.close()
                 self.model = candidate
- 		self._reset_lane_visibility()
+                self._reset_lane_visibility()
                 self._update_song_header()
                 self._configure_audio()
                 self._redraw_after_model_change()
