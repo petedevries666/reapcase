@@ -51,7 +51,7 @@ from .waveform import (WaveformPerformance, WaveformRenderCache, analyze_grid_sy
                        format_grid_sync, ghost_raster_cache_key, raster_ppm,
                        timeline_units_to_x, viewport_exits_coverage)
 from .ergonomics import (BackupError, DialogPositions, editor_shortcuts_allowed,
-                         follow_scroll)
+                         follow_scroll, global_editor_shortcuts_allowed)
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
                          adjacent_event_index, adjacent_marker_index,
                          adjacent_structure_region_index, default_lane_visibility,
@@ -363,8 +363,8 @@ class ReapcaseEditor(tk.Tk):
         self.configure(menu=bar)
         self.bind_all("<Control-Key-1>", lambda _e: self.switch_view("timeline"))
         self.bind_all("<Control-Key-2>", lambda _e: self.switch_view("event_list"))
-        # bind_all is needed because transient dialogs share the Tk binding
-        # table, but every DAW command is centrally gated to canvas focus.
+        # Timeline navigation remains canvas-only; workflow toggles use the
+        # separate main-window policy below.
         self.bind_all("<Control-d>", lambda e: self._editor_shortcut(e, self.duplicate_selected))
         self.bind_all("<Key-f>", lambda e: self._editor_shortcut(e, self.fit_song))
         self.bind_all("<Shift-Key-F>", lambda e: self._editor_shortcut(e, self.fit_selection))
@@ -374,11 +374,12 @@ class ReapcaseEditor(tk.Tk):
         self.bind_all("<bracketleft>", lambda e: self._editor_shortcut(e, self.navigate_marker, -1))
         self.bind_all("<Home>", lambda e: self._editor_shortcut(e, self.go_song_edge, False))
         self.bind_all("<End>", lambda e: self._editor_shortcut(e, self.go_song_edge, True))
-        self.bind_all("<space>", lambda e: self._editor_shortcut(e, self.play_pause))
-        self.bind_all("<Control-e>", lambda e: self._editor_shortcut(e, self.toggle_inspector))
-        self.bind_all("<Control-l>", lambda e: self._editor_shortcut(e, self.toggle_lane_manager))
-        self.bind_all("<Control-m>", lambda e: self._editor_shortcut(e, self.toggle_track_manager))
-        self.bind_all("<Control-g>", lambda e: self._editor_shortcut(e, self.toggle_ghost_preference))
+        self.bind_all("<space>", lambda e: self._global_editor_shortcut(
+            e, self.play_pause, allow_native_navigation=False))
+        self.bind_all("<Control-e>", lambda e: self._global_editor_shortcut(e, self.toggle_inspector))
+        self.bind_all("<Control-l>", lambda e: self._global_editor_shortcut(e, self.toggle_lane_manager))
+        self.bind_all("<Control-m>", lambda e: self._global_editor_shortcut(e, self.toggle_track_manager))
+        self.bind_all("<Control-g>", lambda e: self._global_editor_shortcut(e, self.toggle_ghost_preference))
 
     def _rebuild_recent_menu(self):
         self.recent_menu.delete(0, "end")
@@ -401,6 +402,16 @@ class ReapcaseEditor(tk.Tk):
     def _editor_shortcut(self, event, command, *args):
         """Run and consume a DAW shortcut only in the timeline canvas."""
         if not editor_shortcuts_allowed(getattr(event, "widget", None), self.canvas):
+            return None
+        command(*args)
+        return "break"
+
+    def _global_editor_shortcut(self, event, command, *args,
+                                allow_native_navigation=True):
+        """Run workflow commands in the main window, excluding editor inputs."""
+        if not global_editor_shortcuts_allowed(
+                getattr(event, "widget", None), self,
+                allow_native_navigation=allow_native_navigation):
             return None
         command(*args)
         return "break"
@@ -547,11 +558,10 @@ class ReapcaseEditor(tk.Tk):
 
     def _event_list_selected(self, _event=None):
         if self.model:
-            self.model.selected = {int(item) for item in self.event_tree.selection()}
             selected = self.event_tree.selection()
+            self.model.selected = {int(item) for item in selected}
             if selected:
-                self.jump_to_units(self._event_rows[selected[0]].units,
-                                   select_index=int(selected[0]), reveal=False)
+                self.jump_to_units(self._event_rows[selected[0]].units, reveal=False)
             self._refresh_inspector()
 
     def _event_list_edit(self, _event=None):

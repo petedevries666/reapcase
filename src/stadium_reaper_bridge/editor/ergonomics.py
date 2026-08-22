@@ -38,6 +38,29 @@ def editor_shortcuts_allowed(widget, timeline_widget=None) -> bool:
     return timeline_widget is not None and widget is timeline_widget
 
 
+def global_editor_shortcuts_allowed(widget, application,
+                                    *, allow_native_navigation: bool = True) -> bool:
+    """Allow workflow commands throughout the main editor, never in dialogs.
+
+    Ctrl-based workflow toggles may run from a Treeview without interfering
+    with its native navigation.  Commands such as Space can opt out because
+    Space itself has native selection meaning in those widgets.
+    """
+    if widget is None or application is None:
+        return False
+    try:
+        widget_class = str(widget.winfo_class()).casefold()
+        if widget.winfo_toplevel() is not application:
+            return False
+    except (AttributeError, TypeError):
+        return False
+    if widget_class in _TEXT_INPUT_CLASSES:
+        return False
+    if not allow_native_navigation and widget_class in _NATIVE_NAVIGATION_CLASSES:
+        return False
+    return True
+
+
 def centered_position(parent: tuple[int, int, int, int], size: tuple[int, int]) -> tuple[int, int]:
     """Center a child of *size* in parent ``(x, y, width, height)``."""
     x, y, width, height = parent

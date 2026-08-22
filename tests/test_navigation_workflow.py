@@ -74,3 +74,53 @@ def test_shared_jump_updates_cursor_seeks_selects_and_can_defer_reveal(monkeypat
     assert model.selected == {1}
     assert seeks == [model.tempo_map.units_to_seconds(960)]
     assert redraws == [True]
+
+
+class ShortcutWidget:
+    def __init__(self, widget_class, toplevel):
+        self.widget_class, self.toplevel = widget_class, toplevel
+
+    def winfo_class(self):
+        return self.widget_class
+
+    def winfo_toplevel(self):
+        return self.toplevel
+
+
+def test_global_workflow_shortcuts_work_outside_canvas_and_in_event_list():
+    calls = []
+    editor = SimpleNamespace()
+    editor._global_editor_shortcut = lambda event, command, *args, **kwargs: (
+        ReapcaseEditor._global_editor_shortcut(editor, event, command, *args, **kwargs))
+    for widget_class in ("TFrame", "TButton", "Treeview"):
+        event = SimpleNamespace(widget=ShortcutWidget(widget_class, editor))
+        assert editor._global_editor_shortcut(event, lambda: calls.append(widget_class)) == "break"
+    assert calls == ["TFrame", "TButton", "Treeview"]
+
+
+def test_global_workflow_shortcuts_ignore_text_inputs_and_dialogs():
+    calls = []
+    editor = SimpleNamespace()
+    for widget_class in ("Entry", "Text", "TSpinbox", "TCombobox"):
+        event = SimpleNamespace(widget=ShortcutWidget(widget_class, editor))
+        assert ReapcaseEditor._global_editor_shortcut(
+            editor, event, lambda: calls.append(widget_class)) is None
+    dialog_event = SimpleNamespace(widget=ShortcutWidget("TButton", object()))
+    assert ReapcaseEditor._global_editor_shortcut(
+        editor, dialog_event, lambda: calls.append("dialog")) is None
+    assert calls == []
+
+
+def test_event_list_navigation_preserves_complete_multi_selection():
+    class Tree:
+        def selection(self): return ("2", "5")
+
+    navigations = []
+    editor = SimpleNamespace(
+        model=SimpleNamespace(selected=set()), event_tree=Tree(),
+        _event_rows={"2": SimpleNamespace(units=240), "5": SimpleNamespace(units=960)},
+        jump_to_units=lambda units, **kwargs: navigations.append((units, kwargs)),
+        _refresh_inspector=lambda: None)
+    ReapcaseEditor._event_list_selected(editor)
+    assert editor.model.selected == {2, 5}
+    assert navigations == [(240, {"reveal": False})]
