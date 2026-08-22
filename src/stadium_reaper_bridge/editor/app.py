@@ -2017,6 +2017,19 @@ class ReapcaseEditor(tk.Tk):
             else: self.audio_engine.play()
         except PlaybackError as exc: messagebox.showwarning("Audio unavailable", str(exc))
 
+    def _update_fixed_headers_for_scroll(self, previous_left):
+        """Keep viewport overlays fixed without reconstructing the timeline.
+
+        Canvas items use scrollregion coordinates, including the lane headers.
+        Moving those already-created items by the viewport delta is cheap and
+        leaves waveform rasters and all other timeline primitives untouched.
+        """
+        current_left = self.canvas.canvasx(0)
+        delta = current_left - previous_left
+        if delta:
+            self.canvas.move("fixed-header", delta, 0)
+            self.canvas.move("track-drag", delta, 0)
+
     def _transport_tick(self):
         if self.model and self.model.tempo_map:
             seconds = self.audio_engine.current_time
@@ -2041,9 +2054,9 @@ class ReapcaseEditor(tk.Tk):
                     region = self.canvas.cget("scrollregion").split()
                     total = float(region[2]) if len(region) == 4 else 1.0
                     self.canvas.xview_moveto(destination / max(1.0, total))
-                    # Viewport-sized waveform rasters and fixed headers must be
-                    # rebuilt after an actual follow-scroll, not every tick.
-                    self.redraw()
+                    # Scrolling reuses the existing canvas and ghost raster.
+                    # Only viewport-fixed overlays need a lightweight move.
+                    self._update_fixed_headers_for_scroll(left)
         self.after(33, self._transport_tick)
 
     def destroy(self):
