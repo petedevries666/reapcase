@@ -13,7 +13,7 @@ import struct
 import time
 import wave
 import zlib
-from typing import Callable, Optional, Protocol, Union
+from typing import Callable, Hashable, MutableMapping, Optional, Protocol, TypeVar, Union
 
 from .audio_engine import AudioEngine
 
@@ -58,6 +58,33 @@ class WaveformPyramid:
 
 # Old public name retained for callers that only used the summary attributes.
 WaveformSummary = WaveformPyramid
+
+
+def ghost_raster_cache_key(waveform_identity: Hashable, viewport_left: int,
+                           viewport_width: int, pixels_per_beat: float,
+                           ghost_bounds: tuple[int, int],
+                           visible_lanes: tuple[str, ...], *, ppqn: int,
+                           tempo_identity: Hashable = None) -> tuple:
+    """Return the identity of a rendered FULL-SONG viewport.
+
+    Deliberately absent is transport/playhead position: moving the playhead
+    cannot change the pixels in this static, viewport-sized raster.
+    """
+    return (waveform_identity, tempo_identity, int(viewport_left),
+            int(viewport_width), float(pixels_per_beat), int(ppqn),
+            tuple(ghost_bounds), tuple(visible_lanes))
+
+
+_CachedRaster = TypeVar("_CachedRaster")
+
+
+def cached_ghost_raster(cache: MutableMapping[tuple, _CachedRaster], key: tuple,
+                        render: Callable[[], _CachedRaster]) -> _CachedRaster:
+    """Return a cached ghost raster, retaining only the current viewport."""
+    if key not in cache:
+        cache.clear()
+        cache[key] = render()
+    return cache[key]
 
 
 @dataclass(frozen=True)
