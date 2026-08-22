@@ -13,6 +13,14 @@ from .layout import HEADER_WIDTH, RULER_HEIGHT, timeline_x
 from .structure import is_pause_marker
 
 
+DEFAULT_VISIBLE_LANES = frozenset({"STRUCTURE", "STADIUM", "SECOND HELIX", "AUDIO"})
+
+
+def default_lane_visibility(available) -> dict[str, bool]:
+    """Return the per-Song initial Timeline presentation policy."""
+    return {lane: lane in DEFAULT_VISIBLE_LANES for lane in available}
+
+
 def normalized_lane_order(order, available) -> list[str]:
     """Return a complete, duplicate-free presentation order.
 

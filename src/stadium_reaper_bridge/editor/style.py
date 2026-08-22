@@ -79,6 +79,19 @@ class AudioStyle:
 
 
 @dataclass(frozen=True)
+class ManagerListStyle:
+    """Explicit cross-platform colours for data-heavy utility views."""
+
+    background: str = "#111d2a"
+    foreground: str = "#d2dde7"
+    selected_background: str = "#355774"
+    selected_foreground: str = "#f4f8fb"
+    heading_background: str = "#192838"
+    heading_foreground: str = "#d9e3ec"
+    heading_active: str = "#203448"
+
+
+@dataclass(frozen=True)
 class LaneColors:
     background: str
     background_highlight: str
@@ -92,7 +105,20 @@ class LaneColors:
 THEME = ThemeColors()
 TIMELINE = TimelineStyle()
 AUDIO = AudioStyle()
+MANAGER_LIST = ManagerListStyle()
 LANE_GRADIENT_OPACITY = 0.60
+
+# Normal marker-derived STRUCTURE spans alternate in chronological order.
+# These deliberately remain quieter than selection and label colours.
+STRUCTURE_REGION_FILLS = ("#285f8a", "#1c466b")
+REAPCASE_TREEVIEW_STYLE = "Reapcase.Treeview"
+
+
+def structure_region_fill(region_number: int) -> str:
+    """Return the restrained blue for a chronological structural region."""
+    if region_number < 0:
+        raise ValueError("region number must be non-negative")
+    return STRUCTURE_REGION_FILLS[region_number % len(STRUCTURE_REGION_FILLS)]
 
 # Backgrounds are deliberately much darker than events.  The paired highlight
 # remains useful as a flat fallback and for controls; lane depth comes from the
@@ -269,5 +295,29 @@ def apply_ttk_theme(root) -> None:
     style.configure("TScrollbar", background=THEME.surface,
                     troughcolor=THEME.app, bordercolor=THEME.app,
                     arrowcolor=THEME.text_muted)
+    style.configure(REAPCASE_TREEVIEW_STYLE,
+                    background=MANAGER_LIST.background,
+                    foreground=MANAGER_LIST.foreground,
+                    fieldbackground=MANAGER_LIST.background,
+                    bordercolor=THEME.border,
+                    rowheight=24)
+    # State maps are essential on Windows, where the platform theme can
+    # otherwise restore a light selected or inactive row.
+    style.map(REAPCASE_TREEVIEW_STYLE,
+              background=[("selected", MANAGER_LIST.selected_background),
+                          ("!selected", MANAGER_LIST.background)],
+              foreground=[("selected", MANAGER_LIST.selected_foreground),
+                          ("!selected", MANAGER_LIST.foreground)],
+              fieldbackground=[("selected", MANAGER_LIST.selected_background),
+                               ("!selected", MANAGER_LIST.background)])
+    heading_style = f"{REAPCASE_TREEVIEW_STYLE}.Heading"
+    style.configure(heading_style, background=MANAGER_LIST.heading_background,
+                    foreground=MANAGER_LIST.heading_foreground,
+                    bordercolor=THEME.border_strong, relief="flat")
+    style.map(heading_style,
+              background=[("active", MANAGER_LIST.heading_active),
+                          ("!active", MANAGER_LIST.heading_background)],
+              foreground=[("active", MANAGER_LIST.heading_foreground),
+                          ("!active", MANAGER_LIST.heading_foreground)])
     style.configure("Status.TLabel", background=THEME.app,
                     foreground=THEME.text_muted, borderwidth=0, relief="flat")
