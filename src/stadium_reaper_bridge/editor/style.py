@@ -76,6 +76,9 @@ class AudioStyle:
     track_drag: str = "#56a6de"
     ghost: str = "#34546d"
     ghost_outline: str = "#82b7dc"
+    ghost_waveform: str = "#29475e"
+    ghost_waveform_stride: int = 2
+    ghost_waveform_vertical_padding: int = 10
 
 
 @dataclass(frozen=True)

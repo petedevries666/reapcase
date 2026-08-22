@@ -24,6 +24,11 @@ class GridPoint:
     position: MusicalPosition
     units: int
 
+    @property
+    def is_bar(self) -> bool:
+        """Whether this quarter-note grid point starts a measure."""
+        return self.position.beat == 1
+
 
 class TimingMap:
     """Indexed piecewise timing derived without modifying START/TIME flags.

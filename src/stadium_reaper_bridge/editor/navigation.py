@@ -82,6 +82,16 @@ def visible_lane_layout(lanes, visible) -> LaneLayout:
     return LaneLayout(shown, tops, y, y)
 
 
+def ghost_waveform_lane_bounds(layout: LaneLayout, maximum_lanes: int = 3
+                               ) -> Optional[tuple[int, int]]:
+    """Vertical span of the first visible semantic lanes in display order."""
+    lanes = layout.lanes[:maximum_lanes]
+    if not lanes:
+        return None
+    first, last = lanes[0], lanes[-1]
+    return layout.tops[first], layout.tops[last] + lane_height(last)
+
+
 @dataclass(frozen=True)
 class EventListRow:
     index: int
