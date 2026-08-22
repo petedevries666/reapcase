@@ -272,6 +272,11 @@ def apply_ttk_theme(root) -> None:
                     troughcolor=THEME.app, font=("TkDefaultFont", 9))
     style.configure("TFrame", background=THEME.chrome)
     style.configure("TLabel", background=THEME.chrome, foreground=THEME.text)
+    style.configure("SongHeader.TFrame", background=THEME.chrome)
+    style.configure("SongTitle.TLabel", background=THEME.chrome, foreground=THEME.text,
+                    font=("TkDefaultFont", 16, "bold"))
+    style.configure("SongMetadata.TLabel", background=THEME.chrome,
+                    foreground=THEME.text_muted, font=("TkDefaultFont", 8))
     style.configure("Muted.TLabel", foreground=THEME.text_muted)
     style.configure("TButton", background=THEME.surface, foreground=THEME.text,
                     borderwidth=1, padding=(7, 4), relief="flat")

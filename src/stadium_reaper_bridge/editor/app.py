@@ -52,6 +52,7 @@ from .navigation import (ViewState, event_list_rows, jump_viewport_left,
                          marker_region_rows, move_visible_lane,
                          normalized_lane_order, visible_lane_layout)
 from .inspector import inspector_projection
+from .display import song_header_metadata
 
 
 class Tooltip:
@@ -131,7 +132,8 @@ class ReapcaseEditor(tk.Tk):
         self.sequence_drag_delta = 0
         self.semantic_sources: dict[int, tuple[int, ...]] = {}
         self.grid_choice = tk.StringVar(value="1 beat")
-        self.info = tk.StringVar(value="Open a Stadium Song JSON to begin")
+        self.song_title = tk.StringVar(value="NO SONG LOADED")
+        self.song_metadata = tk.StringVar(value="Open a Stadium Song JSON to begin")
         self.status = tk.StringVar(value="No file loaded")
         self.zoom_label = tk.StringVar()
         self.transport_position = tk.StringVar(value="00:00.000   |   001-01.001")
@@ -190,7 +192,16 @@ class ReapcaseEditor(tk.Tk):
         ttk.Label(toolbar, textvariable=self.zoom_label, width=8, anchor="e").pack(side="left", padx=5)
         ttk.Combobox(toolbar, textvariable=self.app_mode, values=("EDIT", "LIVE"), state="readonly",
                      width=6).pack(side="right", padx=4)
-        ttk.Label(self, textvariable=self.info, padding=(8, 3)).pack(fill="x")
+        song_header = ttk.Frame(self, style="SongHeader.TFrame", padding=(8, 3, 8, 4))
+        song_header.pack(fill="x")
+        title_label = ttk.Label(song_header, textvariable=self.song_title,
+                                style="SongTitle.TLabel", anchor="w")
+        title_label.pack(fill="x")
+        metadata_label = ttk.Label(song_header, textvariable=self.song_metadata,
+                                   style="SongMetadata.TLabel", anchor="w")
+        metadata_label.pack(fill="x")
+        self.song_header_labels = (title_label, metadata_label)
+        self.song_path_tooltips = tuple(Tooltip(label, "") for label in self.song_header_labels)
         showbar = ttk.LabelFrame(self, text="SHOW / SETLIST", padding=5); showbar.pack(fill="x", padx=6)
         ttk.Label(showbar, textvariable=self.show_name, width=25).pack(side="left", padx=8)
         self.setlist = tk.Listbox(
@@ -540,6 +551,16 @@ class ReapcaseEditor(tk.Tk):
         self._refresh_navigation()
         self.redraw()
 
+    def _update_song_header(self):
+        """Refresh Song identity only when a newly loaded model is committed."""
+        if not self.model:
+            return
+        metadata = song_header_metadata(self.model.song, self.model.path)
+        self.song_title.set(metadata.title)
+        self.song_metadata.set(metadata.detail)
+        for tooltip in self.song_path_tooltips:
+            tooltip.text = str(self.model.path)
+
     def _show_changed(self):
         self.setlist.delete(0, "end")
         if not self.show:
@@ -700,7 +721,8 @@ class ReapcaseEditor(tk.Tk):
                 phase.set("Finalizing UI…")
                 self.audio_engine.close()
                 self.model = candidate
-                self._reset_lane_visibility()
+ 		self._reset_lane_visibility()
+                self._update_song_header()
                 self._configure_audio()
                 self._redraw_after_model_change()
             except Exception as exc:
@@ -1248,9 +1270,6 @@ class ReapcaseEditor(tk.Tk):
                                     text=f"AUDIO {source + 1}  {track.name}", fill=THEME.text,
                                     tags=("track-drag",))
         unsupported = ", ".join(m.unsupported_types) or "none"
-        overflow = f" | WARNING: {m.audio_overflow} tracks above display limit preserved" if m.audio_overflow else ""
-        tempo = f"{m.tempo:g} BPM" if m.tempo is not None else "tempo unavailable"
-        self.info.set(f"{m.song.name}  |  PPQN {m.song.ppqn}  |  {tempo}  |  {m.numerator}/{m.denominator}  |  {len(m.timeline.events)} flags  |  {m.path}{overflow}")
         resolved = sum(track.file_info is not None for track in m.audio_tracks)
         ready = sum(str(track.resolved_path) in self.waveforms for track in m.audio_tracks
                     if track.resolved_path)
