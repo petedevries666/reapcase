@@ -11,7 +11,9 @@ from stadium_reaper_bridge.editor.navigation import (
 )
 from stadium_reaper_bridge.stadium import MusicalPosition
 from stadium_reaper_bridge.timing import TimingMap
-from stadium_reaper_bridge.editor.waveform import raster_transparent_png
+from stadium_reaper_bridge.editor.waveform import (
+    cached_ghost_raster, ghost_raster_cache_key, raster_transparent_png,
+)
 
 
 P = MusicalPosition
@@ -73,6 +75,43 @@ def test_ghost_waveform_is_one_viewport_raster_not_per_column_primitives():
     # One encoded image has viewport dimensions independent of the number of
     # envelope columns; app.py adds it with exactly one create_image call.
     assert struct.unpack(">II", png[16:24]) == (5000, 180)
+
+
+def ghost_key(**changes):
+    values = dict(waveform_identity=("mix.wav", 1), viewport_left=120,
+                  viewport_width=900, pixels_per_beat=48.0,
+                  ghost_bounds=(32, 212),
+                  visible_lanes=("STRUCTURE", "STADIUM", "LIGHTS"),
+                  ppqn=240, tempo_identity="tempo")
+    values.update(changes)
+    return ghost_raster_cache_key(**values)
+
+
+def test_ghost_raster_cache_key_ignores_playhead_and_invalidates_geometry():
+    # There is intentionally no playhead argument: two playback frames share
+    # the exact same key while the static viewport is unchanged.
+    assert ghost_key() == ghost_key()
+    assert ghost_key(viewport_left=121) != ghost_key()
+    assert ghost_key(pixels_per_beat=49.0) != ghost_key()
+    assert ghost_key(ghost_bounds=(32, 213)) != ghost_key()
+    assert ghost_key(waveform_identity=("mix.wav", 2)) != ghost_key()
+
+
+def test_repeated_playback_redraw_requests_reuse_ghost_raster():
+    cache, raster_calls = {}, []
+
+    def render():
+        raster_calls.append(True)
+        return raster_transparent_png([(-0.5, 0.5)], 20, (41, 71, 94))
+
+    key = ghost_key()
+    first = cached_ghost_raster(cache, key, render)
+    for _playhead_position in range(1, 30):
+        assert cached_ghost_raster(cache, key, render) is first
+    assert len(raster_calls) == 1
+
+    cached_ghost_raster(cache, ghost_key(viewport_left=200), render)
+    assert len(raster_calls) == 2
 
 
 def test_ghost_bounds_use_first_three_visible_reordered_semantic_lanes():

@@ -43,8 +43,9 @@ from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
                        create_video_command)
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .audio import full_song_track, waveform_cache_key
-from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
-                       raster_ppm, raster_transparent_png, timeline_units_to_x,
+from .waveform import (analyze_grid_sync, cached_ghost_raster, extract_waveform,
+                       format_grid_sync, ghost_raster_cache_key, raster_ppm,
+                       raster_transparent_png, timeline_units_to_x,
                        viewport_columns)
 from .ergonomics import (BackupError, DialogPositions, editor_shortcuts_allowed,
                          follow_scroll)
@@ -154,6 +155,7 @@ class ReapcaseEditor(tk.Tk):
         self.monitor_solo: list[bool] = []
         self.waveforms = {}
         self._waveform_images = []
+        self._ghost_raster_cache = {}
         self._lane_backgrounds = LaneBackgroundCache(self)
         self.manual_audio_root = None
         self.audio_grid_overlay = tk.BooleanVar(value=False)
@@ -934,18 +936,32 @@ class ReapcaseEditor(tk.Tk):
         if ghost_summary and ghost_bounds and m.tempo_map:
             viewport_left = int(self.canvas.canvasx(0))
             viewport_width = max(1, self.canvas.winfo_width())
-            image_left, columns = viewport_columns(
-                ghost_summary, m.tempo_map, m.song.ppqn, self.pixels_per_beat,
-                viewport_left, viewport_width, HEADER_WIDTH)
             top, bottom = ghost_bounds
-            color = tuple(bytes.fromhex(AUDIO.ghost_waveform.removeprefix("#")))
-            ghost_png = raster_transparent_png(
-                columns, bottom - top, color,
-                stride=AUDIO.ghost_waveform_stride,
-                vertical_padding=AUDIO.ghost_waveform_vertical_padding)
-            ghost_image = tk.PhotoImage(data=ghost_png, format="PNG")
+            cache_key = ghost_raster_cache_key(
+                (waveform_cache_key(ghost_track), id(ghost_summary)),
+                viewport_left, viewport_width, self.pixels_per_beat,
+                ghost_bounds, visible_lanes, ppqn=m.song.ppqn,
+                tempo_identity=id(m.tempo_map))
+
+            def render_ghost():
+                image_left, columns = viewport_columns(
+                    ghost_summary, m.tempo_map, m.song.ppqn,
+                    self.pixels_per_beat, viewport_left, viewport_width,
+                    HEADER_WIDTH)
+                color = tuple(bytes.fromhex(
+                    AUDIO.ghost_waveform.removeprefix("#")))
+                ghost_png = raster_transparent_png(
+                    columns, bottom - top, color,
+                    stride=AUDIO.ghost_waveform_stride,
+                    vertical_padding=AUDIO.ghost_waveform_vertical_padding)
+                return image_left, tk.PhotoImage(data=ghost_png, format="PNG")
+
+            image_left, ghost_image = cached_ghost_raster(
+                self._ghost_raster_cache, cache_key, render_ghost)
             self._waveform_images.append(ghost_image)
             self.canvas.create_image(image_left, top, image=ghost_image, anchor="nw")
+        else:
+            self._ghost_raster_cache.clear()
         grid_end = m.song_end_units + 2 * m.song.ppqn
         for point in m.timing_map.iter_beats(0, grid_end):
             bar, beat = point.position.bar, point.position.beat
@@ -2008,9 +2024,14 @@ class ReapcaseEditor(tk.Tk):
             position = self.model.tempo_map.seconds_to_musical_position(seconds)
             self.transport_position.set(f"{int(minutes):02d}:{remainder:06.3f}   |   {position.render()}")
             if self.audio_engine.state is PlaybackState.PLAYING:
-                self.redraw()
                 play_units = self.model.tempo_map.seconds_to_units(seconds)
                 playhead_x = timeline_x(play_units, self.model.song.ppqn, self.pixels_per_beat)
+                playhead = self.canvas.find_withtag("playhead")
+                if playhead:
+                    coordinates = self.canvas.coords(playhead[0])
+                    if len(coordinates) == 4:
+                        self.canvas.coords(playhead[0], playhead_x, coordinates[1],
+                                           playhead_x, coordinates[3])
                 left = self.canvas.canvasx(0)
                 width = self.canvas.winfo_width()
                 destination = follow_scroll(
@@ -2020,6 +2041,9 @@ class ReapcaseEditor(tk.Tk):
                     region = self.canvas.cget("scrollregion").split()
                     total = float(region[2]) if len(region) == 4 else 1.0
                     self.canvas.xview_moveto(destination / max(1.0, total))
+                    # Viewport-sized waveform rasters and fixed headers must be
+                    # rebuilt after an actual follow-scroll, not every tick.
+                    self.redraw()
         self.after(33, self._transport_tick)
 
     def destroy(self):
