@@ -120,6 +120,25 @@ class AudioTrackView:
         return self.source.get("offset", 0)
 
 
+def full_song_track(tracks: Iterable[AudioTrackView], *, resolved: bool = True
+                    ) -> Optional[AudioTrackView]:
+    """Return the named FULL-SONG orientation source, if it is usable.
+
+    Track identity comes from Stadium's display name rather than its filename.
+    An unresolved match is deliberately treated as absent by the UI.
+    """
+    for track in tracks:
+        if track.name.strip().casefold() == "full-song":
+            if not resolved or track.resolved_path is not None:
+                return track
+    return None
+
+
+def waveform_cache_key(track: AudioTrackView) -> Optional[str]:
+    """Canonical key shared by normal and background waveform renderers."""
+    return str(track.resolved_path) if track.resolved_path is not None else None
+
+
 def audio_track_views(tracks: Any, resolver: AudioResolver, *,
                       inspect_files: bool = True) -> tuple[AudioTrackView, ...]:
     if not isinstance(tracks, list):

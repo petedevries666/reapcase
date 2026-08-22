@@ -42,13 +42,16 @@ from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
                        create_stadium_looper, create_stadium_snapshot, create_structure_marker,
                        create_video_command)
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
+from .audio import full_song_track, waveform_cache_key
 from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
-                       raster_ppm, timeline_units_to_x, viewport_columns)
+                       raster_ppm, raster_transparent_png, timeline_units_to_x,
+                       viewport_columns)
 from .ergonomics import (BackupError, DialogPositions, editor_shortcuts_allowed,
                          follow_scroll)
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
                          adjacent_event_index, adjacent_marker_index, default_lane_visibility,
                          focused_lane_visibility,
+                         ghost_waveform_lane_bounds,
                          marker_region_rows, move_visible_lane,
                          normalized_lane_order, visible_lane_layout)
 from .inspector import inspector_projection
@@ -920,21 +923,40 @@ class ReapcaseEditor(tk.Tk):
                 self.canvas.create_line(0, y + COMMANDS_HEIGHT, width, y + COMMANDS_HEIGHT,
                                         fill=TIMELINE.sublane_separator)
             y += current_height
+        # The FULL-SONG overview consumes the same cached peak pyramid and the
+        # same tempo-aware viewport mapping as its ordinary audio track.  Draw
+        # it directly over lane backgrounds so every semantic layer stays on
+        # top, without an opaque raster background covering lane identity.
+        ghost_track = full_song_track(m.audio_tracks)
+        ghost_bounds = ghost_waveform_lane_bounds(layout)
+        ghost_summary = (self.waveforms.get(waveform_cache_key(ghost_track))
+                         if ghost_track else None)
+        if ghost_summary and ghost_bounds and m.tempo_map:
+            viewport_left = int(self.canvas.canvasx(0))
+            viewport_width = max(1, self.canvas.winfo_width())
+            image_left, columns = viewport_columns(
+                ghost_summary, m.tempo_map, m.song.ppqn, self.pixels_per_beat,
+                viewport_left, viewport_width, HEADER_WIDTH)
+            top, bottom = ghost_bounds
+            color = tuple(bytes.fromhex(AUDIO.ghost_waveform.removeprefix("#")))
+            ghost_png = raster_transparent_png(
+                columns, bottom - top, color,
+                stride=AUDIO.ghost_waveform_stride,
+                vertical_padding=AUDIO.ghost_waveform_vertical_padding)
+            ghost_image = tk.PhotoImage(data=ghost_png, format="PNG")
+            self._waveform_images.append(ghost_image)
+            self.canvas.create_image(image_left, top, image=ghost_image, anchor="nw")
         grid_end = m.song_end_units + 2 * m.song.ppqn
         for point in m.timing_map.iter_beats(0, grid_end):
             bar, beat = point.position.bar, point.position.beat
             x = timeline_x(point.units, m.song.ppqn, self.pixels_per_beat)
-            prominent = beat == 1
+            prominent = point.is_bar
             if not prominent and self.pixels_per_beat < 28:
                 continue
             self.canvas.create_line(x, RULER_HEIGHT, x, height, fill=TIMELINE.grid_bar if prominent else TIMELINE.grid_beat, width=2 if prominent else 1)
             self.canvas.create_line(x, 17 if prominent else 21, x, RULER_HEIGHT,
                                     fill=TIMELINE.ruler_bar if prominent else TIMELINE.ruler_beat)
             if prominent: self.canvas.create_text(x + 4, 2, text=f"{bar:03d}", anchor="nw", fill=TIMELINE.ruler_text)
-            if self.pixels_per_beat >= 100:
-                for quarter in range(1, 4):
-                    qx = x + quarter * self.pixels_per_beat / 4
-                    self.canvas.create_line(qx, 0, qx, height, fill=TIMELINE.grid_subdivision, dash=(1, 3))
         preview_selection = self._marquee_selection()
         self.event_bounds = {}
         self.sequence_bounds = {}
@@ -1158,7 +1180,7 @@ class ReapcaseEditor(tk.Tk):
             clip_label = self.canvas.create_text(start_x + 6, y + 32, anchor="w",
                                                  fill=AUDIO.text,
                                                  text=f"{track.filename}  |  {state}")
-            summary = self.waveforms.get(str(track.resolved_path))
+            summary = self.waveforms.get(waveform_cache_key(track))
             if summary and m.tempo_map:
                 center, amplitude = y + 42, 18
                 viewport_left = int(self.canvas.canvasx(0))
