@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
+import re
 from typing import Iterable, Optional
 
 from ..timeline import TimelineEvent
+from ..stadium import StadiumFlag
+from ..timing import TimingMap
 
 MARKERS_HEIGHT = 30
 PAUSES_HEIGHT = 26
 CYCLES_HEIGHT = 30
 STRUCTURE_HEIGHT = MARKERS_HEIGHT + PAUSES_HEIGHT + CYCLES_HEIGHT
+MANAGED_MEASURE_SUFFIX = re.compile(r" \([0-9]+m\)$")
 
 
 @dataclass(frozen=True)
@@ -87,6 +92,51 @@ def derive_structure_layout(events: Iterable[TimelineEvent], units_for,
         ambiguous.add(open_start[0])
     pauses = tuple(i for i, e in indexed if e.source.type == "MARKER" and is_pause_marker(e))
     return StructureLayout(tuple(regions), pauses, tuple(sorted(ambiguous)))
+
+
+def normalize_structure_measure_labels(events: list[TimelineEvent], timing_map: TimingMap,
+                                       song_end_units: int) -> bool:
+    """Write canonical measure counts into ordinary Stadium marker payloads.
+
+    The geometry deliberately comes from :func:`derive_structure_layout`, so
+    pause markers and cycle boundaries can never acquire a managed suffix.
+    Replacing whole events (rather than mutating their dictionaries) also
+    keeps model undo snapshots useful.
+    """
+    layout = derive_structure_layout(events, timing_map.position_to_units, song_end_units)
+    changed = False
+    for region in layout.regions:
+        if region.kind != "marker":
+            continue
+        index = region.source_event_indices[0]
+        event = events[index]
+        if not isinstance(event.source, StadiumFlag):
+            continue
+        # Integrate fractions of each musical bar. This is signature-aware and
+        # gives an integer for the bar-aligned STRUCTURE boundaries Stadium uses.
+        measures = 0.0
+        cursor = region.start_units
+        while cursor < region.end_units:
+            position = timing_map.units_to_position(cursor)
+            bar_start = timing_map.bar_start_units(position.bar)
+            bar_end = timing_map.bar_end_units(position.bar)
+            stop = min(region.end_units, bar_end)
+            measures += (stop - cursor) / (bar_end - bar_start)
+            cursor = stop
+        count = int(measures + 0.5)
+        old_name = str(event.data.get("name") or "MARKER")
+        base = MANAGED_MEASURE_SUFFIX.sub("", old_name)
+        name = f"{base} ({count}m)"
+        if name == old_name:
+            continue
+        fields = list(event.source.fields)
+        if len(fields) < 2:
+            continue
+        fields[1] = name
+        source = replace(event.source, payload=";".join(fields), original=None)
+        events[index] = replace(event, source=source, data=source.semantic_data())
+        changed = True
+    return changed
 
 
 def sticky_label_x(region_start: float, region_end: float, viewport_left: float,
