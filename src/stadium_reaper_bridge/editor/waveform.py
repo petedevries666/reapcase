@@ -9,8 +9,10 @@ from __future__ import annotations
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
+import struct
 import time
 import wave
+import zlib
 from typing import Callable, Optional, Protocol, Union
 
 from .audio_engine import AudioEngine
@@ -265,6 +267,43 @@ def raster_ppm(columns: list[tuple[float, float]], height: int = 40,
             offset = (y * width + x) * 3
             pixels[offset:offset + 3] = bytes(foreground)
     return f"P6\n{width} {height}\n255\n".encode() + pixels
+
+
+def raster_transparent_png(columns: list[tuple[float, float]], height: int,
+                           foreground: tuple[int, int, int], *, stride: int = 1,
+                           vertical_padding: int = 2) -> bytes:
+    """Rasterize an envelope into one transparent RGBA PNG.
+
+    The returned image is intentionally a single Tk canvas primitive no matter
+    how wide the viewport is.  It consumes already-cached extrema columns and
+    never performs audio analysis.
+    """
+    width, height = max(1, len(columns)), max(1, int(height))
+    stride = max(1, int(stride))
+    center = height / 2
+    amplitude = max(1, center - max(0, vertical_padding))
+    pixels = bytearray(width * height * 4)
+    color = bytes((*foreground, 255))
+    for x in range(0, len(columns), stride):
+        low, high = columns[x]
+        if low == high == 0:
+            continue
+        y0 = max(0, min(height - 1, round(center - high * amplitude)))
+        y1 = max(0, min(height - 1, round(center - low * amplitude)))
+        for y in range(min(y0, y1), max(y0, y1) + 1):
+            offset = (y * width + x) * 4
+            pixels[offset:offset + 4] = color
+    scanlines = b"".join(
+        b"\0" + pixels[y * width * 4:(y + 1) * width * 4]
+        for y in range(height))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(scanlines, 6)) + chunk(b"IEND", b""))
 
 
 def analyze_grid_sync(path: Union[str, Path], tempo_map: _TempoMap, ppqn: int,

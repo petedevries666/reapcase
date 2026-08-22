@@ -1,4 +1,5 @@
 from pathlib import Path
+import struct
 
 from stadium_reaper_bridge.editor.audio import (
     AudioTrackView, full_song_track, waveform_cache_key,
@@ -10,6 +11,7 @@ from stadium_reaper_bridge.editor.navigation import (
 )
 from stadium_reaper_bridge.stadium import MusicalPosition
 from stadium_reaper_bridge.timing import TimingMap
+from stadium_reaper_bridge.editor.waveform import raster_transparent_png
 
 
 P = MusicalPosition
@@ -61,6 +63,16 @@ def test_full_song_normal_and_ghost_renderers_share_the_path_cache_key():
     source = track("FULL-SONG", Path("/audio/mix.wav"))
     cache = {waveform_cache_key(source): object()}
     assert cache[waveform_cache_key(source)] is cache[str(source.resolved_path)]
+
+
+def test_ghost_waveform_is_one_viewport_raster_not_per_column_primitives():
+    columns = [(-0.5, 0.75)] * 5000
+    png = raster_transparent_png(columns, 180, (41, 71, 94), stride=2,
+                                 vertical_padding=10)
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    # One encoded image has viewport dimensions independent of the number of
+    # envelope columns; app.py adds it with exactly one create_image call.
+    assert struct.unpack(">II", png[16:24]) == (5000, 180)
 
 
 def test_ghost_bounds_use_first_three_visible_reordered_semantic_lanes():

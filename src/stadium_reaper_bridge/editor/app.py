@@ -44,7 +44,8 @@ from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .audio import full_song_track, waveform_cache_key
 from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
-                       raster_ppm, timeline_units_to_x, viewport_columns)
+                       raster_ppm, raster_transparent_png, timeline_units_to_x,
+                       viewport_columns)
 from .ergonomics import (BackupError, DialogPositions, editor_shortcuts_allowed,
                          follow_scroll)
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
@@ -937,18 +938,14 @@ class ReapcaseEditor(tk.Tk):
                 ghost_summary, m.tempo_map, m.song.ppqn, self.pixels_per_beat,
                 viewport_left, viewport_width, HEADER_WIDTH)
             top, bottom = ghost_bounds
-            padding = AUDIO.ghost_waveform_vertical_padding
-            center = (top + bottom) / 2
-            amplitude = max(1, (bottom - top) / 2 - padding)
-            stride = max(1, AUDIO.ghost_waveform_stride)
-            for column in range(0, len(columns), stride):
-                low, high = columns[column]
-                if low == high == 0:
-                    continue
-                x = image_left + column
-                self.canvas.create_line(
-                    x, center - high * amplitude, x, center - low * amplitude,
-                    fill=AUDIO.ghost_waveform)
+            color = tuple(bytes.fromhex(AUDIO.ghost_waveform.removeprefix("#")))
+            ghost_png = raster_transparent_png(
+                columns, bottom - top, color,
+                stride=AUDIO.ghost_waveform_stride,
+                vertical_padding=AUDIO.ghost_waveform_vertical_padding)
+            ghost_image = tk.PhotoImage(data=ghost_png, format="PNG")
+            self._waveform_images.append(ghost_image)
+            self.canvas.create_image(image_left, top, image=ghost_image, anchor="nw")
         grid_end = m.song_end_units + 2 * m.song.ppqn
         for point in m.timing_map.iter_beats(0, grid_end):
             bar, beat = point.position.bar, point.position.beat
