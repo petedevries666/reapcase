@@ -187,3 +187,23 @@ def adjacent_marker_index(model, current_units: int, direction: int) -> Optional
     if not candidates:
         return None
     return (candidates[0] if direction > 0 else candidates[-1]).indices[0]
+
+
+def structure_region_indices(model) -> tuple[int, ...]:
+    """Canonical ordinary STRUCTURE markers, excluding pauses and cycles."""
+    return tuple(index for index, event in sorted(
+        enumerate(model.timeline.events), key=lambda pair: model._units(pair[1].position))
+        if event.source.type == "MARKER" and not is_pause_marker(event))
+
+
+def adjacent_structure_region_index(model, current_units: int,
+                                    direction: int) -> Optional[int]:
+    """Return the previous/next ordinary region, clamped safely at its edges."""
+    indices = structure_region_indices(model)
+    if not indices:
+        return None
+    positioned = [(model._units(model.timeline.events[index].position), index)
+                  for index in indices]
+    if direction > 0:
+        return next((index for units, index in positioned if units > current_units), positioned[-1][1])
+    return next((index for units, index in reversed(positioned) if units < current_units), positioned[0][1])

@@ -53,13 +53,15 @@ from .waveform import (WaveformPerformance, WaveformRenderCache, analyze_grid_sy
 from .ergonomics import (BackupError, DialogPositions, editor_shortcuts_allowed,
                          follow_scroll)
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
-                         adjacent_event_index, adjacent_marker_index, default_lane_visibility,
+                         adjacent_event_index, adjacent_marker_index,
+                         adjacent_structure_region_index, default_lane_visibility,
                          focused_lane_visibility,
                          ghost_waveform_lane_bounds,
                          marker_region_rows, move_visible_lane,
                          normalized_lane_order, visible_lane_layout)
 from .inspector import inspector_projection
 from .display import song_header_metadata
+from .preferences import RecentFiles, application_config_path
 
 
 LOG = logging.getLogger(__name__)
@@ -131,6 +133,7 @@ class ReapcaseEditor(tk.Tk):
         self._loading_window = None
         self._loading_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="song-open")
         self._manager_windows = {}
+        self.recent_files = RecentFiles()
         self._event_rows = {}
         self.audio_drag: Optional[tuple[int, int]] = None
         self.marquee_anchor: Optional[tuple[float, float]] = None
@@ -242,6 +245,8 @@ class ReapcaseEditor(tk.Tk):
         ttk.Button(transport, text="|<<", width=5, command=self.return_to_start).pack(side="left")
         ttk.Button(transport, text="Play / Pause", command=self.play_pause).pack(side="left", padx=3)
         ttk.Button(transport, text="Stop", command=self.stop_playback).pack(side="left")
+        ttk.Button(transport, text="<○", width=3, command=lambda: self.navigate_region(-1)).pack(side="left", padx=(5, 1))
+        ttk.Button(transport, text="○>", width=3, command=lambda: self.navigate_region(1)).pack(side="left")
         ttk.Label(transport, textvariable=self.transport_position, font=("TkFixedFont", 10)).pack(side="left", padx=14)
         self.main_content = ttk.Frame(self); self.main_content.pack(fill="both", expand=True)
         frame = ttk.Frame(self.main_content); frame.grid(row=0, column=0, sticky="nsew")
@@ -301,6 +306,8 @@ class ReapcaseEditor(tk.Tk):
         bar = tk.Menu(self)
         file_menu = tk.Menu(bar, tearoff=False)
         file_menu.add_command(label="Open JSON...", command=self.open_json)
+        self.recent_menu = tk.Menu(file_menu, tearoff=False, postcommand=self._rebuild_recent_menu)
+        file_menu.add_cascade(label="Open Recent", menu=self.recent_menu)
         file_menu.add_command(label="Save", command=self.save)
         file_menu.add_command(label="Save As...", command=self.save_as)
         bar.add_cascade(label="File", menu=file_menu)
@@ -324,11 +331,12 @@ class ReapcaseEditor(tk.Tk):
                              command=lambda: self.switch_view("event_list"), accelerator="Ctrl+2")
         view.add_separator()
         view.add_checkbutton(label="Inspector", variable=self.inspector_visible,
-                             command=self.toggle_inspector)
+                             command=self.apply_inspector_visibility, accelerator="Ctrl+E")
         view.add_checkbutton(label="Show FULL-SONG Ghost Waveform",
                              variable=self.full_song_ghost_visible,
-                             command=self.toggle_full_song_ghost)
-        view.add_command(label="Lane Manager...", command=self.open_lane_manager)
+                             command=self.toggle_full_song_ghost, accelerator="Ctrl+G")
+        view.add_command(label="Lane Manager...", command=self.toggle_lane_manager, accelerator="Ctrl+L")
+        view.add_command(label="Track Manager...", command=self.toggle_track_manager, accelerator="Ctrl+M")
         view.add_command(label="Marker / Region Manager...", command=self.open_marker_manager)
         view.add_separator()
         view.add_command(label="Zoom Entire Song", command=self.fit_song, accelerator="F")
@@ -366,6 +374,29 @@ class ReapcaseEditor(tk.Tk):
         self.bind_all("<bracketleft>", lambda e: self._editor_shortcut(e, self.navigate_marker, -1))
         self.bind_all("<Home>", lambda e: self._editor_shortcut(e, self.go_song_edge, False))
         self.bind_all("<End>", lambda e: self._editor_shortcut(e, self.go_song_edge, True))
+        self.bind_all("<space>", lambda e: self._editor_shortcut(e, self.play_pause))
+        self.bind_all("<Control-e>", lambda e: self._editor_shortcut(e, self.toggle_inspector))
+        self.bind_all("<Control-l>", lambda e: self._editor_shortcut(e, self.toggle_lane_manager))
+        self.bind_all("<Control-m>", lambda e: self._editor_shortcut(e, self.toggle_track_manager))
+        self.bind_all("<Control-g>", lambda e: self._editor_shortcut(e, self.toggle_ghost_preference))
+
+    def _rebuild_recent_menu(self):
+        self.recent_menu.delete(0, "end")
+        for entry in self.recent_files.entries:
+            self.recent_menu.add_command(label=entry.display,
+                command=lambda path=entry.path: self.open_recent(path))
+        if self.recent_files.entries:
+            self.recent_menu.add_separator()
+        self.recent_menu.add_command(label="Clear Recent Files", command=self.recent_files.clear,
+                                     state="normal" if self.recent_files.entries else "disabled")
+
+    def open_recent(self, path):
+        if not Path(path).is_file():
+            messagebox.showerror("Recent Song not found",
+                                 f"The Song file cannot be found:\n{path}", parent=self)
+            self.recent_files.remove(path)
+            return False
+        return self._begin_song_open(path)
 
     def _editor_shortcut(self, event, command, *args):
         """Run and consume a DAW shortcut only in the timeline canvas."""
@@ -378,12 +409,15 @@ class ReapcaseEditor(tk.Tk):
         self.view_state.switch(view); self.current_view.set(view)
         if view == "timeline":
             self.event_list_frame.grid_forget(); self.timeline_frame.grid(row=0, column=0, sticky="nsew")
-            self.redraw()
+            if self.model:
+                self.jump_to_units(self.model._units(self.model.cursor))
+            else:
+                self.redraw()
         else:
             self.timeline_frame.grid_forget(); self.event_list_frame.grid(row=0, column=0, sticky="nsew")
             self._refresh_event_list()
 
-    def toggle_inspector(self):
+    def apply_inspector_visibility(self):
         if self.inspector_visible.get():
             self.inspector.grid(row=0, column=1, sticky="nsew")
             self.main_content.columnconfigure(1, minsize=240)
@@ -391,6 +425,10 @@ class ReapcaseEditor(tk.Tk):
         else:
             self.inspector.grid_forget()
             self.main_content.columnconfigure(1, minsize=0)
+
+    def toggle_inspector(self):
+        self.inspector_visible.set(not self.inspector_visible.get())
+        self.apply_inspector_visibility()
 
     def _refresh_inspector(self):
         if not hasattr(self, "inspector_fields") or not self.inspector_visible.get():
@@ -443,6 +481,10 @@ class ReapcaseEditor(tk.Tk):
             self._clear_ghost_waveform()
         self.redraw()
 
+    def toggle_ghost_preference(self):
+        self.full_song_ghost_visible.set(not self.full_song_ghost_visible.get())
+        self.toggle_full_song_ghost()
+
     def focus_lane(self, lane):
         if self._lane_focus == lane:
             self.exit_lane_focus(); return
@@ -463,9 +505,8 @@ class ReapcaseEditor(tk.Tk):
     def _navigate_to_index(self, index):
         if index is None or not self.model:
             return "break"
-        self.model.selected = {index}
         units = self.model._units(self.model.timeline.events[index].position)
-        self.seek_units(units); self.jump_to_units(units); self._refresh_inspector(); self.redraw()
+        self.jump_to_units(units, select_index=index)
         return "break"
 
     def navigate_event(self, direction):
@@ -477,6 +518,11 @@ class ReapcaseEditor(tk.Tk):
     def navigate_marker(self, direction):
         if not self.model: return "break"
         return self._navigate_to_index(adjacent_marker_index(
+            self.model, self.model._units(self.model.cursor), direction))
+
+    def navigate_region(self, direction):
+        if not self.model: return "break"
+        return self._navigate_to_index(adjacent_structure_region_index(
             self.model, self.model._units(self.model.cursor), direction))
 
     def go_song_edge(self, end):
@@ -502,6 +548,10 @@ class ReapcaseEditor(tk.Tk):
     def _event_list_selected(self, _event=None):
         if self.model:
             self.model.selected = {int(item) for item in self.event_tree.selection()}
+            selected = self.event_tree.selection()
+            if selected:
+                self.jump_to_units(self._event_rows[selected[0]].units,
+                                   select_index=int(selected[0]), reveal=False)
             self._refresh_inspector()
 
     def _event_list_edit(self, _event=None):
@@ -513,22 +563,41 @@ class ReapcaseEditor(tk.Tk):
         if selected and self.model: self.jump_to_units(self._event_rows[selected[0]].units)
         return "break"
 
-    def jump_to_units(self, units):
+    def jump_to_units(self, units, *, select_index=None, reveal=True):
+        """Shared cursor/audio/playhead navigation used by every editor surface."""
         if not self.model: return
-        self.seek_units(units); self.redraw()
+        if select_index is not None:
+            self.model.selected = {select_index}
+        self.seek_units(units)
+        self._follow_suspended_until = time.monotonic() + .8
+        self.redraw()
+        if not reveal:
+            return
         region = self.canvas.cget("scrollregion").split()
         total = float(region[2]) if len(region) == 4 else 1.0
         left = jump_viewport_left(units, self.model.song.ppqn, self.pixels_per_beat,
                                   self.canvas.winfo_width())
-        self.canvas.xview_moveto(left / max(1.0, total)); self.redraw()
+        previous = self.canvas.canvasx(0)
+        self.canvas.xview_moveto(left / max(1.0, total))
+        self._update_fixed_headers_for_scroll(previous)
+        self._refresh_inspector()
 
     def _manager(self, family, title, build):
         existing = self._manager_windows.get(family)
         if existing and existing.winfo_exists(): existing.deiconify(); existing.lift(); existing.focus_force(); return existing
         win = tk.Toplevel(self); win.title(title); self._manager_windows[family] = win
         build(win)
-        self._prepare_dialog(win, family)
+        self._prepare_dialog(win, family, modal=False)
         return win
+
+    def _toggle_manager(self, family, opener):
+        existing = self._manager_windows.get(family)
+        if existing and existing.winfo_exists() and existing.winfo_viewable():
+            existing.withdraw(); return existing
+        return opener()
+
+    def toggle_lane_manager(self):
+        return self._toggle_manager("lane_manager", self.open_lane_manager)
 
     def open_lane_manager(self):
         def build(win):
@@ -576,9 +645,22 @@ class ReapcaseEditor(tk.Tk):
             def jump(_event=None):
                 selected=tree.selection()
                 if selected: self.jump_to_units(int(tree.item(selected[0], "tags")[0]))
-            tree.bind("<Double-Button-1>", jump); ttk.Button(win, text="Jump", command=jump).pack(pady=6)
+            tree.bind("<<TreeviewSelect>>", jump); ttk.Button(win, text="Jump", command=jump).pack(pady=6)
             win._refresh_rows = refresh; refresh()
         self._manager("marker_region_manager", "Marker / Region Manager", build)
+
+    def open_track_manager(self):
+        """Expose the existing audio-track operations without duplicating their logic."""
+        def build(win):
+            body = ttk.Frame(win, padding=10); body.pack(fill="both", expand=True)
+            ttk.Label(body, text="Audio tracks are managed in the Timeline AUDIO lane.").pack(anchor="w")
+            ttk.Button(body, text="Add Audio Track…", command=self.add_audio_track_dialog).pack(anchor="w", pady=6)
+            ttk.Button(body, text="Show AUDIO Lane", command=lambda: (
+                self.lane_visibility["AUDIO"].set(True), self.redraw())).pack(anchor="w")
+        return self._manager("track_manager", "Track Manager", build)
+
+    def toggle_track_manager(self):
+        return self._toggle_manager("track_manager", self.open_track_manager)
 
     def _refresh_navigation(self):
         """Rebuild model-derived utility rows after a structural model change.
@@ -768,6 +850,7 @@ class ReapcaseEditor(tk.Tk):
                 self._reset_lane_visibility()
                 self._reset_full_song_ghost()
                 self._update_song_header()
+                self.recent_files.add(candidate.path, candidate.song.name)
                 self._configure_audio()
                 self._redraw_after_model_change()
             except Exception as exc:
@@ -788,7 +871,7 @@ class ReapcaseEditor(tk.Tk):
 
     @staticmethod
     def _lane_preferences_path():
-        return Path.home() / ".config" / "reapcase" / "ui.json"
+        return application_config_path()
 
     def _load_lane_order(self):
         try:
@@ -801,7 +884,13 @@ class ReapcaseEditor(tk.Tk):
         path = self._lane_preferences_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"lane_order": self.lane_order}, indent=2) + "\n", encoding="utf-8")
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict): data = {}
+            except (OSError, ValueError, TypeError):
+                data = {}
+            data["lane_order"] = self.lane_order
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         except OSError:
             pass  # Session persistence remains available on read-only homes.
 
@@ -827,9 +916,11 @@ class ReapcaseEditor(tk.Tk):
         if path:
             self._save_to(path)
 
-    def _prepare_dialog(self, dialog, family, primary=None, cancel=None):
-        """Apply one modal geometry and keyboard policy to an editor form."""
-        dialog.transient(self); dialog.grab_set()
+    def _prepare_dialog(self, dialog, family, primary=None, cancel=None, modal=True):
+        """Apply remembered geometry and the requested dialog keyboard policy."""
+        dialog.transient(self)
+        if modal:
+            dialog.grab_set()
         dialog.update_idletasks()
         size = (dialog.winfo_reqwidth(), dialog.winfo_reqheight())
         parent = (self.winfo_rootx(), self.winfo_rooty(), self.winfo_width(), self.winfo_height())
@@ -2130,6 +2221,10 @@ class ReapcaseEditor(tk.Tk):
         if self.model and self.model.tempo_map:
             self.audio_engine.seek(self.model.tempo_map.units_to_seconds(units))
             self.model.cursor = self.model._position(units)
+            seconds = self.model.tempo_map.units_to_seconds(units)
+            minutes, remainder = divmod(seconds, 60)
+            self.transport_position.set(
+                f"{int(minutes):02d}:{remainder:06.3f}   |   {self.model.cursor.render()}")
 
     def return_to_start(self): self.audio_engine.return_to_start(); self.redraw()
     def stop_playback(self): self.audio_engine.stop(); self.redraw()
