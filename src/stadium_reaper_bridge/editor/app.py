@@ -25,8 +25,9 @@ from .looper import derive_looper_regions, looper_display_label
 from .lighting import (HIT_PRESETS, STATE_PRESETS, LightingKind,
                        create_lighting_event, derive_lighting_regions)
 from .model import EditorModel, LANES, MovePreview
-from .style import (AUDIO, LOOPER_STATE_FILLS, THEME, TIMELINE,
-                    LaneBackgroundCache, apply_ttk_theme, lane_colors)
+from .style import (AUDIO, LOOPER_STATE_FILLS, REAPCASE_TREEVIEW_STYLE, THEME,
+                    TIMELINE, LaneBackgroundCache, apply_ttk_theme, lane_colors,
+                    structure_region_fill)
 from .sequence import SequenceClickKind
 from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
                         derive_structure_layout, sticky_label_x,
@@ -46,7 +47,8 @@ from .waveform import (analyze_grid_sync, extract_waveform, format_grid_sync,
 from .ergonomics import (BackupError, DialogPositions, editor_shortcuts_allowed,
                          follow_scroll)
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
-                         adjacent_event_index, adjacent_marker_index, focused_lane_visibility,
+                         adjacent_event_index, adjacent_marker_index, default_lane_visibility,
+                         focused_lane_visibility,
                          marker_region_rows, move_visible_lane,
                          normalized_lane_order, visible_lane_layout)
 from .inspector import inspector_projection
@@ -109,7 +111,9 @@ class ReapcaseEditor(tk.Tk):
         self.inspector_visible = tk.BooleanVar(value=False)
         self._lane_focus: Optional[str] = None
         self._focus_visibility: Optional[dict[str, bool]] = None
-        self.lane_visibility = {lane: tk.BooleanVar(value=True) for lane in LANES + ("AUDIO",)}
+        defaults = default_lane_visibility(LANES + ("AUDIO",))
+        self.lane_visibility = {lane: tk.BooleanVar(value=defaults[lane])
+                                for lane in LANES + ("AUDIO",)}
         self.lane_order = self._load_lane_order()
         self.loading = False
         self._loading_window = None
@@ -161,19 +165,22 @@ class ReapcaseEditor(tk.Tk):
         toolbar = ttk.Frame(self, padding=6); toolbar.pack(fill="x")
         for icon, tip, command in (("▣", "Open Song JSON", self.open_json),
                                    ("▥", "Save Song JSON", self.save),
-                                   ("▤", "Save Song JSON As...", self.save_as),
-                                   ("⌕+", "Zoom In", lambda: self.zoom_step(1.25)),
-                                   ("⌕−", "Zoom Out", lambda: self.zoom_step(1 / 1.25))):
+                                   ("▤", "Save Song JSON As...", self.save_as)):
             button = ttk.Button(toolbar, text=icon, width=3, command=command)
+            button.pack(side="left", padx=2)
+            Tooltip(button, tip)
+        for icon, tip, command in (("⌕−", "Zoom Out", lambda: self.zoom_step(1 / 1.25)),
+                                   ("Fit Song", "Fit Song", self.fit_song),
+                                   ("⌕+", "Zoom In", lambda: self.zoom_step(1.25)),
+                                   ("Undo", "Undo", self.undo)):
+            button = ttk.Button(toolbar, text=icon, command=command,
+                                width=3 if icon.startswith("⌕") else None)
             button.pack(side="left", padx=2)
             Tooltip(button, tip)
         for text, command in (("Locate Audio Folder", self.locate_audio),
                               ("Refresh Audio", self.refresh_audio),
                               ("Add Audio Track...", self.add_audio_track_dialog),
-                              ("Analyze Grid Sync", self.analyze_sync),
-                              ("Select All", self.select_all), ("Select All After Cursor", self.select_after),
-                              ("Select Lane", self.select_lane), ("Shift Selected", self.shift_dialog),
-                              ("Undo", self.undo), ("Fit Song", self.fit_song)):
+                              ("Analyze Grid Sync", self.analyze_sync)):
             ttk.Button(toolbar, text=text, command=command).pack(side="left", padx=2)
         ttk.Label(toolbar, text=" Grid:").pack(side="left")
         ttk.Combobox(toolbar, textvariable=self.grid_choice, state="readonly", width=12,
@@ -185,14 +192,6 @@ class ReapcaseEditor(tk.Tk):
                      width=6).pack(side="right", padx=4)
         ttk.Label(self, textvariable=self.info, padding=(8, 3)).pack(fill="x")
         showbar = ttk.LabelFrame(self, text="SHOW / SETLIST", padding=5); showbar.pack(fill="x", padx=6)
-        buttons = ttk.Frame(showbar); buttons.pack(side="left")
-        for text, command in (("New Show", self.new_show), ("Open Show", self.open_show),
-                              ("Save Show", self.save_show), ("Add Song", self.add_show_song),
-                              ("Remove", self.remove_show_song), ("Move Up", lambda: self.move_show_song(-1)),
-                              ("Move Down", lambda: self.move_show_song(1)), ("Relocate Song…", self.relocate_show_song),
-                              ("Preflight Show", self.preflight_show), ("Refresh Show", self.refresh_show),
-                              ("MIDI Settings", self.midi_settings)):
-            ttk.Button(buttons, text=text, command=command).pack(side="left", padx=1)
         ttk.Label(showbar, textvariable=self.show_name, width=25).pack(side="left", padx=8)
         self.setlist = tk.Listbox(
             showbar, height=4, width=52, exportselection=False,
@@ -244,7 +243,8 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.bind("<Control-v>", self.paste_events)
         self.event_list_frame = ttk.Frame(self.main_content)
         columns = ("position", "lane", "type", "name", "details")
-        self.event_tree = ttk.Treeview(self.event_list_frame, columns=columns, show="headings", selectmode="extended")
+        self.event_tree = ttk.Treeview(self.event_list_frame, columns=columns, show="headings",
+                                       selectmode="extended", style=REAPCASE_TREEVIEW_STYLE)
         for column, title, width in (("position", "Position", 110), ("lane", "Lane", 130),
                                      ("type", "Type", 120), ("name", "Name / Action", 220),
                                      ("details", "Details", 260)):
@@ -280,6 +280,13 @@ class ReapcaseEditor(tk.Tk):
                                           ("Delete", self.delete_selected, "Delete")):
             edit.add_command(label=label, command=command, accelerator=shortcut)
         bar.add_cascade(label="Edit", menu=edit)
+        select = tk.Menu(bar, tearoff=False)
+        for label, command in (("Select All", self.select_all),
+                               ("Select All After Cursor", self.select_after),
+                               ("Select Lane", self.select_lane),
+                               ("Shift Selected...", self.shift_dialog)):
+            select.add_command(label=label, command=command)
+        bar.add_cascade(label="Select", menu=select)
         view = tk.Menu(bar, tearoff=False)
         view.add_radiobutton(label="Timeline", variable=self.current_view, value="timeline",
                              command=lambda: self.switch_view("timeline"), accelerator="Ctrl+1")
@@ -295,6 +302,23 @@ class ReapcaseEditor(tk.Tk):
         view.add_command(label="Zoom to Selection", command=self.fit_selection, accelerator="Shift+F")
         view.add_command(label="Exit Lane Focus", command=self.exit_lane_focus)
         bar.add_cascade(label="View", menu=view)
+        show = tk.Menu(bar, tearoff=False)
+        for label, command in (("New Show", self.new_show), ("Open Show...", self.open_show),
+                               ("Save Show", self.save_show)):
+            show.add_command(label=label, command=command)
+        show.add_separator()
+        for label, command in (("Add Song", self.add_show_song),
+                               ("Remove Song", self.remove_show_song),
+                               ("Move Song Up", lambda: self.move_show_song(-1)),
+                               ("Move Song Down", lambda: self.move_show_song(1)),
+                               ("Relocate Song...", self.relocate_show_song)):
+            show.add_command(label=label, command=command)
+        show.add_separator()
+        for label, command in (("Preflight Show", self.preflight_show),
+                               ("Refresh Show", self.refresh_show),
+                               ("MIDI Settings...", self.midi_settings)):
+            show.add_command(label=label, command=command)
+        bar.add_cascade(label="Show", menu=show)
         self.configure(menu=bar)
         self.bind_all("<Control-Key-1>", lambda _e: self.switch_view("timeline"))
         self.bind_all("<Control-Key-2>", lambda _e: self.switch_view("event_list"))
@@ -356,6 +380,13 @@ class ReapcaseEditor(tk.Tk):
     def _effective_lane_visibility(self):
         normal = {lane: var.get() for lane, var in self.lane_visibility.items()}
         return focused_lane_visibility(normal, self._lane_focus) if self._lane_focus else normal
+
+    def _reset_lane_visibility(self):
+        """Reset presentation state for every successfully loaded Song."""
+        self._lane_focus = None
+        self._focus_visibility = None
+        for lane, shown in default_lane_visibility(self.lane_visibility).items():
+            self.lane_visibility[lane].set(shown)
 
     def focus_lane(self, lane):
         if self._lane_focus == lane:
@@ -476,7 +507,8 @@ class ReapcaseEditor(tk.Tk):
 
     def open_marker_manager(self):
         def build(win):
-            tree = ttk.Treeview(win, columns=("position", "kind", "name", "end"), show="headings")
+            tree = ttk.Treeview(win, columns=("position", "kind", "name", "end"),
+                                show="headings", style=REAPCASE_TREEVIEW_STYLE)
             for col, title, width in (("position", "Position", 110), ("kind", "Kind", 100),
                                       ("name", "Name", 220), ("end", "End / Duration", 130)):
                 tree.heading(col, text=title); tree.column(col, width=width)
@@ -668,6 +700,7 @@ class ReapcaseEditor(tk.Tk):
                 phase.set("Finalizing UI…")
                 self.audio_engine.close()
                 self.model = candidate
+                self._reset_lane_visibility()
                 self._configure_audio()
                 self._redraw_after_model_change()
             except Exception as exc:
@@ -888,13 +921,21 @@ class ReapcaseEditor(tk.Tk):
         region_sources = {i for region in structure_layout.regions for i in region.source_event_indices}
         view_left = self.canvas.canvasx(0) + HEADER_WIDTH
         colors = lane_colors("STRUCTURE")
+        marker_region_number = 0
         for region in structure_layout.regions if "STRUCTURE" in visible_lanes else ():
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
             sub_y = lane_tops["STRUCTURE"] if region.kind == "marker" else lane_tops["STRUCTURE"] + MARKERS_HEIGHT + PAUSES_HEIGHT
             source = region.source_event_indices[0]
             selected = any(index in m.selected for index in region.source_event_indices)
-            fill = colors.selected if selected else colors.normal
+            if selected:
+                fill = colors.selected
+            elif region.kind == "marker":
+                fill = structure_region_fill(marker_region_number)
+            else:
+                fill = colors.normal
+            if region.kind == "marker":
+                marker_region_number += 1
             tags = (f"event:{source}",)
             self.semantic_sources[source] = region.source_event_indices
             self.canvas.create_rectangle(x1, sub_y + 3, max(x1 + 1, x2),

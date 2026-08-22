@@ -7,9 +7,10 @@ from stadium_reaper_bridge.editor.composite import lane_height
 from stadium_reaper_bridge.editor.layout import HEADER_WIDTH, RULER_HEIGHT
 from stadium_reaper_bridge.editor.model import EditorModel, LANES
 from stadium_reaper_bridge.editor.navigation import (
-    ViewState, event_list_rows, jump_viewport_left, marker_region_rows,
+    ViewState, default_lane_visibility, event_list_rows, jump_viewport_left, marker_region_rows,
     move_visible_lane, normalized_lane_order, visible_lane_layout,
 )
+from stadium_reaper_bridge.editor.style import REAPCASE_TREEVIEW_STYLE
 
 
 def perfect_picture():
@@ -37,6 +38,19 @@ def test_visible_lane_layout_is_contiguous_and_audio_follows(hidden):
         cursor += lane_height(lane)
     assert layout.event_bottom == cursor
     assert layout.audio_top == cursor
+
+
+def test_each_song_load_uses_the_default_working_lane_visibility():
+    available = LANES + ("AUDIO",)
+    expected = {
+        "STRUCTURE": True, "STADIUM": True, "SECOND HELIX": True,
+        "VIDEO": False, "LIGHTS": False, "MIDI / OTHER": False,
+        "SEQCLICK": False, "SEQ INSTRUCTIONS": False, "AUDIO": True,
+    }
+    song_a = default_lane_visibility(available)
+    assert song_a == expected
+    song_a["LIGHTS"] = True
+    assert default_lane_visibility(available) == expected
 
 
 def test_lane_reorder_swaps_adjacent_visible_lanes_deterministically():
@@ -98,3 +112,17 @@ def test_visual_redraw_and_transport_do_not_rebuild_navigation_treeviews():
                   if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
         assert "_refresh_navigation" not in called
         assert "_refresh_event_list" not in called
+
+
+def test_menu_order_and_shared_manager_treeview_style_are_wired_in_app():
+    source = Path("src/stadium_reaper_bridge/editor/app.py").read_text(encoding="utf-8")
+    cascade_positions = [source.index(f'bar.add_cascade(label="{label}"')
+                         for label in ("File", "Edit", "Select", "View", "Show")]
+    assert cascade_positions == sorted(cascade_positions)
+    assert source.count("style=REAPCASE_TREEVIEW_STYLE") == 2
+    assert REAPCASE_TREEVIEW_STYLE == "Reapcase.Treeview"
+    for handler in ("self.select_all", "self.select_after", "self.select_lane", "self.shift_dialog",
+                    "self.new_show", "self.open_show", "self.save_show", "self.add_show_song",
+                    "self.remove_show_song", "self.relocate_show_song", "self.preflight_show",
+                    "self.refresh_show", "self.midi_settings"):
+        assert handler in source
