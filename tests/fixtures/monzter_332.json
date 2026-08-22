@@ -18,7 +18,7 @@
     "065-01.097|MIDI_CC;CLIFF SOLO BASS;4;CC;3;69;2",
     "068-01.001|MARKER;SOLO DRUM;7;Off;On;Off;false;ANONYMALZ;[Current];[Current]",
     "070-06.142|PRESETSNAP;;3;2 USER;[Current];[Current]",
-    "081-01.001|MARKER;SOLO GUITAR;7;Off;Off;Off;false;ANONYMALZ;[Current];[Current]",
+    "081-01.001|MARKER;SOLO GUITAR (44m);7;Off;Off;Off;false;ANONYMALZ;[Current];[Current]",
     "081-01.002|MIDI_CC; BASS SOLO GUITAR;4;CC;3;69;5",
     "090-04.001|MIDI_CC;CHORUS;4;CC;3;69;1",
     "090-06.193|PRESETSNAP;;3;2 USER;[Current];[Current]",

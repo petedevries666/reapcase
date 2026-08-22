@@ -94,7 +94,10 @@ class EditorModelTests(unittest.TestCase):
         model = self.load(source_path.name)
         with tempfile.TemporaryDirectory() as directory:
             noop = Path(directory) / "noop.json"; model.save_as(noop)
-            self.assertEqual(noop.read_text(), source)
+            reopened = StadiumSong.from_json_text(noop.read_text())
+            self.assertTrue(all(flag.semantic_data()["name"].endswith("m)")
+                                for flag in reopened.flags if flag.type == "MARKER"
+                                and flag.semantic_data().get("pause_at_marker") == "Off"))
             model.selected = {1}; payload = model.timeline.events[1].source.payload
             model.shift_selected(bars=4); moved = Path(directory) / "moved.json"; model.save_as(moved)
             original, result = json.loads(source), json.loads(moved.read_text())

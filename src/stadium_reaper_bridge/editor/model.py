@@ -20,6 +20,7 @@ from .display import badge_text
 from .lighting import (LightingEventSource, create_lighting_event,
                        normalized_cue_id)
 from .ergonomics import backup_existing
+from .structure import normalize_structure_measure_labels
 
 EVENT_LANES = ("STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER")
 LANES = EVENT_LANES + ("SEQCLICK", "SEQ INSTRUCTIONS")
@@ -88,6 +89,9 @@ class EditorModel:
         self._load_sequence_layer()
         if resolve_audio_on_init:
             self.resolve_audio()
+        if self._normalize_structure_labels():
+            # Loading legacy data is an actual native Stadium payload edit.
+            self._structural_edits += 1
 
     @classmethod
     def open(cls, path: Union[str, Path], decoder_path: Union[str, Path] = "config/rig_midi.json") -> "EditorModel":
@@ -112,6 +116,8 @@ class EditorModel:
         candidate = cls(song, path, decoder, resolve_audio_on_init=False)
         progress("Resolving audio…")
         candidate.resolve_audio(audio_root)
+        if candidate._normalize_structure_labels():
+            candidate._structural_edits += 1
         progress("Preparing views…")
         # Force the projections used immediately by the UI while still on the
         # worker; their results remain derived, not serialized state.
@@ -446,6 +452,31 @@ class EditorModel:
     def _position(self, units: int) -> MusicalPosition:
         return self.timing_map.units_to_position(units)
 
+    def _rebuild_timing_map(self) -> None:
+        changes = []
+        for event in self.timeline.events:
+            if event.source.type in {"START", "TIME"} and {
+                    "tempo", "time_signature_numerator",
+                    "time_signature_denominator"} <= event.data.keys():
+                changes.append((event.position, event.data["tempo"],
+                                event.data["time_signature_numerator"],
+                                event.data["time_signature_denominator"]))
+        if changes:
+            # START is normally immovable, but legacy bulk-edit commands can
+            # temporarily shift it. Keep the last valid map in that case.
+            if min(item[0] for item in changes) == MusicalPosition(1, 1, 1):
+                self.timing_map = TimingMap(self.song.ppqn, changes)
+                self.tempo_map = self.timing_map
+
+    def _normalize_structure_labels(self) -> bool:
+        return normalize_structure_measure_labels(
+            self.timeline.events, self.timing_map, self.song_end_units)
+
+    def _structure_changed(self, *, timing: bool = False) -> None:
+        if timing:
+            self._rebuild_timing_map()
+        self._normalize_structure_labels()
+
     def shift_selected(self, bars: int = 0, beats: int = 0, ticks: int = 0) -> int:
         indices = sorted(self.selected)
         if not indices:
@@ -457,6 +488,8 @@ class EditorModel:
         self._undo.append(("move", indices, previous, set(self.selected)))
         for index, target in zip(indices, targets):
             self.timeline.events[index].position = target
+        self._structure_changed(timing=any(self.timeline.events[i].source.type in {"START", "TIME"}
+                                           for i in indices))
         return len(indices)
 
     def preview_shift(self, delta_units: int) -> MovePreview:
@@ -481,6 +514,8 @@ class EditorModel:
         self._undo.append(("move", list(preview.indices), list(preview.original), set(self.selected)))
         for index, target in zip(preview.indices, preview.targets):
             self.timeline.events[index].position = target
+        self._structure_changed(timing=any(self.timeline.events[i].source.type in {"START", "TIME"}
+                                           for i in preview.indices))
         return len(preview.indices)
 
     def undo(self) -> bool:
@@ -522,23 +557,30 @@ class EditorModel:
             self.timeline.events.remove(event)
             self.selected = previous_selection
             self._created -= 1
+            self._structure_changed()
             return True
         if operation[0] == "replace":
             _, events, selection = operation
             self.timeline.events = events
             self.selected = selection
             self._structural_edits -= 1
+            self._rebuild_timing_map()
+            self._normalize_structure_labels()
             return True
         if operation[0] == "event_edit":
             _, index, event, selection = operation
             self.timeline.events[index] = event
             self.selected = selection
             self._structural_edits -= 1
+            self._rebuild_timing_map()
+            self._normalize_structure_labels()
             return True
         _, indices, positions, previous_selection = operation
         for index, position in zip(indices, positions):
             self.timeline.events[index].position = position
         self.selected = previous_selection
+        self._rebuild_timing_map()
+        self._normalize_structure_labels()
         return True
 
     def selection_is_editable(self) -> bool:
@@ -569,6 +611,7 @@ class EditorModel:
         self.timeline.events[index] = updated
         self.selected = ({index} if index not in previous_selection else previous_selection)
         self._structural_edits += 1
+        self._structure_changed(timing=original.source.type in {"START", "TIME"})
         return True
 
     def delete_selected(self) -> int:
@@ -583,6 +626,7 @@ class EditorModel:
         self.timeline.events = [event for i, event in enumerate(before) if i not in remove]
         self.selected = set()
         self._structural_edits += 1
+        self._structure_changed(timing=any(before[i].source.type in {"START", "TIME"} for i in indices))
         return len(indices)
 
     def duplicate_events(self, source_indices: Iterable[int], destination_units: int,
@@ -622,6 +666,7 @@ class EditorModel:
         self.timeline.events.extend(copies)
         self.selected = set(range(first, first + len(copies)))
         self._structural_edits += 1
+        self._structure_changed()
         return len(copies)
 
     def _suggest_duplicate_offset(self, indices: list[int]) -> int:
@@ -688,6 +733,7 @@ class EditorModel:
         self.timeline.events.extend(copies)
         self.selected = set(range(first, first + len(copies)))
         self._structural_edits += 1
+        self._structure_changed()
         return len(copies)
 
     def duplicate_region(self, start_units: int, end_units: int,
@@ -712,6 +758,7 @@ class EditorModel:
         self.selected = {index}
         self._undo.append(("create", event, previous_selection))
         self._created += 1
+        self._structure_changed(timing=event.source.type in {"START", "TIME"})
         return index
 
     def save_as(self, path: Union[str, Path]) -> SaveSummary:

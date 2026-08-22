@@ -39,7 +39,8 @@ class StructureLayoutTests(unittest.TestCase):
         layout = derive_structure_layout(model.timeline.events, model._units,
                                            model.song_end_units)
         regions = [region for region in layout.regions if region.kind == "marker"]
-        self.assertEqual([region.label for region in regions], ["INTRO", "VERSE", "CHORUS"])
+        self.assertEqual([region.label for region in regions],
+                         ["INTRO (8m)", "VERSE (8m)", "CHORUS (8m)"])
         self.assertEqual([(region.start_units, region.end_units) for region in regions],
                          [(model._units(model._position(0)), model._units(model._position(7680))),
                           (7680, 15360), (15360, model.song_end_units)])
@@ -216,8 +217,8 @@ class EditingTests(unittest.TestCase):
         self.model.selected = {1, 2}
         self.assertEqual(self.model.duplicate_selected(), 2)
         copies = self.model.timeline.events[-2:]
-        self.assertEqual([event.source.payload for event in copies],
-                         [event.source.payload for event in originals[1:3]])
+        self.assertEqual(copies[0].data["name"], "VERSE (2m)")
+        self.assertEqual(copies[1].source.payload, originals[2].source.payload)
         self.assertTrue(all(copy is not original for copy, original in zip(copies, originals[1:3])))
         self.assertEqual(len({event.source_index for event in copies}), 2)
         self.assertEqual(self.model.selected, {4, 5})
