@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import wave
+from concurrent.futures import CancelledError
 
 from stadium_reaper_bridge.editor.layout import HEADER_WIDTH
 from stadium_reaper_bridge.editor.waveform import (
@@ -49,6 +50,13 @@ class WaveformTests(unittest.TestCase):
             self.assertGreaterEqual(max(level.maximum), 0.99)
             self.assertLessEqual(min(level.minimum), -0.99)
         self.assertEqual(summary.channels, 2)
+
+    def test_stale_waveform_scan_cancels_cooperatively(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cancel.wav"
+            write_impulses(path, 4096, {})
+            with self.assertRaises(CancelledError):
+                extract_waveform(path, read_frames=32, cancel_requested=lambda: True)
 
     def test_zoom_selects_the_finest_useful_pyramid_level(self):
         with tempfile.TemporaryDirectory() as directory:

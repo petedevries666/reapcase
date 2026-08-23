@@ -106,6 +106,7 @@ class AudioTrackView:
     source: dict[str, Any]
     resolved_path: Optional[Path] = None
     file_info: Optional[AudioFileInfo] = None
+    status: str = "resolving"
 
     @property
     def name(self) -> str:
@@ -152,7 +153,8 @@ def audio_track_views(tracks: Any, resolver: AudioResolver, *,
             info = read_wav_info(path) if path and inspect_files else None
         except (wave.Error, OSError, EOFError):
             info = None
-        views.append(AudioTrackView(number, source, path, info))
+        status = "ready" if info else ("invalid" if path else "missing")
+        views.append(AudioTrackView(number, source, path, info, status))
     return tuple(views)
 
 

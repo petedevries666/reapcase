@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 import struct
 import time
+from concurrent.futures import CancelledError
 import wave
 import zlib
 from typing import Callable, Hashable, Iterator, MutableMapping, Optional, Protocol, TypeVar, Union
@@ -258,6 +259,7 @@ def _next_level(source: PeakLevel) -> PeakLevel:
 def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_BASE_BUCKET_FRAMES,
                      read_frames: int = DEFAULT_READ_FRAMES,
                      pause_requested: Optional[Callable[[], bool]] = None,
+                     cancel_requested: Optional[Callable[[], bool]] = None,
                      buckets: Optional[int] = None) -> WaveformPyramid:
     """Scan PCM audio incrementally and build a compact float32 peak pyramid.
 
@@ -285,7 +287,11 @@ def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_B
         bucket_low, bucket_high = 1.0, -1.0
         remaining = frames
         while remaining:
+            if cancel_requested and cancel_requested():
+                raise CancelledError()
             while pause_requested and pause_requested():
+                if cancel_requested and cancel_requested():
+                    raise CancelledError()
                 time.sleep(0.05)
             request = min(read_frames, remaining)
             data = source.readframes(request)
@@ -315,6 +321,8 @@ def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_B
 
     levels = [PeakLevel(base_bucket_frames, low_values, high_values)]
     while len(levels[-1]) > 1:
+        if cancel_requested and cancel_requested():
+            raise CancelledError()
         levels.append(_next_level(levels[-1]))
     return WaveformPyramid(frames / rate if rate else 0.0, rate, channels,
                            frames, tuple(levels))

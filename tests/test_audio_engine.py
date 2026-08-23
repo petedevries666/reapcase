@@ -81,6 +81,16 @@ class AudioEngineTests(unittest.TestCase):
         self.assertTrue(backend.stream.closed); self.assertEqual(engine._readers,[])
         self.assertTrue(all(reader._file is None for reader in readers))
 
+    def test_prepare_does_not_change_live_state_until_single_commit(self):
+        path=self.root/"prepared.wav"; make_wav(path)
+        backend=FakeBackend(); engine=AudioEngine(backend, blocksize=4)
+        prepared=engine.prepare([PlaybackTrack(path)])
+        self.assertEqual(engine.diagnostic,"Engine: not configured")
+        self.assertEqual(engine._readers,[])
+        engine.commit(prepared)
+        self.assertEqual(len(engine._readers),1)
+        self.assertTrue(engine.diagnostic.startswith("Engine: ready"))
+
     def test_waveform_incremental_peaks_and_zoom_aggregation(self):
         path=self.root/"wave.wav"; make_wav(path,frames=1000,value=16384)
         summary=extract_waveform(path,buckets=10,read_frames=7)
