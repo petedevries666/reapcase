@@ -329,11 +329,12 @@ class ReapcaseEditor(tk.Tk):
     def _build_menu(self):
         bar = tk.Menu(self)
         file_menu = tk.Menu(bar, tearoff=False)
-        file_menu.add_command(label="Open JSON...", command=self.open_json)
+        file_menu.add_command(label="Open...", command=self.open_json, accelerator="Ctrl+O")
         self.recent_menu = tk.Menu(file_menu, tearoff=False, postcommand=self._rebuild_recent_menu)
         file_menu.add_cascade(label="Open Recent", menu=self.recent_menu)
-        file_menu.add_command(label="Save", command=self.save)
-        file_menu.add_command(label="Save As...", command=self.save_as)
+        file_menu.add_command(label="Save", command=self.save, accelerator="Ctrl+S")
+        file_menu.add_command(label="Save As...", command=self.save_as,
+                              accelerator="Ctrl+Shift+S")
         bar.add_cascade(label="File", menu=file_menu)
         edit = tk.Menu(bar, tearoff=False)
         for label, command, shortcut in (("Undo", self.undo, "Ctrl+Z"), ("Copy", self.copy_events, "Ctrl+C"),
@@ -400,6 +401,13 @@ class ReapcaseEditor(tk.Tk):
         self.bind_all("<bracketleft>", lambda e: self._editor_shortcut(e, self.navigate_marker, -1))
         self.bind_all("<Home>", lambda e: self._editor_shortcut(e, self.go_song_edge, False))
         self.bind_all("<End>", lambda e: self._editor_shortcut(e, self.go_song_edge, True))
+        # Arrow keys are part of the timeline command layer.  Keeping them on
+        # _editor_shortcut means native text caret and Treeview navigation (as
+        # well as every dialog) continue to receive their ordinary key events.
+        self.bind_all("<Left>", lambda e: self._editor_shortcut(e, self.navigate_region, -1))
+        self.bind_all("<Right>", lambda e: self._editor_shortcut(e, self.navigate_region, 1))
+        self.bind_all("<Up>", lambda e: self._editor_shortcut(e, self.zoom_step, 1.25))
+        self.bind_all("<Down>", lambda e: self._editor_shortcut(e, self.zoom_step, 1 / 1.25))
         self.bind_all("<space>", lambda e: self._global_editor_shortcut(
             e, self.play_pause, allow_native_navigation=False))
         self.bind_all("<Control-e>", lambda e: self._global_editor_shortcut(e, self.toggle_inspector))
@@ -407,6 +415,14 @@ class ReapcaseEditor(tk.Tk):
         self.bind_all("<Control-l>", lambda e: self._global_editor_shortcut(e, self.toggle_lane_manager))
         self.bind_all("<Control-m>", lambda e: self._global_editor_shortcut(e, self.toggle_track_manager))
         self.bind_all("<Control-g>", lambda e: self._global_editor_shortcut(e, self.toggle_ghost_preference))
+        # File commands use the application workflow layer: they are available
+        # throughout the main editor, but never consume keys in text inputs or
+        # child/native dialogs.  The callbacks are the File menu callbacks, so
+        # loading, serialization and Save-As fallback behavior stay canonical.
+        self.bind_all("<Control-o>", lambda e: self._global_editor_shortcut(e, self.open_json))
+        self.bind_all("<Control-s>", lambda e: self._global_editor_shortcut(e, self.save))
+        self.bind_all("<Control-Shift-Key-S>",
+                      lambda e: self._global_editor_shortcut(e, self.save_as))
 
     def _rebuild_recent_menu(self):
         self.recent_menu.delete(0, "end")
