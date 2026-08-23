@@ -8,6 +8,9 @@ import json
 from pathlib import Path
 import shutil
 import wave
+import logging
+import os
+import time
 from typing import Iterable, Optional, Union
 
 from ..midi import RigMidiDecoder
@@ -27,6 +30,19 @@ LANES = EVENT_LANES + ("SEQCLICK", "SEQ INSTRUCTIONS")
 STRUCTURE = {"START", "END", "TIME", "MARKER", "CYCLE_START", "CYCLE_END"}
 KNOWN = STRUCTURE | {"PRESETSNAP", "LOOPER", "MIDI_CC", "MIDI_BANK_PROGRAM", "LIGHTS"}
 NON_COPYABLE = {"START", "TIME", "END", "SEQCLICK"}
+LOG = logging.getLogger(__name__)
+PERF = os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes")
+
+
+@dataclass(frozen=True)
+class AudioResolutionResult:
+    """One immutable worker result, safe to hand back to the UI thread."""
+    index: int
+    track: object
+    identity: Optional[tuple[int, int]]
+    changed: bool
+    stat_seconds: float = 0.0
+    inspection_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -57,9 +73,13 @@ class EditorModel:
     def __init__(self, song: StadiumSong, path: Path, decoder: RigMidiDecoder,
                  *, resolve_audio_on_init: bool = True):
         self.song, self.path = song, path
+        started = time.perf_counter()
         self.timeline: Timeline = stadium_to_timeline(song, midi_decoder=decoder)
+        self._log_timing("timeline construction", started)
         self._show_document: dict = {}
+        started = time.perf_counter()
         self._load_show_layer()
+        self._log_timing("sidecar load", started)
         self.decoder = decoder
         self.selected: set[int] = set()
         self.cursor = MusicalPosition(1, 1, 1)
@@ -109,18 +129,92 @@ class EditorModel:
         worker.  Callers must commit its return value on the UI thread.
         """
         path = Path(path)
-        progress("Parsing song…")
+        started = time.perf_counter(); progress("Parsing song…")
         song = StadiumSong.from_json_text(path.read_text(encoding="utf-8"))
+        cls._log_timing("JSON parse", started)
         progress("Loading sidecar and building timeline…")
         decoder = RigMidiDecoder.from_file(decoder_path)
         candidate = cls(song, path, decoder, resolve_audio_on_init=False)
-        progress("Resolving audio…")
-        candidate.resolve_audio(audio_root)
         progress("Preparing views…")
         # Force the projections used immediately by the UI while still on the
         # worker; their results remain derived, not serialized state.
         candidate.song_end_units
+        candidate.begin_audio_resolution(audio_root)
         return candidate
+
+    @staticmethod
+    def _log_timing(label: str, started: float) -> None:
+        if PERF:
+            LOG.debug("Song load timing: %s %.1f ms", label,
+                      (time.perf_counter() - started) * 1000)
+
+    def begin_audio_resolution(self, root=None) -> None:
+        """Install cheap placeholder lanes without touching the filesystem."""
+        if root is not None:
+            self.audio_root = Path(root)
+        sources = self.song.tracks if isinstance(self.song.tracks, list) else []
+        from .audio import AudioTrackView
+        self.audio_tracks = tuple(AudioTrackView(i, source if isinstance(source, dict)
+                                  else {"name": str(source)})
+                                  for i, source in enumerate(sources[:MAX_AUDIO_TRACKS], 1))
+
+    def audio_resolution_results(self, root=None):
+        """Yield independently resolved/inspected tracks without mutating this model."""
+        if root is not None:
+            root = Path(root)
+        else:
+            root = self.audio_root
+        automatic = stadium_backup_audio_paths(self.path)
+        resolver = AudioResolver(self.path.parent, root,
+                                 automatic[0] if automatic else None,
+                                 automatic[1] if automatic else None)
+        previous = {track.resolved_path: track for track in self.audio_tracks
+                    if track.resolved_path and track.file_info}
+        identities = dict(self._audio_identities)
+        from .audio import AudioTrackView
+        for index, placeholder in enumerate(self.audio_tracks):
+            path_started = time.perf_counter()
+            path = resolver.resolve(placeholder.source.get("filename"))
+            self._log_timing("audio path resolution", path_started)
+            identity = None; info = None; status = "missing"; stat_elapsed = inspect_elapsed = 0.0
+            if path:
+                stat_started = time.perf_counter()
+                try:
+                    stat = path.stat(); identity = (stat.st_size, stat.st_mtime_ns)
+                except OSError:
+                    pass
+                stat_elapsed = time.perf_counter() - stat_started
+                if PERF:
+                    LOG.debug("Song load timing: WAV stat %.1f ms (%s)",
+                              stat_elapsed * 1000, path.name)
+                if identity is not None:
+                    old = previous.get(path)
+                    if old and identities.get(path) == identity:
+                        info = old.file_info
+                    else:
+                        inspect_started = time.perf_counter()
+                        try: info = read_wav_info(path)
+                        except (wave.Error, OSError, EOFError): pass
+                        inspect_elapsed = time.perf_counter() - inspect_started
+                        if PERF:
+                            LOG.debug("Song load timing: WAV header inspection %.1f ms (%s)",
+                                      inspect_elapsed * 1000, path.name)
+                    status = "ready" if info else "invalid"
+            view = AudioTrackView(placeholder.number, placeholder.source, path, info, status)
+            yield AudioResolutionResult(index, view, identity,
+                                        identity != identities.get(path), stat_elapsed,
+                                        inspect_elapsed)
+
+    def apply_audio_resolution(self, result: AudioResolutionResult) -> None:
+        """Commit a worker result; callers invoke this only on their UI thread."""
+        tracks = list(self.audio_tracks)
+        if result.index >= len(tracks):
+            return
+        tracks[result.index] = result.track
+        self.audio_tracks = tuple(tracks)
+        path = result.track.resolved_path
+        if path and result.identity is not None:
+            self._audio_identities[path] = result.identity
 
     @staticmethod
     def show_path(path: Union[str, Path]) -> Path:
@@ -244,7 +338,8 @@ class EditorModel:
                     changed.add(path)
                     try: info = read_wav_info(path)
                     except (wave.Error, OSError, EOFError): pass
-            refreshed.append(type(view)(view.number, view.source, path, info))
+            refreshed.append(type(view)(view.number, view.source, path, info,
+                             "ready" if info else ("invalid" if path else "missing")))
         changed.update(set(self._audio_identities) - set(identities))
         self._audio_identities = identities
         self.audio_tracks = tuple(refreshed)

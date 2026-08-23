@@ -33,6 +33,7 @@ class PlaybackTrack:
     path: Path
     name: str = ""
     offset: object = 0
+    file_info: Optional[AudioFileInfo] = None
 
 
 class OutputBackend(Protocol):
@@ -98,7 +99,9 @@ class AudioEngine:
         unsafe = [t.name or t.path.name for t in tracks if t.offset != 0]
         if unsafe:
             raise PlaybackError("Playback disabled: unknown non-zero offset on " + ", ".join(unsafe))
-        infos = [read_wav_info(t.path) for t in tracks]
+        # Progressive Song loading already inspected these identities.  Reuse
+        # that header data rather than opening every WAV for a second probe.
+        infos = [t.file_info or read_wav_info(t.path) for t in tracks]
         rates = {i.sample_rate for i in infos}
         if len(rates) != 1:
             raise PlaybackError("Playback disabled: sample-rate mismatch")
@@ -201,4 +204,3 @@ class AudioEngine:
             for reader in self._readers: reader.close()
             self._readers = []; self._infos = []
             self._state = PlaybackState.STOPPED; self._frame = 0
-

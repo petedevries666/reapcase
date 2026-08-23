@@ -1,9 +1,8 @@
 import json
 from pathlib import Path
 import tempfile
-import threading
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+import wave
 from unittest.mock import patch
 
 from stadium_reaper_bridge.editor.model import EditorModel
@@ -29,7 +28,8 @@ class EditorModelTests(unittest.TestCase):
         self.assertEqual(model.path.name, "perfect_picture_336.json")
         self.assertEqual(phases, ["Parsing song…",
                                  "Loading sidecar and building timeline…",
-                                 "Resolving audio…", "Preparing views…"])
+                                 "Preparing views…"])
+        self.assertTrue(all(track.status == "resolving" for track in model.audio_tracks))
 
     def test_failed_phased_open_never_produces_a_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -40,22 +40,60 @@ class EditorModelTests(unittest.TestCase):
                 EditorModel.open_phased(invalid, phases.append)
             self.assertEqual(phases, ["Parsing song…"])
 
-    def test_phased_open_resolves_manual_audio_root_on_worker(self):
-        calls = []
-
-        def record_resolution(_model, root):
-            calls.append((root, threading.current_thread().name))
-
-        with patch.object(EditorModel, "resolve_audio", autospec=True,
-                          side_effect=record_resolution):
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="song-open-test") as pool:
-                candidate = pool.submit(
-                    EditorModel.open_phased,
-                    FIXTURES / "perfect_picture_336.json",
-                    audio_root="/manual/audio").result()
-
+    def test_phased_open_does_not_inspect_audio(self):
+        with patch("stadium_reaper_bridge.editor.model.read_wav_info") as inspect:
+            candidate = EditorModel.open_phased(
+                FIXTURES / "perfect_picture_336.json", audio_root="/manual/audio")
         self.assertIsInstance(candidate, EditorModel)
-        self.assertEqual(calls, [("/manual/audio", "song-open-test_0")])
+        inspect.assert_not_called()
+
+    def test_audio_results_are_progressive_and_only_mutate_when_applied(self):
+        model = EditorModel.open_phased(FIXTURES / "perfect_picture_336.json")
+        before = model.audio_tracks
+        results = model.audio_resolution_results()
+        first = next(results)
+        self.assertEqual(model.audio_tracks, before)
+        model.apply_audio_resolution(first)
+        self.assertNotEqual(model.audio_tracks[0].status, "resolving")
+        self.assertTrue(all(track.status == "resolving" for track in model.audio_tracks[1:]))
+
+    def test_missing_audio_does_not_abort_open(self):
+        model = EditorModel.open_phased(FIXTURES / "perfect_picture_336.json")
+        results = list(model.audio_resolution_results("/definitely/missing"))
+        self.assertEqual(len(results), len(model.audio_tracks))
+        self.assertTrue(all(result.track.status == "missing" for result in results))
+
+    def test_invalid_audio_does_not_abort_resolution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            invalid_wav = directory / "broken.wav"
+            invalid_wav.write_bytes(b"not a wav")
+            document = json.loads((FIXTURES / "perfect_picture_336.json").read_text())
+            document["tracks"] = [{"name": "Broken", "filename": str(invalid_wav)}]
+            song_path = directory / "song.json"
+            song_path.write_text(json.dumps(document), encoding="utf-8")
+            model = EditorModel.open_phased(song_path)
+            results = list(model.audio_resolution_results())
+        self.assertEqual(results[0].track.status, "invalid")
+
+    def test_unchanged_identity_reuses_inspected_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            audio = directory / "audio.wav"
+            with wave.open(str(audio), "wb") as output:
+                output.setnchannels(1); output.setsampwidth(2); output.setframerate(48000)
+                output.writeframes(b"\0\0" * 20)
+            document = json.loads((FIXTURES / "perfect_picture_336.json").read_text())
+            document["tracks"] = [{"name": "Audio", "filename": str(audio)}]
+            song_path = directory / "song.json"
+            song_path.write_text(json.dumps(document), encoding="utf-8")
+            model = EditorModel.open_phased(song_path)
+            initial = list(model.audio_resolution_results())
+            model.apply_audio_resolution(initial[0])
+            with patch("stadium_reaper_bridge.editor.model.read_wav_info") as inspect:
+                refreshed = list(model.audio_resolution_results())
+            inspect.assert_not_called()
+            self.assertIs(refreshed[0].track.file_info, initial[0].track.file_info)
 
     def test_real_song_lane_inventory(self):
         monzter = self.load("monzter_332.json")
