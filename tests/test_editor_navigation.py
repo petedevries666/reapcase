@@ -177,8 +177,8 @@ def test_marker_manager_only_extracts_marker_and_canonical_region_rows():
     rows = marker_region_rows(perfect_picture())
     assert rows
     assert {row.kind for row in rows} <= {
-        "START", "END", "MARKER", "PAUSE", "CYCLE", "LOOPER REGION",
-        "LIGHTING REGION"}
+        "START", "END", "MARKER", "PAUSE", "CYCLE_START", "CYCLE_END", "REGION"}
+    assert {row.lane for row in rows} == {"STRUCTURE"}
     assert not any(row.kind in {"PRESETSNAP", "MIDI_CC", "VIDEO"} for row in rows)
     assert all(row.position.count("-") == 1 for row in rows)
 
@@ -283,7 +283,7 @@ def test_menu_order_and_shared_manager_treeview_style_are_wired_in_app():
     cascade_positions = [source.index(f'bar.add_cascade(label="{label}"')
                          for label in ("File", "Edit", "Select", "View", "Show")]
     assert cascade_positions == sorted(cascade_positions)
-    assert source.count("style=REAPCASE_TREEVIEW_STYLE") == 2
+    assert source.count("style=REAPCASE_TREEVIEW_STYLE") == 3
     assert REAPCASE_TREEVIEW_STYLE == "Reapcase.Treeview"
     for handler in ("self.select_all", "self.select_after", "self.select_lane", "self.shift_dialog",
                     "self.new_show", "self.open_show", "self.save_show", "self.add_show_song",

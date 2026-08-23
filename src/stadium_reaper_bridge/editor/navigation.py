@@ -10,9 +10,8 @@ from dataclasses import dataclass
 from .composite import lane_height
 from .display import badge_text
 from .layout import HEADER_WIDTH, RULER_HEIGHT, timeline_x
-from .lighting import derive_lighting_regions
-from .looper import derive_looper_regions
-from .structure import is_pause_marker, is_structure_end_boundary
+from .structure import (derive_structure_layout, is_pause_marker,
+                        is_structure_end_boundary)
 
 
 DEFAULT_VISIBLE_LANES = frozenset({"STRUCTURE", "STADIUM", "SECOND HELIX", "AUDIO"})
@@ -133,51 +132,56 @@ class MarkerRegionRow:
     lane: str = "STRUCTURE"
 
 
-def marker_region_rows(model) -> tuple[MarkerRegionRow, ...]:
+def structure_manager_rows(model) -> tuple[MarkerRegionRow, ...]:
+    """Project the STRUCTURE lane as boundaries plus derived chapter spans."""
     events = model.timeline.events
-    rows, pending = [], None
+    rows = []
     for index, event in sorted(enumerate(events), key=lambda pair: model._units(pair[1].position)):
+        if model.lane(event) != "STRUCTURE":
+            continue
         kind = event.source.type
         if kind not in {"START", "END", "MARKER", "CYCLE_START", "CYCLE_END"}:
             continue
         units, position = model._units(event.position), event.position.render()
-        if kind == "CYCLE_START":
-            pending = (index, event, units)
-            continue
-        if kind == "CYCLE_END" and pending:
-            start_index, start, start_units = pending
-            rows.append(MarkerRegionRow((start_index, index), start_units,
-                start.position.render(), "CYCLE", badge_text(start), f"→ {position}",
-                model.lane(start)))
-            pending = None
-            continue
         display_kind = "PAUSE" if kind == "MARKER" and is_pause_marker(event) else kind
         rows.append(MarkerRegionRow((index,), units, position, display_kind, badge_text(event),
-                                    lane=model.lane(event)))
-    if pending:
-        index, event, units = pending
-        rows.append(MarkerRegionRow((index,), units, event.position.render(), "CYCLE", badge_text(event),
-                                    lane=model.lane(event)))
-
-    # Sustained semantic regions come from the same canonical projections used
-    # by Timeline drawing.  Point commands remain in Event List rather than
-    # turning this focused manager into a second event browser.
-    for system in ("STADIUM", "SECOND HELIX"):
-        for region in derive_looper_regions(events, model._units, system,
-                                            model.song_end_units):
-            source = region.source_event_indices[0]
-            event = events[source]
-            rows.append(MarkerRegionRow(
-                region.source_event_indices, region.start_units, event.position.render(),
-                "LOOPER REGION", region.state, f"→ {model._position(region.end_units).render()}",
-                system))
-    for region in derive_lighting_regions(events, model._units, model.song_end_units):
-        event = events[region.source_event_index]
+                                    lane="STRUCTURE"))
+    layout = derive_structure_layout(events, model._units, model.song_end_units)
+    for region in layout.regions:
+        if region.kind != "marker":
+            continue
+        event = events[region.source_event_indices[0]]
         rows.append(MarkerRegionRow(
-            (region.source_event_index,), region.start_units, event.position.render(),
-            "LIGHTING REGION", region.label,
-            f"→ {model._position(region.end_units).render()}", "LIGHTS"))
-    return tuple(sorted(rows, key=lambda row: row.units))
+            region.source_event_indices, region.start_units, event.position.render(),
+            "REGION", region.label,
+            f"→ {model._position(region.end_units).render()}", "STRUCTURE"))
+    return tuple(sorted(rows, key=lambda row: (row.units, row.kind == "REGION")))
+
+
+def marker_region_rows(model) -> tuple[MarkerRegionRow, ...]:
+    """Compatibility alias for the renamed Structure Manager projection."""
+    return structure_manager_rows(model)
+
+
+def marker_flag_manager_rows(model, enabled_lanes=None) -> tuple[MarkerRegionRow, ...]:
+    """Project actual editable non-STRUCTURE point events, without regions."""
+    enabled = set(enabled_lanes) if enabled_lanes is not None else None
+    rows = []
+    for index, event in enumerate(model.timeline.events):
+        lane = model.lane(event)
+        if lane == "STRUCTURE":
+            continue
+        # Audio/sequence clips are not Timeline events today.  If sequence-like
+        # flags arrive here later, canonical lane identity groups them as MIDI.
+        display_lane = lane if lane in {
+            "STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER"
+        } else "MIDI / OTHER"
+        if enabled is not None and display_lane not in enabled:
+            continue
+        rows.append(MarkerRegionRow(
+            (index,), model._units(event.position), event.position.render(),
+            display_lane, badge_text(event), lane=display_lane))
+    return tuple(sorted(rows, key=lambda row: (row.units, row.indices[0])))
 
 
 def jump_viewport_left(units: int, ppqn: int, pixels_per_beat: float,
