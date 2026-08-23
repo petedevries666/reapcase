@@ -36,6 +36,22 @@ class PlaybackTrack:
     file_info: Optional[AudioFileInfo] = None
 
 
+@dataclass
+class PreparedAudio:
+    """Filesystem/backend resources prepared away from the UI thread."""
+    readers: list[wave.Wave_read]
+    infos: list[AudioFileInfo]
+    stream: object
+    blocksize: int
+
+    def close(self) -> None:
+        try:
+            self.stream.close()
+        finally:
+            for reader in self.readers:
+                reader.close()
+
+
 class OutputBackend(Protocol):
     def open_stream(self, callback, *, samplerate: int, channels: int,
                     blocksize: int): ...
@@ -91,7 +107,11 @@ class AudioEngine:
     def at_end(self): return self._state is PlaybackState.ENDED
 
     def open(self, tracks: Sequence[PlaybackTrack]) -> None:
-        self.close()
+        """Compatibility entry point; prepare then atomically install resources."""
+        self.commit(self.prepare(tracks))
+
+    def prepare(self, tracks: Sequence[PlaybackTrack]) -> PreparedAudio:
+        """Perform WAV/backend I/O without changing live playback state."""
         if len(tracks) > 8:
             raise PlaybackError("Playback supports at most 8 tracks")
         if not tracks:
@@ -117,7 +137,14 @@ class AudioEngine:
         except Exception:
             for reader in locals().get("readers", []): reader.close()
             raise
-        self._readers, self._infos, self._stream = readers, infos, stream
+        return PreparedAudio(readers, infos, stream, self.blocksize)
+
+    def commit(self, prepared: PreparedAudio) -> None:
+        """Install fully prepared resources as one stable engine configuration."""
+        self.close()
+        infos = prepared.infos
+        self._readers, self._infos, self._stream = (prepared.readers, prepared.infos,
+                                                     prepared.stream)
         self.sample_rate = infos[0].sample_rate
         self.total_frames = max(i.frames for i in infos)
         self._muted = [False] * len(infos); self._solo = [False] * len(infos)

@@ -158,7 +158,7 @@ class EditorModel:
                                   else {"name": str(source)})
                                   for i, source in enumerate(sources[:MAX_AUDIO_TRACKS], 1))
 
-    def audio_resolution_results(self, root=None):
+    def audio_resolution_results(self, root=None, cancelled=lambda: False):
         """Yield independently resolved/inspected tracks without mutating this model."""
         if root is not None:
             root = Path(root)
@@ -173,9 +173,13 @@ class EditorModel:
         identities = dict(self._audio_identities)
         from .audio import AudioTrackView
         for index, placeholder in enumerate(self.audio_tracks):
+            if cancelled():
+                return
             path_started = time.perf_counter()
             path = resolver.resolve(placeholder.source.get("filename"))
             self._log_timing("audio path resolution", path_started)
+            if cancelled():
+                return
             identity = None; info = None; status = "missing"; stat_elapsed = inspect_elapsed = 0.0
             if path:
                 stat_started = time.perf_counter()
@@ -200,6 +204,8 @@ class EditorModel:
                             LOG.debug("Song load timing: WAV header inspection %.1f ms (%s)",
                                       inspect_elapsed * 1000, path.name)
                     status = "ready" if info else "invalid"
+            if cancelled():
+                return
             view = AudioTrackView(placeholder.number, placeholder.source, path, info, status)
             yield AudioResolutionResult(index, view, identity,
                                         identity != identities.get(path), stat_elapsed,

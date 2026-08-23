@@ -9,6 +9,7 @@ from typing import Optional
 from collections import OrderedDict
 import logging
 import os
+import threading
 import tkinter as tk
 import time
 import json
@@ -200,6 +201,8 @@ class ReapcaseEditor(tk.Tk):
         self._load_generation = 0
         self._audio_ready = False
         self._audio_error = None
+        self._audio_cancel = threading.Event()
+        self._waveform_cancel = threading.Event()
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._close_editor)
         self.after(33, self._transport_tick)
@@ -1214,6 +1217,13 @@ class ReapcaseEditor(tk.Tk):
     def _begin_song_open(self, path):
         """Start transactional Song loading; all Tk work stays in this thread."""
         if self.loading: return False
+        self._audio_cancel.set()
+        self._waveform_cancel.set()
+        self._audio_cancel = threading.Event()
+        self._waveform_cancel = threading.Event()
+        audio_cancel = self._audio_cancel
+        self.waveforms.clear(); self._waveform_pending.clear()
+        self._waveform_render_cache.clear(); self._waveform_photo_cache.clear()
         self._load_generation += 1
         generation = self._load_generation
         self._audio_ready = False; self._audio_error = None
@@ -1263,11 +1273,11 @@ class ReapcaseEditor(tk.Tk):
             if error is not None:
                 messagebox.showerror("Cannot open Song", str(error), parent=self)
             elif generation == self._load_generation:
-                self._start_audio_resolution(candidate, generation)
+                self._start_audio_resolution(candidate, generation, audio_cancel)
         self.after(0, poll)
         return True
 
-    def _start_audio_resolution(self, model, generation):
+    def _start_audio_resolution(self, model, generation, cancel):
         """Progressively apply immutable worker output on Tk's event loop."""
         total = len(model.audio_tracks)
         self.audio_progress.configure(maximum=max(1, total), value=0)
@@ -1276,19 +1286,39 @@ class ReapcaseEditor(tk.Tk):
 
         def work():
             try:
-                for result in model.audio_resolution_results(self.manual_audio_root):
+                resolved = []
+                for result in model.audio_resolution_results(
+                        self.manual_audio_root, cancel.is_set):
+                    if cancel.is_set(): return
+                    resolved.append(result.track)
                     updates.put(("track", result))
-                updates.put(("done", None))
+                if cancel.is_set(): return
+                updates.put(("resolved", None))
+                tracks = [PlaybackTrack(t.resolved_path, t.name, t.offset, t.file_info)
+                          for t in resolved if t.resolved_path and t.file_info]
+                started = time.perf_counter()
+                prepared = self.audio_engine.prepare(tracks)
+                if os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes"):
+                    LOG.debug("Song load timing: audio engine prepare %.1f ms",
+                              (time.perf_counter() - started) * 1000)
+                if cancel.is_set():
+                    prepared.close(); return
+                updates.put(("prepared", prepared))
             except BaseException as exc:
-                updates.put(("error", exc))
+                if not cancel.is_set(): updates.put(("error", exc))
         self._audio_pool.submit(work)
         completed = 0
 
         def poll():
             nonlocal completed
-            if generation != self._load_generation or not self.winfo_exists():
+            if not self._audio_load_current(model, generation, cancel) or not self.winfo_exists():
+                try:
+                    while True:
+                        kind, value = updates.get_nowait()
+                        if kind == "prepared": value.close()
+                except Empty:
+                    pass
                 return
-            terminal = None
             try:
                 while True:
                     kind, value = updates.get_nowait()
@@ -1300,29 +1330,39 @@ class ReapcaseEditor(tk.Tk):
                         if value.track.resolved_path and value.track.file_info:
                             self._request_waveform(value.track.resolved_path, generation)
                         self.redraw()
-                    else:
-                        terminal = (kind, value)
+                    elif kind == "resolved":
+                        self.audio_status.set("Audio: preparing engine…")
+                        self.after(35, poll)
+                        return
+                    elif kind == "prepared":
+                        self._commit_prepared_audio(value, model, generation, cancel)
+                        return
+                    elif kind == "error":
+                        self._set_audio_error(str(value))
+                        return
             except Empty:
                 pass
-            if terminal is None:
-                self.after(35, poll); return
-            if terminal[0] == "error":
-                self._set_audio_error(str(terminal[1])); return
-            self.audio_status.set("Audio: preparing engine…")
-            self.after(80, lambda: self._finish_audio_resolution(model, generation))
+            self.after(35, poll)
         self.after(0, poll)
 
-    def _finish_audio_resolution(self, model, generation):
-        if generation != self._load_generation or model is not self.model:
+    def _audio_load_current(self, model, generation, cancel):
+        """Single guard for progress, engine readiness, and playback enablement."""
+        return (generation == self._load_generation and model is self.model
+                and not cancel.is_set())
+
+    def _commit_prepared_audio(self, prepared, model, generation, cancel):
+        """Perform the small, I/O-free engine state swap on Tk's thread."""
+        if not self._audio_load_current(model, generation, cancel):
+            prepared.close()
             return
-        started = time.perf_counter()
-        self._configure_audio(preserve_waveforms=True, request_waveforms=False)
-        if os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes"):
-            LOG.debug("Song load timing: audio engine open %.1f ms",
-                      (time.perf_counter() - started) * 1000)
-        if not self.audio_engine.diagnostic.startswith("Engine: ready"):
-            self._set_audio_error(self.audio_engine.diagnostic); return
+        self.audio_engine.commit(prepared)
+        self.monitor_muted = [False] * len(model.audio_tracks)
+        self.monitor_solo = [False] * len(model.audio_tracks)
+        self._set_audio_ready(model)
+
+    def _set_audio_ready(self, model):
         self._audio_ready = True
+        self._audio_error = None
         self.play_button.state(["!disabled"])
         ready = sum(t.status == "ready" for t in model.audio_tracks)
         missing = sum(t.status == "missing" for t in model.audio_tracks)
@@ -1449,6 +1489,9 @@ class ReapcaseEditor(tk.Tk):
             self.audio_engine.open(resolved)
         except Exception as exc:
             self.audio_engine.diagnostic = str(exc)
+            self._set_audio_error(str(exc))
+        else:
+            self._set_audio_ready(self.model)
         if request_waveforms:
             for track in tracks:
                 if track.resolved_path: self._request_waveform(track.resolved_path,
@@ -1491,16 +1534,18 @@ class ReapcaseEditor(tk.Tk):
 
     def _request_waveform(self, path, generation=None):
         generation = self._load_generation if generation is None else generation
+        cancel = self._waveform_cancel
         path = str(path)
         if path in self.waveforms or path in self._waveform_pending: return
         self._waveform_pending.add(path)
         future = self._waveform_pool.submit(
             extract_waveform, path,
-            pause_requested=lambda: self.audio_engine.state is PlaybackState.PLAYING)
+            pause_requested=lambda: self.audio_engine.state is PlaybackState.PLAYING,
+            cancel_requested=cancel.is_set)
         def poll():
             if not future.done(): self.after(40, poll); return
             self._waveform_pending.discard(path)
-            if generation != self._load_generation: return
+            if generation != self._load_generation or cancel.is_set(): return
             try: self.waveforms[path] = future.result()
             except Exception: pass
             if self.winfo_exists(): self.redraw()
@@ -2788,6 +2833,7 @@ class ReapcaseEditor(tk.Tk):
 
     def destroy(self):
         self._load_generation += 1
+        self._audio_cancel.set(); self._waveform_cancel.set()
         self.audio_engine.close(); self._waveform_pool.shutdown(wait=False, cancel_futures=True)
         self._audio_pool.shutdown(wait=False, cancel_futures=True)
         self._loading_pool.shutdown(wait=False, cancel_futures=True)
