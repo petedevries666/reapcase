@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 from stadium_reaper_bridge.editor.app import MARKER_MANAGER_COLUMNS, ReapcaseEditor
 from stadium_reaper_bridge.editor.model import EditorModel
-from stadium_reaper_bridge.editor.navigation import adjacent_structure_region_index
+from stadium_reaper_bridge.editor.navigation import (
+    adjacent_structure_region_index, marker_region_rows, structure_region_indices)
 from stadium_reaper_bridge.editor.preferences import RecentFiles
 from stadium_reaper_bridge.editor.structure import is_pause_marker
 from stadium_reaper_bridge.editor.style import LANE_PALETTE, lane_colors
@@ -60,6 +61,49 @@ def test_structure_region_navigation_excludes_pauses_and_cycles_and_clamps():
     assert adjacent_structure_region_index(model, first_units, 1) == ordinary[1][1]
     types = {model.timeline.events[index].source.type for _, index in ordinary}
     assert types == {"MARKER"}
+
+
+def test_named_end_is_not_a_navigable_structure_region(tmp_path):
+    song = tmp_path / "named-end.json"
+    song.write_text(json.dumps({
+        "name": "Named End", "ppqn": 240, "params": None, "tracks": [],
+        "flags": [
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "005-01.001|MARKER;VERSE;7;Off;Off;Off;false;A;B;C",
+            "009-01.001|MARKER;END;7;Off;Off;Off;false;A;B;C",
+            "013-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ]}))
+    model = EditorModel.open(song)
+    verse, named_end = 1, 2
+
+    assert structure_region_indices(model) == (verse,)
+    assert adjacent_structure_region_index(
+        model, model._units(model.timeline.events[verse].position), 1) == verse
+    assert adjacent_structure_region_index(
+        model, model._units(model.timeline.events[named_end].position), -1) == verse
+
+
+def test_marker_manager_projects_structure_and_canonical_looper_regions(tmp_path):
+    song = tmp_path / "semantic-regions.json"
+    song.write_text(json.dumps({
+        "name": "Semantic Regions", "ppqn": 240, "params": None, "tracks": [],
+        "flags": [
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "001-01.001|MARKER;INTRO;7;Off;Off;Off;false;A;B;C",
+            "003-01.001|LOOPER;RECORD;1;Record",
+            "005-01.001|LOOPER;STOP;1;Stop",
+            "007-01.001|MIDI_CC;BASS PLAY;4;CC;3;61;127",
+            "009-01.001|MIDI_CC;BASS STOP;4;CC;3;61;0",
+            "013-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ]}))
+    rows = marker_region_rows(EditorModel.open(song))
+    regions = {(row.kind, row.name): row for row in rows}
+
+    assert any(row.lane == "STRUCTURE" for row in rows)
+    assert regions[("LOOPER REGION", "RECORD")].lane == "STADIUM"
+    assert regions[("LOOPER REGION", "PLAY")].lane == "SECOND HELIX"
+    for lane in ("STRUCTURE", "STADIUM", "SECOND HELIX"):
+        assert lane_colors(lane) is LANE_PALETTE[lane]
 
 
 def test_shared_jump_updates_cursor_seeks_selects_and_can_defer_reveal(monkeypatch):

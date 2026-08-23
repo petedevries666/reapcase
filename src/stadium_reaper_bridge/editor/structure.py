@@ -40,6 +40,18 @@ def is_pause_marker(event: TimelineEvent) -> bool:
     return value is True or str(value).strip().lower() in {"on", "true", "1", "yes"}
 
 
+def is_structure_end_boundary(event: TimelineEvent) -> bool:
+    """Return whether *event* terminates, but must not start, a STRUCTURE region.
+
+    Stadium Songs normally use an ``END`` flag.  Some source files instead
+    encode the same semantic boundary as an ordinary marker named ``END``;
+    managed measure suffixes must not change that meaning.
+    """
+    name = MANAGED_MEASURE_SUFFIX.sub("", str(event.data.get("name") or "")).strip()
+    return event.source.type == "END" or (event.source.type == "MARKER" and
+                                           name.casefold() == "end")
+
+
 def structure_sublane(event: TimelineEvent) -> str:
     if event.source.type == "MARKER":
         return "pauses" if is_pause_marker(event) else "markers"
@@ -57,11 +69,6 @@ def derive_structure_layout(events: Iterable[TimelineEvent], units_for,
     ambiguous and all involved endpoints remain unmatched.
     """
     indexed = list(enumerate(events))
-    def is_end_boundary(event: TimelineEvent) -> bool:
-        name = MANAGED_MEASURE_SUFFIX.sub("", str(event.data.get("name") or "")).strip()
-        return event.source.type == "END" or (event.source.type == "MARKER" and
-                                               name.casefold() == "end")
-
     # END participates in the boundary sequence but never starts a region.  A
     # named END marker is accepted as well as Stadium's canonical END flag.
     # Keeping this policy here makes every projection share identical geometry.
@@ -71,7 +78,7 @@ def derive_structure_layout(events: Iterable[TimelineEvent], units_for,
     boundaries_and_starts.sort(key=lambda pair: (units_for(pair[1].position), pair[0]))
     regions = []
     for offset, (index, event) in enumerate(boundaries_and_starts):
-        if is_end_boundary(event):
+        if is_structure_end_boundary(event):
             continue
         start = units_for(event.position)
         end = (units_for(boundaries_and_starts[offset + 1][1].position)
