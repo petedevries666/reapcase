@@ -62,6 +62,10 @@ from .navigation import (ViewState, event_list_rows, jump_viewport_left,
 from .inspector import inspector_projection
 from .display import song_header_metadata
 from .preferences import RecentFiles, application_config_path
+from .stadium_workspace import import_backup, inspect_import, load_manifest
+from .stadium_export import analyze_build, build_package
+from .stadium_implant import (analyze_audio_update, apply_audio_update,
+                              implant_package, validate_sd_root)
 
 
 LOG = logging.getLogger(__name__)
@@ -177,6 +181,7 @@ class ReapcaseEditor(tk.Tk):
         self._ghost_waveform_image = None
         self._lane_backgrounds = LaneBackgroundCache(self)
         self.manual_audio_root = None
+        self.stadium_workspace = None
         self.audio_grid_overlay = tk.BooleanVar(value=False)
         self._waveform_pending = set()
         # A single low-duty analyzer avoids concurrent WAV scans competing with
@@ -335,6 +340,16 @@ class ReapcaseEditor(tk.Tk):
         file_menu.add_command(label="Save", command=self.save, accelerator="Ctrl+S")
         file_menu.add_command(label="Save As...", command=self.save_as,
                               accelerator="Ctrl+Shift+S")
+        file_menu.add_separator()
+        import_menu = tk.Menu(file_menu, tearoff=False)
+        import_menu.add_command(label="Import Backup from Stadium...",
+                                command=self.import_stadium_backup)
+        file_menu.add_cascade(label="Import", menu=import_menu)
+        export_menu = tk.Menu(file_menu, tearoff=False)
+        export_menu.add_command(label="Build Stadium Backup...", command=self.build_stadium_backup)
+        export_menu.add_command(label="Implant Stadium Backup...", command=self.implant_stadium_backup)
+        export_menu.add_command(label="Update Audio on Stadium SD...", command=self.update_stadium_audio)
+        file_menu.add_cascade(label="Export", menu=export_menu)
         bar.add_cascade(label="File", menu=file_menu)
         edit = tk.Menu(bar, tearoff=False)
         for label, command, shortcut in (("Undo", self.undo, "Ctrl+Z"), ("Copy", self.copy_events, "Ctrl+C"),
@@ -901,6 +916,135 @@ class ReapcaseEditor(tk.Tk):
         path = filedialog.askopenfilename(filetypes=(("JSON", "*.json"), ("All files", "*")))
         if not path: return
         self._begin_song_open(path)
+
+    def _require_stadium_workspace(self):
+        if self.stadium_workspace:
+            try:
+                load_manifest(self.stadium_workspace)
+                return Path(self.stadium_workspace)
+            except ValueError:
+                self.stadium_workspace = None
+        messagebox.showinfo("Imported workspace required",
+                            "This operation requires an imported Stadium workspace.\n\n"
+                            "Use File → Import → Import Backup from Stadium first.")
+        return None
+
+    def import_stadium_backup(self):
+        archive = filedialog.askopenfilename(title="Import Backup from Stadium",
+                                             filetypes=(("Stadium backup", "*.tar.gz"),))
+        if not archive:
+            return
+        parent = filedialog.askdirectory(title="Choose Reapcase workspace parent",
+                                         initialdir=str(Path(archive).parent))
+        if not parent:
+            return
+        try:
+            inspection = inspect_import(Path(archive))
+            from .stadium_workspace import unique_workspace
+            destination = unique_workspace(Path(parent), Path(archive))
+            review = ("IMPORT STADIUM BACKUP\n\nArchive:\n%s\n\n"
+                      "✓ archive readable\n✓ Stadium structure recognized\n"
+                      "✓ Song workspace found\n✓ Audio workspace found\n\nDestination:\n%s\n\n"
+                      "Original backup will be preserved." % (Path(archive).name, destination))
+            if not messagebox.askokcancel("Import Stadium Backup", review,
+                                          icon=messagebox.INFO, default=messagebox.CANCEL):
+                return
+            workspace = import_backup(Path(archive), Path(parent), destination=destination)
+            self.stadium_workspace = workspace
+            songs = sorted((workspace / "showcase" / "songs" / "workspace").glob("*.json"))
+            self.status.set("Imported Stadium workspace: %s" % workspace.name)
+            if songs:
+                self._begin_song_open(str(songs[0]))
+        except Exception as exc:
+            messagebox.showerror("Import failed", str(exc))
+
+    def build_stadium_backup(self):
+        workspace = self._require_stadium_workspace()
+        if not workspace:
+            return
+        try:
+            plan = analyze_build(workspace)
+            changed = [s for s in plan.songs if s.status != "UNCHANGED"]
+            details = "\n\n".join("%s — %s\n%s" %
+                                    (s.path, s.status, "\n".join(s.details)) for s in changed)
+            summary = ("BUILD STADIUM BACKUP\n\nSource: %s\nWorkspace: %s\n\nSONGS\n%s\n\n"
+                       "WILL REPLACE  %d Song JSON\nWILL ADD      %d audio files\n"
+                       "WILL REPLACE  %d audio files\nWILL DELETE   %d .peak cache files\n"
+                       "WILL PRESERVE source files conservatively\nWILL EXCLUDE  %d Reapcase-only files\n\n"
+                       "Stadium will rebuild peaks." %
+                       (plan.source.name, workspace.name, details or "All Songs unchanged",
+                        plan.song_replacements, sum(a.status == "ADDED" for a in plan.audio),
+                        sum(a.status == "CHANGED" for a in plan.audio), plan.peak_count,
+                        plan.excluded_count))
+            if not messagebox.askokcancel("Review Stadium Build", summary,
+                                          icon=messagebox.INFO, default=messagebox.CANCEL):
+                return
+            package = build_package(plan)
+            self.status.set("Verified Stadium package built: %s" % package.name)
+            if messagebox.askyesno("Build complete ✓",
+                                   "%s\n\n✓ Archive verified\n✓ Stadium structure valid\n"
+                                   "✓ Song JSON valid\n✓ Reapcase-only files excluded\n"
+                                   "✓ .peak caches removed\n\nImplant on Stadium SD now?" % package.name):
+                self.implant_stadium_backup(package)
+        except Exception as exc:
+            messagebox.showerror("Build failed", str(exc))
+
+    def implant_stadium_backup(self, package=None):
+        workspace = self._require_stadium_workspace()
+        if not workspace:
+            return
+        if package is None:
+            package = filedialog.askopenfilename(title="Choose verified Stadium package",
+                                                  filetypes=(("Stadium backup", "*.tar.gz"),))
+        if not package:
+            return
+        root = filedialog.askdirectory(title="Choose Stadium SD root")
+        if not root:
+            return
+        try:
+            validate_sd_root(Path(root))
+            destination = Path(root) / "backups" / Path(package).name
+            if not messagebox.askokcancel("Implant Stadium Backup",
+                    "IMPLANT STADIUM BACKUP\n\nStadium drive:\n%s\n\n"
+                    "✓ backups/ detected\n✓ songs/ detected\n✓ clips/ detected\n"
+                    "✓ Stadium SD recognized\n\nPackage:\n%s\n\nDestination:\n%s" %
+                    (root, Path(package).name, destination), default=messagebox.CANCEL):
+                return
+            copied = implant_package(Path(package), Path(root), workspace)
+            messagebox.showinfo("Implant complete ✓",
+                                "Package copied and verified.\n\n%s\n\n"
+                                "✓ size verified\n✓ SHA-256 verified\n\nSafe to eject the Stadium drive." % copied)
+        except Exception as exc:
+            messagebox.showerror("Implant failed", str(exc))
+
+    def update_stadium_audio(self):
+        workspace = self._require_stadium_workspace()
+        if not workspace:
+            return
+        root = filedialog.askdirectory(title="Choose Stadium SD root")
+        if not root:
+            return
+        try:
+            plan = analyze_audio_update(workspace, Path(root))
+            song_changes = [s for s in analyze_build(workspace).songs if s.status != "UNCHANGED"]
+            warning = ""
+            if song_changes:
+                warning = ("\n\n⚠ SONG CHANGES ALSO DETECTED\n%d Songs differ from the last Reapcase reference.\n"
+                           "Audio Update will NOT deploy these Song changes.\n"
+                           "Use Build Stadium Backup to deploy them." % len(song_changes))
+            review = ("UPDATE AUDIO ON STADIUM SD\n\n%d audio files will be replaced\n"
+                      "%d audio files will be added\n%d unchanged\n\nPeaks:\n"
+                      "%d Stadium .peak caches will be removed\nStadium will rebuild them%s" %
+                      (plan.changed_count, plan.added_count,
+                       sum(f.status == "UNCHANGED" for f in plan.files), plan.peak_count, warning))
+            if not messagebox.askokcancel("Review Audio Update", review, default=messagebox.CANCEL):
+                return
+            copied = apply_audio_update(plan)
+            messagebox.showinfo("Audio Update complete ✓",
+                                "%d audio files copied and SHA-256 verified.\n"
+                                "Stadium peak caches were cleared." % len(copied))
+        except Exception as exc:
+            messagebox.showerror("Audio Update failed", "Partial state may exist.\n\n%s" % exc)
 
     def _begin_song_open(self, path):
         """Start transactional Song loading; all Tk work stays in this thread."""
