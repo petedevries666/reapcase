@@ -62,9 +62,9 @@ class TimelineStyle:
 
 @dataclass(frozen=True)
 class AudioStyle:
-    background: str = "#102333"
-    background_highlight: str = "#132a3c"
-    clip: str = "#294d69"
+    background: str = "#151d25"
+    background_highlight: str = "#1b2630"
+    clip: str = "#2b4558"
     clip_outline: str = "#6590b3"
     missing_clip: str = "#3a303d"
     missing_outline: str = "#a76e7c"

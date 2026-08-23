@@ -57,14 +57,25 @@ def derive_structure_layout(events: Iterable[TimelineEvent], units_for,
     ambiguous and all involved endpoints remain unmatched.
     """
     indexed = list(enumerate(events))
-    ordinary = [(i, e) for i, e in indexed
-                if e.source.type == "MARKER" and not is_pause_marker(e)]
-    ordinary.sort(key=lambda pair: (units_for(pair[1].position), pair[0]))
+    def is_end_boundary(event: TimelineEvent) -> bool:
+        name = MANAGED_MEASURE_SUFFIX.sub("", str(event.data.get("name") or "")).strip()
+        return event.source.type == "END" or (event.source.type == "MARKER" and
+                                               name.casefold() == "end")
+
+    # END participates in the boundary sequence but never starts a region.  A
+    # named END marker is accepted as well as Stadium's canonical END flag.
+    # Keeping this policy here makes every projection share identical geometry.
+    boundaries_and_starts = [(i, e) for i, e in indexed
+                             if ((e.source.type == "MARKER" and not is_pause_marker(e))
+                                 or e.source.type == "END")]
+    boundaries_and_starts.sort(key=lambda pair: (units_for(pair[1].position), pair[0]))
     regions = []
-    for offset, (index, event) in enumerate(ordinary):
+    for offset, (index, event) in enumerate(boundaries_and_starts):
+        if is_end_boundary(event):
+            continue
         start = units_for(event.position)
-        end = (units_for(ordinary[offset + 1][1].position)
-               if offset + 1 < len(ordinary) else song_end_units)
+        end = (units_for(boundaries_and_starts[offset + 1][1].position)
+               if offset + 1 < len(boundaries_and_starts) else song_end_units)
         regions.append(StructureRegion("marker", start, max(start, end),
                                        str(event.data.get("name") or "MARKER"), (index,)))
 

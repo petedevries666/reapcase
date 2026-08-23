@@ -2,11 +2,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from stadium_reaper_bridge.editor.app import ReapcaseEditor
+from stadium_reaper_bridge.editor.app import MARKER_MANAGER_COLUMNS, ReapcaseEditor
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.editor.navigation import adjacent_structure_region_index
 from stadium_reaper_bridge.editor.preferences import RecentFiles
 from stadium_reaper_bridge.editor.structure import is_pause_marker
+from stadium_reaper_bridge.editor.style import LANE_PALETTE, lane_colors
 
 
 def test_recent_files_are_bounded_deduplicated_named_and_independent(tmp_path):
@@ -109,6 +110,63 @@ def test_global_workflow_shortcuts_ignore_text_inputs_and_dialogs():
     assert ReapcaseEditor._global_editor_shortcut(
         editor, dialog_event, lambda: calls.append("dialog")) is None
     assert calls == []
+
+
+def test_marker_manager_toggle_reuses_one_docked_panel():
+    class Variable:
+        value = False
+        def get(self): return self.value
+        def set(self, value): self.value = value
+
+    calls = []
+    editor = SimpleNamespace(marker_manager_visible=Variable(),
+                             apply_sidebar_visibility=lambda: calls.append("layout"))
+    ReapcaseEditor.toggle_marker_manager(editor)
+    assert editor.marker_manager_visible.get() is True
+    ReapcaseEditor.toggle_marker_manager(editor)
+    assert editor.marker_manager_visible.get() is False
+    assert calls == ["layout", "layout"]
+    assert not hasattr(editor, "_manager_windows")  # no popup or duplicate is created
+
+
+def test_marker_manager_columns_are_compact_and_semantic_colors_are_centralized():
+    assert MARKER_MANAGER_COLUMNS == ("kind", "name")
+    assert "position" not in MARKER_MANAGER_COLUMNS
+    assert "end" not in MARKER_MANAGER_COLUMNS
+    for lane in LANE_PALETTE:
+        palette = lane_colors(lane)
+        assert palette.background_highlight.startswith("#")
+        assert palette.text.startswith("#")
+
+
+def test_sidebar_visibility_states_and_stacking():
+    class Variable:
+        def __init__(self, value): self.value = value
+        def get(self): return self.value
+
+    class Widget:
+        def __init__(self): self.visible = False; self.rows = {}
+        def grid(self, **_kwargs): self.visible = True
+        def grid_forget(self): self.visible = False
+        def rowconfigure(self, row, **kwargs): self.rows[row] = kwargs
+        def columnconfigure(self, *_args, **_kwargs): pass
+
+    for inspector, manager, expected_sidebar in (
+            (True, False, True), (False, True, True), (True, True, True),
+            (False, False, False)):
+        sidebar, inspector_panel, manager_panel = Widget(), Widget(), Widget()
+        editor = SimpleNamespace(
+            inspector_visible=Variable(inspector), marker_manager_visible=Variable(manager),
+            right_sidebar=sidebar, main_content=Widget(), inspector=inspector_panel,
+            marker_manager=manager_panel, _refresh_inspector=lambda: None,
+            _refresh_marker_manager=lambda: None)
+        ReapcaseEditor.apply_sidebar_visibility(editor)
+        assert sidebar.visible is expected_sidebar
+        assert inspector_panel.visible is inspector
+        assert manager_panel.visible is manager
+        if inspector and manager:
+            assert sidebar.rows[0]["weight"] == 35
+            assert sidebar.rows[1]["weight"] == 65
 
 
 def test_event_list_navigation_preserves_complete_multi_selection():

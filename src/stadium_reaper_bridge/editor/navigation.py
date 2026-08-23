@@ -128,6 +128,7 @@ class MarkerRegionRow:
     kind: str
     name: str
     end: str = ""
+    lane: str = "STRUCTURE"
 
 
 def marker_region_rows(model) -> tuple[MarkerRegionRow, ...]:
@@ -144,14 +145,17 @@ def marker_region_rows(model) -> tuple[MarkerRegionRow, ...]:
         if kind == "CYCLE_END" and pending:
             start_index, start, start_units = pending
             rows.append(MarkerRegionRow((start_index, index), start_units,
-                start.position.render(), "CYCLE", badge_text(start), f"→ {position}"))
+                start.position.render(), "CYCLE", badge_text(start), f"→ {position}",
+                model.lane(start)))
             pending = None
             continue
         display_kind = "PAUSE" if kind == "MARKER" and is_pause_marker(event) else kind
-        rows.append(MarkerRegionRow((index,), units, position, display_kind, badge_text(event)))
+        rows.append(MarkerRegionRow((index,), units, position, display_kind, badge_text(event),
+                                    lane=model.lane(event)))
     if pending:
         index, event, units = pending
-        rows.append(MarkerRegionRow((index,), units, event.position.render(), "CYCLE", badge_text(event)))
+        rows.append(MarkerRegionRow((index,), units, event.position.render(), "CYCLE", badge_text(event),
+                                    lane=model.lane(event)))
     return tuple(sorted(rows, key=lambda row: row.units))
 
 
