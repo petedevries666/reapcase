@@ -90,3 +90,9 @@ workspace, output archive, backup already on SD, or source archive. V1 has no im
 deletion. Cancellation is offered before atomic apply stages; errors report possible partial audio
 state rather than claiming success. Reapcase cannot determine whether a copied backup was later
 restored on the Stadium, and currently recognizes only the documented unambiguous SD audio layouts.
+
+Archive scans, extraction, Song/audio comparison, hashing, package creation and verification, SD
+copying, and direct Audio Update run serially on a dedicated migration worker. Modal phase windows
+keep the Tk event loop responsive and prevent concurrent migration operations. Worker results are
+polled and rendered only by the Tk thread; closing Reapcase disables dispatch without falsely
+claiming that an already-running atomic filesystem stage was cancelled.

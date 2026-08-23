@@ -38,6 +38,7 @@ class FileChange:
 @dataclass(frozen=True)
 class SongChange:
     path: str
+    name: str
     status: str
     details: Tuple[str, ...]
 
@@ -151,7 +152,8 @@ def analyze_build(workspace: Path) -> BuildPlan:
         data = json.loads(path.read_text(encoding="utf-8"))
         key = (SONG_ROOT / relative).as_posix()
         old = baseline.get(key)
-        songs.append(SongChange(relative, "ADDED" if old is None else
+        songs.append(SongChange(relative, str(data.get("name") or Path(relative).stem),
+                                "ADDED" if old is None else
                                 ("UNCHANGED" if old == data else "CHANGED"),
                                 () if old == data else semantic_song_diff(old or {}, data)))
     # Audio delta is against the canonical extracted source during build; absent WIP files remain preserved.

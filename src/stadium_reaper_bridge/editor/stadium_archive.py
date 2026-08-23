@@ -43,8 +43,12 @@ def inspect_archive(path: Path, *, require_no_peaks: bool = False,
     try:
         with tarfile.open(str(path), "r:gz") as archive:
             names = []
+            seen = set()
             for member in archive.getmembers():
                 name = _safe_name(member.name)
+                if name in seen:
+                    raise StadiumArchiveError("duplicate archive member is ambiguous: %s" % name)
+                seen.add(name)
                 if member.issym() or member.islnk():
                     raise StadiumArchiveError("links are not permitted: %s" % name)
                 if not (member.isfile() or member.isdir()):

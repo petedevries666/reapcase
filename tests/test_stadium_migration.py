@@ -90,6 +90,18 @@ def test_symlink_rejected_and_existing_names_are_unique(tmp_path):
     assert unique_workspace(tmp_path, archive).name == "x_wip_2"
 
 
+def test_duplicate_normalized_archive_member_is_rejected(tmp_path):
+    path = tmp_path / "duplicate.tar.gz"
+    with tarfile.open(path, "w:gz") as tar:
+        for directory in DIRS:
+            info = tarfile.TarInfo(directory); info.type = tarfile.DIRTYPE; tar.addfile(info)
+        for content in (b"first", b"second"):
+            info = tarfile.TarInfo("showcase/songs/workspace/332.json")
+            info.size = len(content); tar.addfile(info, io.BytesIO(content))
+    with pytest.raises(StadiumArchiveError, match="duplicate archive member"):
+        inspect_archive(path)
+
+
 def test_missing_wip_file_does_not_delete_source_and_existing_sd_copy_refused(tmp_path):
     source = tmp_path / "source.tar.gz"
     make_backup(source, {"songs/workspace/Audio/shared/OTHER.wav": b"preserved"})
