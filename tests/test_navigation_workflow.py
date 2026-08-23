@@ -1,3 +1,4 @@
+import ast
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -154,6 +155,59 @@ def test_global_workflow_shortcuts_ignore_text_inputs_and_dialogs():
     assert ReapcaseEditor._global_editor_shortcut(
         editor, dialog_event, lambda: calls.append("dialog")) is None
     assert calls == []
+
+
+def test_timeline_arrow_shortcuts_delegate_only_from_canvas():
+    """The routing layer invokes the supplied canonical command, not its own algorithm."""
+    calls = []
+    canvas = ShortcutWidget("Canvas", None)
+    editor = SimpleNamespace(canvas=canvas)
+    event = SimpleNamespace(widget=canvas)
+    assert ReapcaseEditor._editor_shortcut(
+        editor, event, lambda direction: calls.append(direction), 1) == "break"
+    for widget_class in ("Entry", "Text", "TSpinbox", "TCombobox", "Treeview"):
+        event = SimpleNamespace(widget=ShortcutWidget(widget_class, editor))
+        assert ReapcaseEditor._editor_shortcut(
+            editor, event, lambda direction: calls.append(direction), -1) is None
+    dialog_event = SimpleNamespace(widget=ShortcutWidget("Canvas", object()))
+    assert ReapcaseEditor._editor_shortcut(
+        editor, dialog_event, lambda direction: calls.append(direction), -1) is None
+    assert calls == [1]
+
+
+def test_arrow_and_file_bindings_use_existing_editor_commands():
+    source = Path("src/stadium_reaper_bridge/editor/app.py").read_text(encoding="utf-8")
+    expected_bindings = {
+        'self.bind_all("<Left>", lambda e: self._editor_shortcut(e, self.navigate_region, -1))',
+        'self.bind_all("<Right>", lambda e: self._editor_shortcut(e, self.navigate_region, 1))',
+        'self.bind_all("<Up>", lambda e: self._editor_shortcut(e, self.zoom_step, 1.25))',
+        'self.bind_all("<Down>", lambda e: self._editor_shortcut(e, self.zoom_step, 1 / 1.25))',
+        'self.bind_all("<Control-o>", lambda e: self._global_editor_shortcut(e, self.open_json))',
+        'self.bind_all("<Control-s>", lambda e: self._global_editor_shortcut(e, self.save))',
+    }
+    assert expected_bindings <= {line.strip() for line in source.splitlines()}
+    assert 'self.bind_all("<Control-Shift-Key-S>",' in source
+
+    # Guard against an arrow callback growing a second navigation/zoom path.
+    tree = ast.parse(source)
+    editor = next(node for node in tree.body
+                  if isinstance(node, ast.ClassDef) and node.name == "ReapcaseEditor")
+    build_menu = next(node for node in editor.body
+                      if isinstance(node, ast.FunctionDef) and node.name == "_build_menu")
+    arrow_bindings = [node for node in ast.walk(build_menu) if isinstance(node, ast.Call)
+                      and isinstance(node.func, ast.Attribute)
+                      and node.func.attr == "bind_all" and node.args
+                      and isinstance(node.args[0], ast.Constant)
+                      and node.args[0].value in {"<Left>", "<Right>", "<Up>", "<Down>"}]
+    assert len(arrow_bindings) == 4
+    assert all(isinstance(binding.args[1], ast.Lambda) for binding in arrow_bindings)
+
+
+def test_file_menu_displays_standard_accelerators():
+    source = Path("src/stadium_reaper_bridge/editor/app.py").read_text(encoding="utf-8")
+    assert 'label="Open...", command=self.open_json, accelerator="Ctrl+O"' in source
+    assert 'label="Save", command=self.save, accelerator="Ctrl+S"' in source
+    assert 'accelerator="Ctrl+Shift+S"' in source
 
 
 def test_marker_manager_toggle_reuses_one_docked_panel():
