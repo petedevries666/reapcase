@@ -116,8 +116,6 @@ class EditorModel:
         candidate = cls(song, path, decoder, resolve_audio_on_init=False)
         progress("Resolving audio…")
         candidate.resolve_audio(audio_root)
-        if candidate._normalize_structure_labels():
-            candidate._structural_edits += 1
         progress("Preparing views…")
         # Force the projections used immediately by the UI while still on the
         # worker; their results remain derived, not serialized state.
