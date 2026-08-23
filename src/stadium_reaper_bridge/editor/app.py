@@ -23,7 +23,7 @@ from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_H
                      drag_units, fit_range_scale, fit_song_scale, horizontal_wheel_units,
                      marquee_candidates, normalized_rectangle, snap_drag_delta,
                      snapped_units_at_x, timeline_x, units_at_x,
-                     zoom_about_cursor)
+                     is_major_display_bar, timeline_grid_density, zoom_about_cursor)
 from .looper import derive_looper_regions, looper_display_label
 from .lighting import (HIT_PRESETS, STATE_PRESETS, LightingKind,
                        create_lighting_event, derive_lighting_regions)
@@ -1178,12 +1178,23 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.create_line(0, 0, 0, 0, tags=("ghost-foreground-anchor",))
         grid_started = time.perf_counter() if self._waveform_perf.enabled else 0.0
         grid_end = m.song_end_units + 2 * m.song.ppqn
-        for point in m.timing_map.iter_beats(0, grid_end):
+        visible_left = self.canvas.canvasx(0)
+        visible_right = visible_left + max(1, self.canvas.winfo_width())
+        grid_start_units = units_at_x(visible_left, m.song.ppqn, self.pixels_per_beat)
+        grid_visible_end = min(grid_end, units_at_x(visible_right, m.song.ppqn,
+                                                    self.pixels_per_beat))
+        shortest_bar = m.timing_map.minimum_beats_per_bar(grid_start_units,
+                                                          grid_visible_end)
+        density = timeline_grid_density(self.pixels_per_beat, shortest_bar)
+        points = (m.timing_map.iter_beats(grid_start_units, grid_visible_end)
+                  if density.show_beats else
+                  m.timing_map.iter_bars(grid_start_units, grid_visible_end))
+        for point in points:
             bar, beat = point.position.bar, point.position.beat
-            x = timeline_x(point.units, m.song.ppqn, self.pixels_per_beat)
             prominent = point.is_bar
-            if not prominent and self.pixels_per_beat < 28:
+            if prominent and not is_major_display_bar(bar, density):
                 continue
+            x = timeline_x(point.units, m.song.ppqn, self.pixels_per_beat)
             self.canvas.create_line(x, RULER_HEIGHT, x, height, fill=TIMELINE.grid_bar if prominent else TIMELINE.grid_beat, width=2 if prominent else 1)
             self.canvas.create_line(x, 17 if prominent else 21, x, RULER_HEIGHT,
                                     fill=TIMELINE.ruler_bar if prominent else TIMELINE.ruler_beat)

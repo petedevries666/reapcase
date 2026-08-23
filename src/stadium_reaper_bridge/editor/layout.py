@@ -16,6 +16,38 @@ DEFAULT_PIXELS_PER_BEAT = 90.0
 # timeline (plus breathing room) to fit in the editor's standard 1180px window.
 MIN_PIXELS_PER_BEAT = 1.0
 MAX_PIXELS_PER_BEAT = 360.0
+GRID_MAJOR_MIN_SPACING = 56.0
+GRID_BEAT_MIN_SPACING = 28.0
+
+
+@dataclass(frozen=True)
+class TimelineGridDensity:
+    """Visual grid resolution, independent of the editor's snap setting."""
+
+    show_beats: bool
+    bar_stride: int
+
+
+def timeline_grid_density(pixels_per_beat: float, beats_per_bar: int,
+                          minimum_spacing: float = GRID_MAJOR_MIN_SPACING) -> TimelineGridDensity:
+    """Choose a musically aligned display bucket for the current screen scale.
+
+    ``beats_per_bar`` should be the shortest signature visible in the viewport,
+    so even the closest major lines retain approximately ``minimum_spacing``.
+    """
+    bar_pixels = pixels_per_beat * beats_per_bar
+    stride = 16
+    for candidate in (1, 2, 4, 8, 16):
+        if bar_pixels * candidate >= minimum_spacing:
+            stride = candidate
+            break
+    return TimelineGridDensity(pixels_per_beat >= GRID_BEAT_MIN_SPACING and stride == 1,
+                               stride)
+
+
+def is_major_display_bar(bar: int, density: TimelineGridDensity) -> bool:
+    """Keep coarse lines anchored at measure 1 (1, 5, 9 ... for stride 4)."""
+    return (bar - 1) % density.bar_stride == 0
 
 
 def x_for_position(position, ppqn: int, beats_per_bar: int, pixels_per_beat: float) -> float:

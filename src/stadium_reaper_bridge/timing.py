@@ -149,6 +149,14 @@ class TimingMap:
         item = self._signatures[self._signature_index_for_bar(bar)]
         return item[1], item[2]
 
+    def minimum_beats_per_bar(self, start_units: int, end_units: int) -> int:
+        """Return the shortest bar in a unit range without walking every bar."""
+        start_bar = self.units_to_position(max(0, start_units)).bar
+        end_bar = self.units_to_position(max(0, end_units)).bar
+        start_index = self._signature_index_for_bar(start_bar)
+        end_index = self._signature_index_for_bar(end_bar)
+        return min(item[1] for item in self._signatures[start_index:end_index + 1])
+
     def signature_at_position(self, position: MusicalPosition) -> tuple[int, int]:
         self.position_to_units(position)  # validation
         item = self._signatures[self._signature_index_for_bar(position.bar)]
