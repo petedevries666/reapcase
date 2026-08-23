@@ -103,7 +103,10 @@ def update_second_helix_preset(event: TimelineEvent, *, bank_msb: Optional[int],
     for index, name, value in ((5, "Bank MSB", bank_msb), (6, "Bank LSB", bank_lsb)):
         fields[index] = "Off" if value is None else str(_integer(name, value, 0, 127))
     program = _integer("Program", program, 0, 127)
-    fields[1], fields[7] = f"BASS PRESET {program}", str(program)
+    # The display label is user-authored metadata, not part of the Program
+    # Change command.  Preserve it (and every unknown trailing field) while
+    # changing only the four proven semantic MIDI fields.
+    fields[7] = str(program)
     return _replace_flag(event, fields)
 
 
@@ -147,15 +150,17 @@ def editor_for_event(event: TimelineEvent, model) -> Optional[EditCapability]:
         return EditCapability("stadium_looper", "EDIT STADIUM LOOPER",
                               {"action": data["action"]}, update_stadium_looper)
     if kind == "MIDI_BANK_PROGRAM" and model.lane(event) == "SECOND HELIX":
-        return EditCapability("helix_preset", "EDIT SECOND HELIX PRESET", dict(data),
+        values = {key: data[key] for key in ("channel", "bank_msb", "bank_lsb", "program")}
+        return EditCapability("helix_preset", "EDIT SECOND HELIX PRESET", values,
                               update_second_helix_preset)
     if kind != "MIDI_CC":
         return None
-    if alias and alias.get("system") == "second_helix":
+    if (alias and alias.get("system") == "second_helix"
+            and isinstance(alias.get("action"), str)):
         values = {**alias, "channel": data["channel"]}
         return EditCapability("helix_" + alias["action"], "EDIT SECOND HELIX " + alias["action"].upper(),
                               values, update_second_helix)
-    if alias and alias.get("system") == "video":
+    if alias and alias.get("system") == "video" and isinstance(alias.get("action"), str):
         return EditCapability("video", "EDIT VIDEO COMMAND", {**alias, "channel": data["channel"]},
                               update_second_helix)
     return EditCapability("midi_cc", "EDIT MIDI CC", {k: data[k] for k in ("channel", "cc", "value")},
@@ -166,7 +171,14 @@ def apply_semantic_edit(event: TimelineEvent, model, capability: EditCapability,
                         values: dict[str, Any]) -> TimelineEvent:
     """Apply a descriptor without leaking family switches into Tk callbacks."""
     family = capability.family
-    if family.startswith("helix_"):
+    # MIDI_BANK_PROGRAM has Helix in its UI family name, but it is not an
+    # alias-decoded MIDI_CC action.  Dispatch it directly to its proven
+    # channel/bank/program editor before considering action-based commands.
+    if family == "helix_preset":
+        clean = {k: v for k, v in values.items() if k != "context"}
+        return capability.apply(event, **clean)
+    if family in {"helix_snapshot", "helix_expression"} or (
+            family.startswith("helix_") and "action" in values):
         action = values["action"]
         command = {k: v for k, v in values.items() if k not in {"channel", "context"}}
         if action == "snapshot":

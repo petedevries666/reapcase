@@ -68,6 +68,70 @@ class SemanticEditingTests(unittest.TestCase):
                        {"channel": 1, "cc": 1, "value": -1}):
             with self.assertRaises(ValueError): update_midi_cc(event, **values)
 
+    def test_second_helix_program_change_editor_noop_and_lossless_edits(self):
+        fixture = "001-03.001|MIDI_BANK_PROGRAM;BASS PRG;5;Bank/Prog;3;Off;Off;3"
+        with TemporaryDirectory() as directory:
+            model = self.model([fixture], directory)
+            capability = model.edit_capability(0)
+            self.assertIsNotNone(capability)
+            self.assertEqual(capability.family, "helix_preset")
+            self.assertEqual(capability.values, {"channel": 3, "bank_msb": None,
+                "bank_lsb": None, "program": 3})
+
+            # Saving the form without changing it is a successful no-op.
+            self.assertFalse(model.edit_event(0, dict(capability.values)))
+            self.assertEqual(model.timeline.events[0].source.render(), fixture)
+
+            changed = dict(capability.values, program=17)
+            self.assertTrue(model.edit_event(0, changed))
+            self.assertEqual(model.timeline.events[0].source.render(),
+                "001-03.001|MIDI_BANK_PROGRAM;BASS PRG;5;Bank/Prog;3;Off;Off;17")
+
+    def test_second_helix_program_change_banks_and_song_document_round_trip(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "song.json"
+            document = {"name": "x", "ppqn": 240, "params": "opaque",
+                "flags": ["001-03.001|MIDI_BANK_PROGRAM;BASS PRG;5;Bank/Prog;3;1;2;3;future"],
+                "tracks": [], "future": {"nested": [1, {"keep": True}]}}
+            path.write_text(json.dumps(document), encoding="utf-8")
+            model = EditorModel.open(path, ROOT / "config/rig_midi.json")
+            values = dict(model.edit_capability(0).values)
+            self.assertEqual((values["bank_msb"], values["bank_lsb"]), (1, 2))
+            self.assertTrue(model.edit_event(0, dict(values, bank_msb=None, bank_lsb=None)))
+            self.assertEqual(model.timeline.events[0].source.fields[5:9],
+                             ("Off", "Off", "3", "future"))
+            self.assertTrue(model.edit_event(0, dict(values, bank_msb=12, bank_lsb=34)))
+            self.assertEqual(model.timeline.events[0].source.fields[5:9],
+                             ("12", "34", "3", "future"))
+            output = Path(directory) / "edited.json"
+            model.save_as(output)
+            saved = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(saved["future"], document["future"])
+            self.assertEqual(saved["params"], "opaque")
+            reopened = EditorModel.open(output, ROOT / "config/rig_midi.json")
+            self.assertEqual((reopened.timeline.events[0].data["bank_msb"],
+                              reopened.timeline.events[0].data["bank_lsb"]), (12, 34))
+
+    def test_second_helix_action_editors_still_dispatch_by_action(self):
+        with TemporaryDirectory() as directory:
+            flags = [
+                "001-01.001|MIDI_CC;BASS SNAP 2;4;CC;3;69;1",
+                "002-01.001|MIDI_CC;BASS PLAY;4;CC;3;61;127",
+                "003-01.001|MIDI_CC;EXP1 100%;4;CC;3;1;127",
+            ]
+            model = self.model(flags, directory)
+            for index in range(3):
+                capability = model.edit_capability(index)
+                self.assertIsNotNone(capability)
+                self.assertTrue(capability.family.startswith("helix_"))
+                # Reapplying decoded values proves action routing remains valid.
+                self.assertFalse(model.edit_event(index, dict(capability.values)))
+
+            malformed_alias = model.timeline.events[0]
+            malformed_alias.data["rig_alias"] = {"system": "second_helix"}
+            capability = editor_for_event(malformed_alias, model)
+            self.assertEqual(capability.family, "midi_cc")
+
     def test_protected_events_have_no_editor(self):
         with TemporaryDirectory() as directory:
             model = self.model(["001-01.001|START;;9;120;0;4;4;Off;true;S;P;Snap 1",
