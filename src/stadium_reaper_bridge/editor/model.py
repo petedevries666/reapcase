@@ -210,7 +210,10 @@ class EditorModel:
         return candidate
 
     def lane_counts(self) -> dict[str, int]:
-        return {lane: sum(self.lane(e) == lane for e in self.timeline.events) for lane in EVENT_LANES}
+        counts = dict.fromkeys(EVENT_LANES, 0)
+        for event in self.timeline.events:
+            counts[self.lane(event)] += 1
+        return counts
 
     def resolve_audio(self, root: Optional[Union[str, Path]] = None) -> set[Path]:
         """Resolve audio and return files whose identity changed since the last scan."""
