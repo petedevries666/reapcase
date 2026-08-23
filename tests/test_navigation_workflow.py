@@ -6,7 +6,8 @@ from types import SimpleNamespace
 from stadium_reaper_bridge.editor.app import MARKER_MANAGER_COLUMNS, ReapcaseEditor
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.editor.navigation import (
-    adjacent_structure_region_index, marker_region_rows, structure_region_indices)
+    adjacent_structure_region_index, marker_flag_manager_rows, marker_region_rows,
+    structure_manager_rows, structure_region_indices)
 from stadium_reaper_bridge.editor.preferences import RecentFiles
 from stadium_reaper_bridge.editor.structure import is_pause_marker
 from stadium_reaper_bridge.editor.style import LANE_PALETTE, lane_colors
@@ -84,7 +85,7 @@ def test_named_end_is_not_a_navigable_structure_region(tmp_path):
         model, model._units(model.timeline.events[named_end].position), -1) == verse
 
 
-def test_marker_manager_projects_structure_and_canonical_looper_regions(tmp_path):
+def test_manager_projections_separate_structure_from_editable_flags(tmp_path):
     song = tmp_path / "semantic-regions.json"
     song.write_text(json.dumps({
         "name": "Semantic Regions", "ppqn": 240, "params": None, "tracks": [],
@@ -97,14 +98,64 @@ def test_marker_manager_projects_structure_and_canonical_looper_regions(tmp_path
             "009-01.001|MIDI_CC;BASS STOP;4;CC;3;61;0",
             "013-01.001|END;;5;Off;8.0;Pause;Off;2.0",
         ]}))
-    rows = marker_region_rows(EditorModel.open(song))
-    regions = {(row.kind, row.name): row for row in rows}
+    model = EditorModel.open(song)
+    rows = structure_manager_rows(model)
+    flags = marker_flag_manager_rows(model)
 
-    assert any(row.lane == "STRUCTURE" for row in rows)
-    assert regions[("LOOPER REGION", "RECORD")].lane == "STADIUM"
-    assert regions[("LOOPER REGION", "PLAY")].lane == "SECOND HELIX"
+    assert rows and {row.lane for row in rows} == {"STRUCTURE"}
+    assert "REGION" in {row.kind for row in rows}
+    assert {row.lane for row in flags} == {"STADIUM", "SECOND HELIX"}
+    assert {row.name for row in flags} >= {"LOOPER RECORD", "BASS PLAY"}
+    assert not any("REGION" in row.kind for row in flags)
     for lane in ("STRUCTURE", "STADIUM", "SECOND HELIX"):
         assert lane_colors(lane) is LANE_PALETTE[lane]
+
+
+def test_marker_flag_filters_use_canonical_lanes_without_mutating_model():
+    model = EditorModel.open(Path("tests/fixtures/wanna_be_429.json"))
+    before = tuple((event.source.payload, event.position) for event in model.timeline.events)
+    all_rows = marker_flag_manager_rows(model)
+    stadium = marker_flag_manager_rows(model, {"STADIUM"})
+    midi = marker_flag_manager_rows(model, {"MIDI / OTHER"})
+
+    assert all_rows and stadium
+    assert {row.lane for row in stadium} == {"STADIUM"}
+    assert midi == ()  # displayed labels cannot leak another lane into this filter
+    assert len(stadium) < len(all_rows)
+    assert tuple((event.source.payload, event.position) for event in model.timeline.events) == before
+
+
+def test_marker_flag_manager_excludes_non_editable_technical_event(tmp_path):
+    song = tmp_path / "technical-event.json"
+    song.write_text(json.dumps({
+        "name": "Technical Event", "ppqn": 240, "params": None, "tracks": [],
+        "flags": [
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "002-01.001|DIAGNOSTIC;INTERNAL;1;Do not edit",
+            "003-01.001|MIDI_CC;USER CONTROL;4;CC;1;20;64",
+            "004-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ]}))
+    model = EditorModel.open(song)
+
+    assert any(event.source.type == "DIAGNOSTIC" for event in model.timeline.events)
+    rows = marker_flag_manager_rows(model)
+    assert {model.timeline.events[row.indices[0]].source.type for row in rows} == {"MIDI_CC"}
+
+
+def test_both_manager_selections_delegate_to_canonical_jump():
+    class Tree:
+        def selection(self): return ("row",)
+
+    row = SimpleNamespace(units=960, indices=(7,))
+    calls = []
+    editor = SimpleNamespace(
+        marker_tree=Tree(), _marker_rows={"row": row},
+        marker_flag_tree=Tree(), _marker_flag_rows={"row": row},
+        jump_to_units=lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    ReapcaseEditor._marker_manager_selected(editor)
+    ReapcaseEditor._marker_flag_manager_selected(editor)
+    assert calls == [((960,), {"select_index": 7}), ((960,), {"select_index": 7})]
 
 
 def test_shared_jump_updates_cursor_seeks_selects_and_can_defer_reveal(monkeypatch):
@@ -263,8 +314,8 @@ def test_sidebar_visibility_states_and_stacking():
         assert inspector_panel.visible is inspector
         assert manager_panel.visible is manager
         if inspector and manager:
-            assert sidebar.rows[0]["weight"] == 35
-            assert sidebar.rows[1]["weight"] == 65
+            assert sidebar.rows[0]["weight"] == 1
+            assert sidebar.rows[1]["weight"] == 1
 
 
 def test_event_list_navigation_preserves_complete_multi_selection():

@@ -57,7 +57,8 @@ from .navigation import (ViewState, event_list_rows, jump_viewport_left,
                          adjacent_structure_region_index, default_lane_visibility,
                          focused_lane_visibility,
                          ghost_waveform_lane_bounds,
-                         marker_region_rows, move_visible_lane,
+                         marker_flag_manager_rows, move_visible_lane,
+                         structure_manager_rows,
                          normalized_lane_order, visible_lane_layout)
 from .inspector import inspector_projection
 from .display import song_header_metadata
@@ -71,6 +72,7 @@ from .background_operations import BackgroundOperations
 
 LOG = logging.getLogger(__name__)
 MARKER_MANAGER_COLUMNS = ("kind", "name")
+MARKER_FLAG_FILTER_LANES = ("STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER")
 
 
 class Tooltip:
@@ -129,6 +131,9 @@ class ReapcaseEditor(tk.Tk):
         self.current_view = tk.StringVar(value="timeline")
         self.inspector_visible = tk.BooleanVar(value=False)
         self.marker_manager_visible = tk.BooleanVar(value=False)
+        self.marker_flag_manager_visible = tk.BooleanVar(value=False)
+        self.marker_flag_filters = {lane: tk.BooleanVar(value=True)
+                                    for lane in MARKER_FLAG_FILTER_LANES}
         self.full_song_ghost_visible = tk.BooleanVar(value=False)
         self._lane_focus: Optional[str] = None
         self._focus_visibility: Optional[dict[str, bool]] = None
@@ -312,7 +317,7 @@ class ReapcaseEditor(tk.Tk):
         self.inspector_fields = ttk.Frame(self.inspector); self.inspector_fields.pack(fill="both", expand=True)
         ttk.Button(self.inspector, text="Edit…", command=self._inspector_edit).pack(anchor="e", pady=(8, 0))
         self.marker_manager = ttk.LabelFrame(
-            self.right_sidebar, text="MARKER / REGION MANAGER", padding=6)
+            self.right_sidebar, text="STRUCTURE MANAGER", padding=6)
         self.marker_tree = ttk.Treeview(
             self.marker_manager, columns=MARKER_MANAGER_COLUMNS, show="headings",
             selectmode="browse", style=REAPCASE_TREEVIEW_STYLE)
@@ -331,6 +336,31 @@ class ReapcaseEditor(tk.Tk):
         self.marker_tree.bind("<<TreeviewSelect>>", self._marker_manager_selected)
         ttk.Button(self.marker_manager, text="Jump", command=self._marker_manager_selected).grid(
             row=1, column=0, columnspan=2, pady=(6, 0))
+        self.marker_flag_manager = ttk.LabelFrame(
+            self.right_sidebar, text="MARKER & FLAG MANAGER", padding=6)
+        filters = ttk.Frame(self.marker_flag_manager)
+        filters.grid(row=0, column=0, columnspan=2, sticky="ew")
+        filter_labels = ("Stadium", "Second Helix", "Video", "Lights", "Midi / Others")
+        for number, (lane, label) in enumerate(zip(MARKER_FLAG_FILTER_LANES, filter_labels)):
+            ttk.Checkbutton(filters, text=label, variable=self.marker_flag_filters[lane],
+                            command=self._refresh_marker_flag_manager).grid(
+                                row=number // 3, column=number % 3, sticky="w", padx=(0, 5))
+        self.marker_flag_tree = ttk.Treeview(
+            self.marker_flag_manager, columns=MARKER_MANAGER_COLUMNS, show="headings",
+            selectmode="browse", style=REAPCASE_TREEVIEW_STYLE)
+        for column, title, width in (("kind", "Lane", 110), ("name", "Name", 160)):
+            self.marker_flag_tree.heading(column, text=title)
+            self.marker_flag_tree.column(column, width=width, minwidth=70, anchor="w",
+                                         stretch=column == "name")
+        flag_scroll = ttk.Scrollbar(self.marker_flag_manager, orient="vertical",
+                                    command=self.marker_flag_tree.yview)
+        self.marker_flag_tree.configure(yscrollcommand=flag_scroll.set)
+        self.marker_flag_tree.grid(row=1, column=0, sticky="nsew")
+        flag_scroll.grid(row=1, column=1, sticky="ns")
+        self.marker_flag_manager.rowconfigure(1, weight=1)
+        self.marker_flag_manager.columnconfigure(0, weight=1)
+        self._marker_flag_rows = {}
+        self.marker_flag_tree.bind("<<TreeviewSelect>>", self._marker_flag_manager_selected)
         self._update_zoom_label()
         ttk.Label(self, textvariable=self.status, style="Status.TLabel", anchor="w", padding=5).pack(fill="x")
 
@@ -380,9 +410,12 @@ class ReapcaseEditor(tk.Tk):
                              command=self.toggle_full_song_ghost, accelerator="Ctrl+G")
         view.add_command(label="Lane Manager...", command=self.toggle_lane_manager, accelerator="Ctrl+L")
         view.add_command(label="Track Manager...", command=self.toggle_track_manager, accelerator="Ctrl+M")
-        view.add_checkbutton(label="Marker / Region Manager...",
+        view.add_checkbutton(label="Structure Manager",
                              variable=self.marker_manager_visible,
                              command=self.apply_sidebar_visibility, accelerator="Ctrl+R")
+        view.add_checkbutton(label="Marker & Flag Manager",
+                             variable=self.marker_flag_manager_visible,
+                             command=self.apply_sidebar_visibility)
         view.add_separator()
         view.add_command(label="Zoom Entire Song", command=self.fit_song, accelerator="F")
         view.add_command(label="Zoom to Selection", command=self.fit_selection, accelerator="Shift+F")
@@ -495,7 +528,9 @@ class ReapcaseEditor(tk.Tk):
     def apply_sidebar_visibility(self):
         inspector = self.inspector_visible.get()
         manager = self.marker_manager_visible.get()
-        if inspector or manager:
+        flag_manager = (self.marker_flag_manager_visible.get()
+                        if hasattr(self, "marker_flag_manager_visible") else False)
+        if inspector or manager or flag_manager:
             self.right_sidebar.grid(row=0, column=1, sticky="nsew")
             self.main_content.columnconfigure(1, minsize=270)
             self._refresh_inspector()
@@ -503,7 +538,7 @@ class ReapcaseEditor(tk.Tk):
             self.right_sidebar.grid_forget()
             self.main_content.columnconfigure(1, minsize=0)
         if inspector:
-            self.inspector.grid(row=0, column=0, sticky="nsew", pady=(0, 4) if manager else 0)
+            self.inspector.grid(row=0, column=0, sticky="nsew", pady=(0, 4))
         else:
             self.inspector.grid_forget()
         if manager:
@@ -511,8 +546,14 @@ class ReapcaseEditor(tk.Tk):
             self._refresh_marker_manager()
         else:
             self.marker_manager.grid_forget()
-        self.right_sidebar.rowconfigure(0, weight=35 if inspector else 0)
-        self.right_sidebar.rowconfigure(1, weight=65 if manager else 0)
+        if flag_manager:
+            self.marker_flag_manager.grid(row=2, column=0, sticky="nsew")
+            self._refresh_marker_flag_manager()
+        elif hasattr(self, "marker_flag_manager"):
+            self.marker_flag_manager.grid_forget()
+        visible = sum((inspector, manager, flag_manager))
+        for row, shown in enumerate((inspector, manager, flag_manager)):
+            self.right_sidebar.rowconfigure(row, weight=1 if shown else 0)
 
     def toggle_inspector(self):
         self.inspector_visible.set(not self.inspector_visible.get())
@@ -536,7 +577,7 @@ class ReapcaseEditor(tk.Tk):
         if not self.model:
             return
         configured = set()
-        for number, row in enumerate(marker_region_rows(self.model)):
+        for number, row in enumerate(structure_manager_rows(self.model)):
             tag = "lane_" + row.lane.casefold().replace(" ", "_").replace("/", "_")
             if tag not in configured:
                 palette = lane_colors(row.lane)
@@ -553,6 +594,30 @@ class ReapcaseEditor(tk.Tk):
             row = self._marker_rows[selected[0]]
             self.jump_to_units(row.units,
                                select_index=row.indices[0] if len(row.indices) == 1 else None)
+        return "break"
+
+    def _refresh_marker_flag_manager(self):
+        if not hasattr(self, "marker_flag_tree"):
+            return
+        self.marker_flag_tree.delete(*self.marker_flag_tree.get_children())
+        self._marker_flag_rows = {}
+        if not self.model:
+            return
+        enabled = {lane for lane, variable in self.marker_flag_filters.items() if variable.get()}
+        for number, row in enumerate(marker_flag_manager_rows(self.model, enabled)):
+            tag = "lane_" + row.lane.casefold().replace(" ", "_").replace("/", "_")
+            palette = lane_colors(row.lane)
+            self.marker_flag_tree.tag_configure(tag, background=palette.background_highlight,
+                                                foreground=palette.text)
+            item = self.marker_flag_tree.insert("", "end", iid=str(number),
+                                                values=(row.kind, row.name), tags=(tag,))
+            self._marker_flag_rows[item] = row
+
+    def _marker_flag_manager_selected(self, _event=None):
+        selected = self.marker_flag_tree.selection()
+        if selected and selected[0] in self._marker_flag_rows:
+            row = self._marker_flag_rows[selected[0]]
+            self.jump_to_units(row.units, select_index=row.indices[0])
         return "break"
 
     def _refresh_inspector(self):
@@ -775,6 +840,7 @@ class ReapcaseEditor(tk.Tk):
         """
         if self.current_view.get() == "event_list": self._refresh_event_list()
         self._refresh_marker_manager()
+        self._refresh_marker_flag_manager()
 
     def _redraw_after_model_change(self):
         self._refresh_navigation()
