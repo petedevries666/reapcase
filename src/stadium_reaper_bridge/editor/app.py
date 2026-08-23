@@ -65,6 +65,7 @@ from .preferences import RecentFiles, application_config_path
 
 
 LOG = logging.getLogger(__name__)
+MARKER_MANAGER_COLUMNS = ("kind", "name")
 
 
 class Tooltip:
@@ -122,6 +123,7 @@ class ReapcaseEditor(tk.Tk):
         self.view_state = ViewState()
         self.current_view = tk.StringVar(value="timeline")
         self.inspector_visible = tk.BooleanVar(value=False)
+        self.marker_manager_visible = tk.BooleanVar(value=False)
         self.full_song_ghost_visible = tk.BooleanVar(value=False)
         self._lane_focus: Optional[str] = None
         self._focus_visibility: Optional[dict[str, bool]] = None
@@ -291,7 +293,9 @@ class ReapcaseEditor(tk.Tk):
         self.event_tree.bind("<<TreeviewSelect>>", self._event_list_selected)
         self.event_tree.bind("<Double-Button-1>", self._event_list_edit)
         self.event_tree.bind("<Return>", self._event_list_go_to)
-        self.inspector = ttk.LabelFrame(self.main_content, text="INSPECTOR", padding=10)
+        self.right_sidebar = ttk.Frame(self.main_content)
+        self.right_sidebar.columnconfigure(0, weight=1)
+        self.inspector = ttk.LabelFrame(self.right_sidebar, text="INSPECTOR", padding=10)
         self.inspector_heading = tk.StringVar(value="No selection")
         self.inspector_position = tk.StringVar(value="")
         ttk.Label(self.inspector, textvariable=self.inspector_heading,
@@ -299,6 +303,26 @@ class ReapcaseEditor(tk.Tk):
         ttk.Label(self.inspector, textvariable=self.inspector_position).pack(anchor="w", pady=(4, 10))
         self.inspector_fields = ttk.Frame(self.inspector); self.inspector_fields.pack(fill="both", expand=True)
         ttk.Button(self.inspector, text="Edit…", command=self._inspector_edit).pack(anchor="e", pady=(8, 0))
+        self.marker_manager = ttk.LabelFrame(
+            self.right_sidebar, text="MARKER / REGION MANAGER", padding=6)
+        self.marker_tree = ttk.Treeview(
+            self.marker_manager, columns=MARKER_MANAGER_COLUMNS, show="headings",
+            selectmode="browse", style=REAPCASE_TREEVIEW_STYLE)
+        for column, title, width in (("kind", "Kind", 100), ("name", "Name", 160)):
+            self.marker_tree.heading(column, text=title)
+            self.marker_tree.column(column, width=width, minwidth=70, anchor="w",
+                                    stretch=column == "name")
+        marker_scroll = ttk.Scrollbar(self.marker_manager, orient="vertical",
+                                      command=self.marker_tree.yview)
+        self.marker_tree.configure(yscrollcommand=marker_scroll.set)
+        self.marker_tree.grid(row=0, column=0, sticky="nsew")
+        marker_scroll.grid(row=0, column=1, sticky="ns")
+        self.marker_manager.rowconfigure(0, weight=1)
+        self.marker_manager.columnconfigure(0, weight=1)
+        self._marker_rows = {}
+        self.marker_tree.bind("<<TreeviewSelect>>", self._marker_manager_selected)
+        ttk.Button(self.marker_manager, text="Jump", command=self._marker_manager_selected).grid(
+            row=1, column=0, columnspan=2, pady=(6, 0))
         self._update_zoom_label()
         ttk.Label(self, textvariable=self.status, style="Status.TLabel", anchor="w", padding=5).pack(fill="x")
 
@@ -337,7 +361,9 @@ class ReapcaseEditor(tk.Tk):
                              command=self.toggle_full_song_ghost, accelerator="Ctrl+G")
         view.add_command(label="Lane Manager...", command=self.toggle_lane_manager, accelerator="Ctrl+L")
         view.add_command(label="Track Manager...", command=self.toggle_track_manager, accelerator="Ctrl+M")
-        view.add_command(label="Marker / Region Manager...", command=self.open_marker_manager)
+        view.add_checkbutton(label="Marker / Region Manager...",
+                             variable=self.marker_manager_visible,
+                             command=self.apply_sidebar_visibility, accelerator="Ctrl+R")
         view.add_separator()
         view.add_command(label="Zoom Entire Song", command=self.fit_song, accelerator="F")
         view.add_command(label="Zoom to Selection", command=self.fit_selection, accelerator="Shift+F")
@@ -377,6 +403,7 @@ class ReapcaseEditor(tk.Tk):
         self.bind_all("<space>", lambda e: self._global_editor_shortcut(
             e, self.play_pause, allow_native_navigation=False))
         self.bind_all("<Control-e>", lambda e: self._global_editor_shortcut(e, self.toggle_inspector))
+        self.bind_all("<Control-r>", lambda e: self._global_editor_shortcut(e, self.toggle_marker_manager))
         self.bind_all("<Control-l>", lambda e: self._global_editor_shortcut(e, self.toggle_lane_manager))
         self.bind_all("<Control-m>", lambda e: self._global_editor_shortcut(e, self.toggle_track_manager))
         self.bind_all("<Control-g>", lambda e: self._global_editor_shortcut(e, self.toggle_ghost_preference))
@@ -429,17 +456,70 @@ class ReapcaseEditor(tk.Tk):
             self._refresh_event_list()
 
     def apply_inspector_visibility(self):
-        if self.inspector_visible.get():
-            self.inspector.grid(row=0, column=1, sticky="nsew")
-            self.main_content.columnconfigure(1, minsize=240)
+        self.apply_sidebar_visibility()
+
+    def apply_sidebar_visibility(self):
+        inspector = self.inspector_visible.get()
+        manager = self.marker_manager_visible.get()
+        if inspector or manager:
+            self.right_sidebar.grid(row=0, column=1, sticky="nsew")
+            self.main_content.columnconfigure(1, minsize=270)
             self._refresh_inspector()
         else:
-            self.inspector.grid_forget()
+            self.right_sidebar.grid_forget()
             self.main_content.columnconfigure(1, minsize=0)
+        if inspector:
+            self.inspector.grid(row=0, column=0, sticky="nsew", pady=(0, 4) if manager else 0)
+        else:
+            self.inspector.grid_forget()
+        if manager:
+            self.marker_manager.grid(row=1, column=0, sticky="nsew")
+            self._refresh_marker_manager()
+        else:
+            self.marker_manager.grid_forget()
+        self.right_sidebar.rowconfigure(0, weight=35 if inspector else 0)
+        self.right_sidebar.rowconfigure(1, weight=65 if manager else 0)
 
     def toggle_inspector(self):
         self.inspector_visible.set(not self.inspector_visible.get())
         self.apply_inspector_visibility()
+
+    def toggle_marker_manager(self):
+        self.marker_manager_visible.set(not self.marker_manager_visible.get())
+        self.apply_sidebar_visibility()
+
+    def open_marker_manager(self):
+        """Show the canonical docked manager (legacy menu/API entry point)."""
+        self.marker_manager_visible.set(True)
+        self.apply_sidebar_visibility()
+        return self.marker_manager
+
+    def _refresh_marker_manager(self):
+        if not hasattr(self, "marker_tree"):
+            return
+        self.marker_tree.delete(*self.marker_tree.get_children())
+        self._marker_rows = {}
+        if not self.model:
+            return
+        configured = set()
+        for number, row in enumerate(marker_region_rows(self.model)):
+            tag = "lane_" + row.lane.casefold().replace(" ", "_").replace("/", "_")
+            if tag not in configured:
+                palette = lane_colors(row.lane)
+                self.marker_tree.tag_configure(tag, background=palette.background_highlight,
+                                               foreground=palette.text)
+                configured.add(tag)
+            item = self.marker_tree.insert("", "end", iid=str(number),
+                                           values=(row.kind, row.name), tags=(tag,))
+            self._marker_rows[item] = row
+
+    def _marker_manager_selected(self, _event=None):
+        selected = self.marker_tree.selection()
+        if selected and selected[0] in self._marker_rows:
+            row = self._marker_rows[selected[0]]
+            self.jump_to_units(row.units,
+                               select_index=row.indices[0] if len(row.indices) == 1 else None)
+        return "break"
 
     def _refresh_inspector(self):
         if not hasattr(self, "inspector_fields") or not self.inspector_visible.get():
@@ -639,26 +719,6 @@ class ReapcaseEditor(tk.Tk):
             ttk.Button(controls, text="None", command=lambda: set_all(False)).pack(side="left", padx=5)
         self._manager("lane_manager", "Lane Manager", build)
 
-    def open_marker_manager(self):
-        def build(win):
-            tree = ttk.Treeview(win, columns=("position", "kind", "name", "end"),
-                                show="headings", style=REAPCASE_TREEVIEW_STYLE)
-            for col, title, width in (("position", "Position", 110), ("kind", "Kind", 100),
-                                      ("name", "Name", 220), ("end", "End / Duration", 130)):
-                tree.heading(col, text=title); tree.column(col, width=width)
-            tree.pack(fill="both", expand=True)
-            def refresh():
-                tree.delete(*tree.get_children())
-                if self.model:
-                    for n, row in enumerate(marker_region_rows(self.model)):
-                        tree.insert("", "end", iid=str(n), values=(row.position, row.kind, row.name, row.end), tags=(str(row.units),))
-            def jump(_event=None):
-                selected=tree.selection()
-                if selected: self.jump_to_units(int(tree.item(selected[0], "tags")[0]))
-            tree.bind("<<TreeviewSelect>>", jump); ttk.Button(win, text="Jump", command=jump).pack(pady=6)
-            win._refresh_rows = refresh; refresh()
-        self._manager("marker_region_manager", "Marker / Region Manager", build)
-
     def open_track_manager(self):
         """Expose the existing audio-track operations without duplicating their logic."""
         def build(win):
@@ -680,8 +740,7 @@ class ReapcaseEditor(tk.Tk):
         Treeviews.
         """
         if self.current_view.get() == "event_list": self._refresh_event_list()
-        win = self._manager_windows.get("marker_region_manager")
-        if win and win.winfo_exists() and hasattr(win, "_refresh_rows"): win._refresh_rows()
+        self._refresh_marker_manager()
 
     def _redraw_after_model_change(self):
         self._refresh_navigation()

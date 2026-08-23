@@ -2,11 +2,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from stadium_reaper_bridge.editor.app import ReapcaseEditor
+from stadium_reaper_bridge.editor.app import MARKER_MANAGER_COLUMNS, ReapcaseEditor
 from stadium_reaper_bridge.editor.model import EditorModel
-from stadium_reaper_bridge.editor.navigation import adjacent_structure_region_index
+from stadium_reaper_bridge.editor.navigation import (
+    adjacent_structure_region_index, marker_region_rows, structure_region_indices)
 from stadium_reaper_bridge.editor.preferences import RecentFiles
 from stadium_reaper_bridge.editor.structure import is_pause_marker
+from stadium_reaper_bridge.editor.style import LANE_PALETTE, lane_colors
 
 
 def test_recent_files_are_bounded_deduplicated_named_and_independent(tmp_path):
@@ -61,6 +63,49 @@ def test_structure_region_navigation_excludes_pauses_and_cycles_and_clamps():
     assert types == {"MARKER"}
 
 
+def test_named_end_is_not_a_navigable_structure_region(tmp_path):
+    song = tmp_path / "named-end.json"
+    song.write_text(json.dumps({
+        "name": "Named End", "ppqn": 240, "params": None, "tracks": [],
+        "flags": [
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "005-01.001|MARKER;VERSE;7;Off;Off;Off;false;A;B;C",
+            "009-01.001|MARKER;END;7;Off;Off;Off;false;A;B;C",
+            "013-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ]}))
+    model = EditorModel.open(song)
+    verse, named_end = 1, 2
+
+    assert structure_region_indices(model) == (verse,)
+    assert adjacent_structure_region_index(
+        model, model._units(model.timeline.events[verse].position), 1) == verse
+    assert adjacent_structure_region_index(
+        model, model._units(model.timeline.events[named_end].position), -1) == verse
+
+
+def test_marker_manager_projects_structure_and_canonical_looper_regions(tmp_path):
+    song = tmp_path / "semantic-regions.json"
+    song.write_text(json.dumps({
+        "name": "Semantic Regions", "ppqn": 240, "params": None, "tracks": [],
+        "flags": [
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "001-01.001|MARKER;INTRO;7;Off;Off;Off;false;A;B;C",
+            "003-01.001|LOOPER;RECORD;1;Record",
+            "005-01.001|LOOPER;STOP;1;Stop",
+            "007-01.001|MIDI_CC;BASS PLAY;4;CC;3;61;127",
+            "009-01.001|MIDI_CC;BASS STOP;4;CC;3;61;0",
+            "013-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ]}))
+    rows = marker_region_rows(EditorModel.open(song))
+    regions = {(row.kind, row.name): row for row in rows}
+
+    assert any(row.lane == "STRUCTURE" for row in rows)
+    assert regions[("LOOPER REGION", "RECORD")].lane == "STADIUM"
+    assert regions[("LOOPER REGION", "PLAY")].lane == "SECOND HELIX"
+    for lane in ("STRUCTURE", "STADIUM", "SECOND HELIX"):
+        assert lane_colors(lane) is LANE_PALETTE[lane]
+
+
 def test_shared_jump_updates_cursor_seeks_selects_and_can_defer_reveal(monkeypatch):
     model = EditorModel.open(Path("tests/fixtures/perfect_picture_336.json"))
     seeks, redraws = [], []
@@ -109,6 +154,63 @@ def test_global_workflow_shortcuts_ignore_text_inputs_and_dialogs():
     assert ReapcaseEditor._global_editor_shortcut(
         editor, dialog_event, lambda: calls.append("dialog")) is None
     assert calls == []
+
+
+def test_marker_manager_toggle_reuses_one_docked_panel():
+    class Variable:
+        value = False
+        def get(self): return self.value
+        def set(self, value): self.value = value
+
+    calls = []
+    editor = SimpleNamespace(marker_manager_visible=Variable(),
+                             apply_sidebar_visibility=lambda: calls.append("layout"))
+    ReapcaseEditor.toggle_marker_manager(editor)
+    assert editor.marker_manager_visible.get() is True
+    ReapcaseEditor.toggle_marker_manager(editor)
+    assert editor.marker_manager_visible.get() is False
+    assert calls == ["layout", "layout"]
+    assert not hasattr(editor, "_manager_windows")  # no popup or duplicate is created
+
+
+def test_marker_manager_columns_are_compact_and_semantic_colors_are_centralized():
+    assert MARKER_MANAGER_COLUMNS == ("kind", "name")
+    assert "position" not in MARKER_MANAGER_COLUMNS
+    assert "end" not in MARKER_MANAGER_COLUMNS
+    for lane in LANE_PALETTE:
+        palette = lane_colors(lane)
+        assert palette.background_highlight.startswith("#")
+        assert palette.text.startswith("#")
+
+
+def test_sidebar_visibility_states_and_stacking():
+    class Variable:
+        def __init__(self, value): self.value = value
+        def get(self): return self.value
+
+    class Widget:
+        def __init__(self): self.visible = False; self.rows = {}
+        def grid(self, **_kwargs): self.visible = True
+        def grid_forget(self): self.visible = False
+        def rowconfigure(self, row, **kwargs): self.rows[row] = kwargs
+        def columnconfigure(self, *_args, **_kwargs): pass
+
+    for inspector, manager, expected_sidebar in (
+            (True, False, True), (False, True, True), (True, True, True),
+            (False, False, False)):
+        sidebar, inspector_panel, manager_panel = Widget(), Widget(), Widget()
+        editor = SimpleNamespace(
+            inspector_visible=Variable(inspector), marker_manager_visible=Variable(manager),
+            right_sidebar=sidebar, main_content=Widget(), inspector=inspector_panel,
+            marker_manager=manager_panel, _refresh_inspector=lambda: None,
+            _refresh_marker_manager=lambda: None)
+        ReapcaseEditor.apply_sidebar_visibility(editor)
+        assert sidebar.visible is expected_sidebar
+        assert inspector_panel.visible is inspector
+        assert manager_panel.visible is manager
+        if inspector and manager:
+            assert sidebar.rows[0]["weight"] == 35
+            assert sidebar.rows[1]["weight"] == 65
 
 
 def test_event_list_navigation_preserves_complete_multi_selection():

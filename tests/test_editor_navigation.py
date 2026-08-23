@@ -173,10 +173,13 @@ def test_event_list_is_a_semantic_projection_and_does_not_filter_hidden_lanes():
     assert all(";" not in row.name for row in rows)
 
 
-def test_marker_manager_only_extracts_structural_navigation_rows():
+def test_marker_manager_only_extracts_marker_and_canonical_region_rows():
     rows = marker_region_rows(perfect_picture())
     assert rows
-    assert {row.kind for row in rows} <= {"START", "END", "MARKER", "PAUSE", "CYCLE"}
+    assert {row.kind for row in rows} <= {
+        "START", "END", "MARKER", "PAUSE", "CYCLE", "LOOPER REGION",
+        "LIGHTING REGION"}
+    assert not any(row.kind in {"PRESETSNAP", "MIDI_CC", "VIDEO"} for row in rows)
     assert all(row.position.count("-") == 1 for row in rows)
 
 

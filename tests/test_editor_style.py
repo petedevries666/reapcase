@@ -67,7 +67,17 @@ def test_semantic_lane_color_associations_are_unchanged():
 
     assert {lane: lane_colors(lane).background for lane in expected} == expected
     assert set(LANE_PALETTE) == set(expected)
-    assert AUDIO.background == "#102333"
+    assert AUDIO.background == "#151d25"
+
+
+def test_audio_palette_is_darker_and_distinct_from_structure():
+    def luminance(color):
+        red, green, blue = (int(color[index:index + 2], 16) for index in (1, 3, 5))
+        return .2126 * red + .7152 * green + .0722 * blue
+
+    assert AUDIO.background != lane_colors("STRUCTURE").background
+    assert luminance(AUDIO.background) < luminance(lane_colors("STRUCTURE").background)
+    assert AUDIO.waveform != AUDIO.background
 
 
 def test_structure_region_fill_alternates_by_chronological_number():

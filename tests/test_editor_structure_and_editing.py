@@ -27,6 +27,32 @@ def model_for(flags):
 
 
 class StructureLayoutTests(unittest.TestCase):
+    def test_end_flag_terminates_previous_region_without_starting_one(self):
+        model = model_for([
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "005-01.001|MARKER;SOLO GUITAR;7;Off;Off;Off;false;A;B;C",
+            "013-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ])
+        layout = derive_structure_layout(model.timeline.events, model._units,
+                                         model.song_end_units + 1920)
+        regions = [region for region in layout.regions if region.kind == "marker"]
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0].end_units, model._units(model.timeline.events[2].position))
+        self.assertNotIn("END", [region.label for region in regions])
+
+    def test_named_end_marker_is_boundary_not_trailing_region(self):
+        model = model_for([
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "005-01.001|MARKER;SOLO;7;Off;Off;Off;false;A;B;C",
+            "009-01.001|MARKER;END;7;Off;Off;Off;false;A;B;C",
+            "013-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ])
+        layout = derive_structure_layout(model.timeline.events, model._units,
+                                         model.song_end_units)
+        regions = [region for region in layout.regions if region.kind == "marker"]
+        self.assertEqual([region.label for region in regions], ["SOLO (4m)"])
+        self.assertEqual(regions[0].end_units, model._units(model.timeline.events[2].position))
+
     def test_marker_regions_ignore_semantic_pause(self):
         model = model_for([
             "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",

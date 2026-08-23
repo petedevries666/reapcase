@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from .composite import lane_height
 from .display import badge_text
 from .layout import HEADER_WIDTH, RULER_HEIGHT, timeline_x
-from .structure import is_pause_marker
+from .lighting import derive_lighting_regions
+from .looper import derive_looper_regions
+from .structure import is_pause_marker, is_structure_end_boundary
 
 
 DEFAULT_VISIBLE_LANES = frozenset({"STRUCTURE", "STADIUM", "SECOND HELIX", "AUDIO"})
@@ -128,6 +130,7 @@ class MarkerRegionRow:
     kind: str
     name: str
     end: str = ""
+    lane: str = "STRUCTURE"
 
 
 def marker_region_rows(model) -> tuple[MarkerRegionRow, ...]:
@@ -144,14 +147,36 @@ def marker_region_rows(model) -> tuple[MarkerRegionRow, ...]:
         if kind == "CYCLE_END" and pending:
             start_index, start, start_units = pending
             rows.append(MarkerRegionRow((start_index, index), start_units,
-                start.position.render(), "CYCLE", badge_text(start), f"→ {position}"))
+                start.position.render(), "CYCLE", badge_text(start), f"→ {position}",
+                model.lane(start)))
             pending = None
             continue
         display_kind = "PAUSE" if kind == "MARKER" and is_pause_marker(event) else kind
-        rows.append(MarkerRegionRow((index,), units, position, display_kind, badge_text(event)))
+        rows.append(MarkerRegionRow((index,), units, position, display_kind, badge_text(event),
+                                    lane=model.lane(event)))
     if pending:
         index, event, units = pending
-        rows.append(MarkerRegionRow((index,), units, event.position.render(), "CYCLE", badge_text(event)))
+        rows.append(MarkerRegionRow((index,), units, event.position.render(), "CYCLE", badge_text(event),
+                                    lane=model.lane(event)))
+
+    # Sustained semantic regions come from the same canonical projections used
+    # by Timeline drawing.  Point commands remain in Event List rather than
+    # turning this focused manager into a second event browser.
+    for system in ("STADIUM", "SECOND HELIX"):
+        for region in derive_looper_regions(events, model._units, system,
+                                            model.song_end_units):
+            source = region.source_event_indices[0]
+            event = events[source]
+            rows.append(MarkerRegionRow(
+                region.source_event_indices, region.start_units, event.position.render(),
+                "LOOPER REGION", region.state, f"→ {model._position(region.end_units).render()}",
+                system))
+    for region in derive_lighting_regions(events, model._units, model.song_end_units):
+        event = events[region.source_event_index]
+        rows.append(MarkerRegionRow(
+            (region.source_event_index,), region.start_units, event.position.render(),
+            "LIGHTING REGION", region.label,
+            f"→ {model._position(region.end_units).render()}", "LIGHTS"))
     return tuple(sorted(rows, key=lambda row: row.units))
 
 
@@ -193,7 +218,8 @@ def structure_region_indices(model) -> tuple[int, ...]:
     """Canonical ordinary STRUCTURE markers, excluding pauses and cycles."""
     return tuple(index for index, event in sorted(
         enumerate(model.timeline.events), key=lambda pair: model._units(pair[1].position))
-        if event.source.type == "MARKER" and not is_pause_marker(event))
+        if (event.source.type == "MARKER" and not is_pause_marker(event)
+            and not is_structure_end_boundary(event)))
 
 
 def adjacent_structure_region_index(model, current_units: int,
