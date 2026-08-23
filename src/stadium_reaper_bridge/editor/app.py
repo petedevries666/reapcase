@@ -340,10 +340,11 @@ class ReapcaseEditor(tk.Tk):
             self.right_sidebar, text="MARKER & FLAG MANAGER", padding=6)
         filters = ttk.Frame(self.marker_flag_manager)
         filters.grid(row=0, column=0, columnspan=2, sticky="ew")
-        for lane, label in zip(MARKER_FLAG_FILTER_LANES,
-                               ("Stadium", "Second Helix", "Video", "Lights", "Midi / Others")):
+        filter_labels = ("Stadium", "Second Helix", "Video", "Lights", "Midi / Others")
+        for number, (lane, label) in enumerate(zip(MARKER_FLAG_FILTER_LANES, filter_labels)):
             ttk.Checkbutton(filters, text=label, variable=self.marker_flag_filters[lane],
-                            command=self._refresh_marker_flag_manager).pack(side="left")
+                            command=self._refresh_marker_flag_manager).grid(
+                                row=number // 3, column=number % 3, sticky="w", padx=(0, 5))
         self.marker_flag_tree = ttk.Treeview(
             self.marker_flag_manager, columns=MARKER_MANAGER_COLUMNS, show="headings",
             selectmode="browse", style=REAPCASE_TREEVIEW_STYLE)

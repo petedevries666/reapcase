@@ -125,6 +125,23 @@ def test_marker_flag_filters_use_canonical_lanes_without_mutating_model():
     assert tuple((event.source.payload, event.position) for event in model.timeline.events) == before
 
 
+def test_marker_flag_manager_excludes_non_editable_technical_event(tmp_path):
+    song = tmp_path / "technical-event.json"
+    song.write_text(json.dumps({
+        "name": "Technical Event", "ppqn": 240, "params": None, "tracks": [],
+        "flags": [
+            "001-01.001|START;;9;120;0;4;4;Off;true;A;B;Snap 1",
+            "002-01.001|DIAGNOSTIC;INTERNAL;1;Do not edit",
+            "003-01.001|MIDI_CC;USER CONTROL;4;CC;1;20;64",
+            "004-01.001|END;;5;Off;8.0;Pause;Off;2.0",
+        ]}))
+    model = EditorModel.open(song)
+
+    assert any(event.source.type == "DIAGNOSTIC" for event in model.timeline.events)
+    rows = marker_flag_manager_rows(model)
+    assert {model.timeline.events[row.indices[0]].source.type for row in rows} == {"MIDI_CC"}
+
+
 def test_both_manager_selections_delegate_to_canonical_jump():
     class Tree:
         def selection(self): return ("row",)

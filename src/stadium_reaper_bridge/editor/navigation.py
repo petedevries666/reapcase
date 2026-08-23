@@ -169,7 +169,10 @@ def marker_flag_manager_rows(model, enabled_lanes=None) -> tuple[MarkerRegionRow
     rows = []
     for index, event in enumerate(model.timeline.events):
         lane = model.lane(event)
-        if lane == "STRUCTURE":
+        # This is an editing launcher, not a second Event List.  The canonical
+        # edit dispatcher is the authority for whether a parsed technical flag
+        # has a safe semantic editor.
+        if lane == "STRUCTURE" or model.edit_capability(index) is None:
             continue
         # Audio/sequence clips are not Timeline events today.  If sequence-like
         # flags arrive here later, canonical lane identity groups them as MIDI.
