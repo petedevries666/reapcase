@@ -256,5 +256,76 @@ class WaveformTests(unittest.TestCase):
         self.assertEqual(cache.stats["tile_evict"], 17)
 
 
+def write_pcm24(path: Path, channels: int, frames):
+    """Write exact signed PCM24 values without relying on an audio library."""
+    payload = bytearray()
+    for frame in frames:
+        values = (frame,) if channels == 1 else frame
+        for value in values:
+            payload.extend((value & 0xFFFFFF).to_bytes(3, "little"))
+    with wave.open(str(path), "wb") as target:
+        target.setnchannels(channels)
+        target.setsampwidth(3)
+        target.setframerate(RATE)
+        target.writeframes(payload)
+
+
+def reference_pcm24_peaks(frames, channels, bucket_frames):
+    scale = 8388608.0
+    result = []
+    for start in range(0, len(frames), bucket_frames):
+        chunk = frames[start:start + bucket_frames]
+        samples = [value for frame in chunk
+                   for value in ((frame,) if channels == 1 else frame)]
+        result.append((min(samples) / scale, max(samples) / scale))
+    return result
+
+
+class PCM24WaveformTests(unittest.TestCase):
+    def assert_base_matches_reference(self, channels, frames, bucket_frames=4,
+                                      read_frames=5):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pcm24.wav"
+            write_pcm24(path, channels, frames)
+            summary = extract_waveform(path, base_bucket_frames=bucket_frames,
+                                       read_frames=read_frames)
+        expected = reference_pcm24_peaks(frames, channels, bucket_frames)
+        actual = list(zip(summary.levels[0].minimum, summary.levels[0].maximum))
+        self.assertEqual(len(actual), len(expected))
+        for actual_pair, expected_pair in zip(actual, expected):
+            self.assertAlmostEqual(actual_pair[0], expected_pair[0], places=7)
+            self.assertAlmostEqual(actual_pair[1], expected_pair[1], places=7)
+
+    def test_mono_sign_extension_boundaries_and_partial_bucket(self):
+        # Includes zero, both full scales, and every transition around the
+        # low byte of the signed 24-bit boundary.
+        frames = [0, 1, 127, 128, 255, 256, 0x7FFFFE, 0x7FFFFF,
+                  -1, -128, -129, -256, -0x7FFFFF, -0x800000, 42]
+        self.assert_base_matches_reference(1, frames)
+
+    def test_stereo_combines_channels_and_crosses_read_boundaries(self):
+        frames = [(0, 0), (1, -1), (0x7FFFFF, 3), (4, -0x800000),
+                  (-129, 128), (255, -256), (123456, -654321),
+                  (-7, 9), (11, 12), (-13, 14), (15, -16)]
+        # Four-frame buckets cross the five-frame read blocks, and the final
+        # three frames exercise the odd partial bucket.
+        self.assert_base_matches_reference(2, frames, bucket_frames=4,
+                                           read_frames=5)
+
+    def test_pcm24_cancellation_remains_cooperative(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cancel24.wav"
+            write_pcm24(path, 2, [(0, 0)] * 100)
+            calls = 0
+
+            def cancel():
+                nonlocal calls
+                calls += 1
+                return calls > 1
+
+            with self.assertRaises(CancelledError):
+                extract_waveform(path, read_frames=8, cancel_requested=cancel)
+
+
 if __name__ == "__main__":
     unittest.main()
