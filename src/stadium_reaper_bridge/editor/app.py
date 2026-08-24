@@ -68,8 +68,9 @@ from .navigation import (ViewState, event_list_rows, jump_viewport_left,
                          normalized_lane_order, visible_lane_layout)
 from .inspector import inspector_projection
 from .display import song_header_metadata
-from .preferences import RecentFiles, application_config_path
-from .stadium_workspace import import_backup, inspect_import, load_manifest, unique_workspace
+from .preferences import application_config_path
+from .stadium_workspace import (discover_workspace_songs, import_backup, inspect_import,
+                                load_manifest, unique_workspace)
 from .stadium_export import analyze_build, build_package
 from .stadium_implant import (analyze_audio_update, apply_audio_update,
                               implant_package, validate_sd_root)
@@ -160,7 +161,7 @@ class ReapcaseEditor(tk.Tk):
         self._loading_window = None
         self._loading_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="song-open")
         self._manager_windows = {}
-        self.recent_files = RecentFiles()
+        self._workspace_song_inventory = None
         self._event_rows = {}
         self.audio_drag: Optional[tuple[int, int]] = None
         self.marquee_anchor: Optional[tuple[float, float]] = None
@@ -402,10 +403,14 @@ class ReapcaseEditor(tk.Tk):
 
     def _build_menu(self):
         bar = tk.Menu(self)
-        file_menu = tk.Menu(bar, tearoff=False)
-        file_menu.add_command(label="Open...", command=self.open_json, accelerator="Ctrl+O")
-        self.recent_menu = tk.Menu(file_menu, tearoff=False, postcommand=self._rebuild_recent_menu)
-        file_menu.add_cascade(label="Open Recent", menu=self.recent_menu)
+        file_menu = tk.Menu(bar, tearoff=False, postcommand=self._refresh_file_menu_state)
+        self.file_menu = file_menu
+        file_menu.add_command(label="Open Song...", command=self.open_json, accelerator="Ctrl+O")
+        self.workspace_song_menu = tk.Menu(
+            file_menu, tearoff=False, postcommand=self._rebuild_workspace_song_menu)
+        file_menu.add_cascade(label="Open Song from Current Workspace",
+                              menu=self.workspace_song_menu)
+        self._workspace_song_cascade = file_menu.index("end")
         file_menu.add_command(label="Save", command=self.save, accelerator="Ctrl+S")
         file_menu.add_command(label="Save As...", command=self.save_as,
                               accelerator="Ctrl+Shift+S")
@@ -413,6 +418,8 @@ class ReapcaseEditor(tk.Tk):
         import_menu = tk.Menu(file_menu, tearoff=False)
         import_menu.add_command(label="Import Backup from Stadium...",
                                 command=self.import_stadium_backup)
+        import_menu.add_command(label="Open Reapcase Workspace...",
+                                command=self.open_stadium_workspace)
         file_menu.add_cascade(label="Import", menu=import_menu)
         export_menu = tk.Menu(file_menu, tearoff=False)
         export_menu.add_command(label="Build Stadium Backup...", command=self.build_stadium_backup)
@@ -514,23 +521,61 @@ class ReapcaseEditor(tk.Tk):
         self.bind_all("<Control-Shift-Key-S>",
                       lambda e: self._global_editor_shortcut(e, self.save_as))
 
-    def _rebuild_recent_menu(self):
-        self.recent_menu.delete(0, "end")
-        for entry in self.recent_files.entries:
-            self.recent_menu.add_command(label=entry.display,
-                command=lambda path=entry.path: self.open_recent(path))
-        if self.recent_files.entries:
-            self.recent_menu.add_separator()
-        self.recent_menu.add_command(label="Clear Recent Files", command=self.recent_files.clear,
-                                     state="normal" if self.recent_files.entries else "disabled")
+    def invalidate_workspace_song_inventory(self):
+        self._workspace_song_inventory = None
 
-    def open_recent(self, path):
-        if not Path(path).is_file():
-            messagebox.showerror("Recent Song not found",
-                                 f"The Song file cannot be found:\n{path}", parent=self)
-            self.recent_files.remove(path)
+    def _refresh_file_menu_state(self):
+        state = "normal" if self.stadium_workspace else "disabled"
+        self.file_menu.entryconfigure(self._workspace_song_cascade, state=state)
+
+    def workspace_songs(self):
+        if not self.stadium_workspace:
+            return ()
+        if self._workspace_song_inventory is None:
+            try:
+                self._workspace_song_inventory = discover_workspace_songs(self.stadium_workspace)
+            except ValueError:
+                self.stadium_workspace = None
+                return ()
+        return self._workspace_song_inventory
+
+    def _rebuild_workspace_song_menu(self):
+        self.workspace_song_menu.delete(0, "end")
+        songs = self.workspace_songs()
+        current = self.model.path.resolve() if self.model else None
+        for song in songs:
+            prefix = "✓ " if current == song.path else ""
+            self.workspace_song_menu.add_command(
+                label=prefix + song.label,
+                command=lambda path=song.path: self.open_workspace_song(path))
+        if not songs:
+            self.workspace_song_menu.add_command(
+                label="No workspace Songs", state="disabled")
+
+    def open_workspace_song(self, path):
+        allowed = {song.path for song in self.workspace_songs()}
+        candidate = Path(path).resolve()
+        return self._begin_song_open(candidate) if candidate in allowed else False
+
+    def set_stadium_workspace(self, workspace):
+        """Activate only an explicitly validated imported workspace."""
+        workspace = Path(workspace).resolve()
+        load_manifest(workspace)
+        self.stadium_workspace = workspace
+        self.invalidate_workspace_song_inventory()
+        return self.workspace_songs()
+
+    def open_stadium_workspace(self):
+        path = filedialog.askdirectory(title="Open Reapcase Workspace")
+        if not path:
             return False
-        return self._begin_song_open(path)
+        try:
+            self.set_stadium_workspace(path)
+        except ValueError as exc:
+            messagebox.showerror("Cannot open workspace", str(exc), parent=self)
+            return False
+        self.status.set("Opened Stadium workspace: %s" % Path(path).name)
+        return True
 
     def _editor_shortcut(self, event, command, *args):
         """Run and consume a DAW shortcut only in the timeline canvas."""
@@ -1171,11 +1216,10 @@ class ReapcaseEditor(tk.Tk):
                                 imported, "Import failed")
 
         def imported(workspace):
-            self.stadium_workspace = workspace
-            songs = sorted((workspace / "showcase" / "songs" / "workspace").glob("*.json"))
+            songs = self.set_stadium_workspace(workspace)
             self.status.set("Imported Stadium workspace: %s" % workspace.name)
             if songs:
-                self._begin_song_open(str(songs[0]))
+                self._begin_song_open(str(songs[0].path))
         self._run_migration("inspect-import", "Scanning archive...",
                             lambda: inspect_import(Path(archive)), inspected, "Import preflight failed")
 
@@ -1306,6 +1350,15 @@ class ReapcaseEditor(tk.Tk):
     def _begin_song_open(self, path):
         """Start transactional Song loading; all Tk work stays in this thread."""
         if self.loading: return False
+        if self.model and self.model.modified:
+            choice = messagebox.askyesnocancel(
+                "Unsaved Song changes",
+                "Save changes before opening another Song?", parent=self)
+            if choice is None:
+                return False
+            if choice:
+                if not self._save_to(self.model.path):
+                    return False
         self._audio_cancel.set()
         self._waveform_cancel.set()
         self._audio_cancel = threading.Event()
@@ -1351,7 +1404,6 @@ class ReapcaseEditor(tk.Tk):
                 self._reset_lane_visibility()
                 self._reset_full_song_ghost()
                 self._update_song_header()
-                self.recent_files.add(candidate.path, candidate.song.name)
                 redraw_started = time.perf_counter()
                 self._redraw_after_model_change()
                 if os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes"):
@@ -1692,13 +1744,15 @@ class ReapcaseEditor(tk.Tk):
         try:
             summary = self.model.save_as(path)
         except BackupError as exc:
-            messagebox.showerror("Cannot save Song", str(exc)); return
+            messagebox.showerror("Cannot save Song", str(exc)); return False
         except Exception as exc:
-            messagebox.showerror("Cannot save Song", str(exc)); return
+            messagebox.showerror("Cannot save Song", str(exc)); return False
         messagebox.showinfo("Save complete", f"{summary.events_moved} events moved\n"
                             f"{summary.payloads_changed} payloads changed\n"
                             f"{summary.tracks_changed} track operations")
         self.redraw()
+        self.invalidate_workspace_song_inventory()
+        return True
 
     def save(self):
         if self.model and not self.loading:

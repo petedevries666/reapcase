@@ -8,46 +8,76 @@ from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.editor.navigation import (
     adjacent_structure_region_index, marker_flag_manager_rows, marker_region_rows,
     structure_manager_rows, structure_region_indices)
-from stadium_reaper_bridge.editor.preferences import RecentFiles
+from stadium_reaper_bridge.editor.stadium_workspace import (
+    MANIFEST_NAME, discover_workspace_songs)
 from stadium_reaper_bridge.editor.structure import is_pause_marker
 from stadium_reaper_bridge.editor.style import LANE_PALETTE, lane_colors
 
 
-def test_recent_files_are_bounded_deduplicated_named_and_independent(tmp_path):
-    preferences = tmp_path / "config" / "ui.json"
-    recent = RecentFiles(preferences)
-    paths = []
-    for number in range(12):
-        path = tmp_path / f"{number}.json"
-        path.write_text(json.dumps({"name": f"SONG {number}", "flags": []}))
-        paths.append(path)
-        recent.add(path, f"SONG {number}")
-    assert len(recent.entries) == 10
-    assert recent.entries[0].display == "SONG 11 — 11.json"
-    recent.add(paths[5], "SONG 5")
-    assert len(recent.entries) == 10
-    assert recent.entries[0].path == str(paths[5].resolve())
-    assert len([entry for entry in recent.entries if entry.path == str(paths[5].resolve())]) == 1
-    assert RecentFiles(preferences).entries == recent.entries
-    assert "recent_files" not in json.loads(paths[5].read_text())
+def make_workspace(root, songs):
+    root.mkdir()
+    (root / MANIFEST_NAME).write_text(json.dumps({"workspace_type": "stadium_backup"}))
+    directory = root / "showcase/songs/workspace"
+    directory.mkdir(parents=True)
+    for filename, document in songs.items():
+        (directory / filename).write_text(
+            document if isinstance(document, str) else json.dumps(document))
+    return root
 
 
-def test_recent_missing_file_is_removed_without_starting_loader(tmp_path):
-    path = tmp_path / "gone.json"
-    recent = RecentFiles(tmp_path / "ui.json")
-    path.write_text("{}")
-    recent.add(path, "GONE")
-    path.unlink()
-    messages = []
-    editor = SimpleNamespace(recent_files=recent, loading=False)
-    import stadium_reaper_bridge.editor.app as app
-    old = app.messagebox.showerror
-    app.messagebox.showerror = lambda *args, **kwargs: messages.append(args)
-    try:
-        assert ReapcaseEditor.open_recent(editor, path) is False
-    finally:
-        app.messagebox.showerror = old
-    assert messages and recent.entries == []
+def test_workspace_inventory_uses_metadata_natural_order_and_skips_bad_json(tmp_path):
+    workspace = make_workspace(tmp_path / "one", {
+        "101.json": {"name": "FROM METADATA", "flags": []},
+        "10.json": {"name": "TEN", "flags": []},
+        "9.json": {"name": "NINE", "flags": []},
+        "broken.json": "{nope",
+        "settings.json": {"name": "NOT A SONG"},
+    })
+    songs = discover_workspace_songs(workspace)
+    assert [song.path.name for song in songs] == ["9.json", "10.json", "101.json"]
+    assert [song.title for song in songs] == ["NINE", "TEN", "FROM METADATA"]
+    assert songs[-1].label == "101   FROM METADATA"
+
+
+def test_changing_workspace_replaces_cached_inventory_and_invalidation_finds_addition(tmp_path):
+    one = make_workspace(tmp_path / "one", {"1.json": {"name": "ONE", "flags": []}})
+    two = make_workspace(tmp_path / "two", {"2.json": {"name": "TWO", "flags": []}})
+    editor = SimpleNamespace(stadium_workspace=None, _workspace_song_inventory=None)
+    editor.invalidate_workspace_song_inventory = lambda: ReapcaseEditor.invalidate_workspace_song_inventory(editor)
+    editor.workspace_songs = lambda: ReapcaseEditor.workspace_songs(editor)
+    assert [song.title for song in ReapcaseEditor.set_stadium_workspace(editor, one)] == ["ONE"]
+    assert [song.title for song in ReapcaseEditor.set_stadium_workspace(editor, two)] == ["TWO"]
+    directory = two / "showcase/songs/workspace"
+    (directory / "3.json").write_text(json.dumps({"name": "THREE", "flags": []}))
+    assert [song.title for song in editor.workspace_songs()] == ["TWO"]
+    editor.invalidate_workspace_song_inventory()
+    assert [song.title for song in editor.workspace_songs()] == ["TWO", "THREE"]
+
+
+def test_standalone_song_is_not_an_implicit_workspace_and_menu_is_disabled():
+    configured = []
+    editor = SimpleNamespace(stadium_workspace=None, model=SimpleNamespace(path=Path("standalone.json")),
+                             file_menu=SimpleNamespace(entryconfigure=lambda *a, **k: configured.append((a, k))),
+                             _workspace_song_cascade=1)
+    assert ReapcaseEditor.workspace_songs(editor) == ()
+    ReapcaseEditor._refresh_file_menu_state(editor)
+    assert configured == [((1,), {"state": "disabled"})]
+
+
+def test_workspace_selection_uses_normal_opening_pipeline(tmp_path):
+    song = SimpleNamespace(path=(tmp_path / "4.json").resolve())
+    calls = []
+    editor = SimpleNamespace(workspace_songs=lambda: (song,),
+                             _begin_song_open=lambda path: calls.append(path) or True)
+    assert ReapcaseEditor.open_workspace_song(editor, song.path)
+    assert calls == [song.path]
+
+
+def test_dirty_song_can_cancel_normal_opening_pipeline(monkeypatch, tmp_path):
+    editor = SimpleNamespace(loading=False, model=SimpleNamespace(modified=True))
+    monkeypatch.setattr("stadium_reaper_bridge.editor.app.messagebox.askyesnocancel",
+                        lambda *args, **kwargs: None)
+    assert ReapcaseEditor._begin_song_open(editor, tmp_path / "next.json") is False
 
 
 def test_structure_region_navigation_excludes_pauses_and_cycles_and_clamps():
