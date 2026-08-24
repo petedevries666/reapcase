@@ -6,6 +6,8 @@ import unittest
 from stadium_reaper_bridge.editor.editing import (editor_for_event, update_marker,
     update_midi_cc, update_stadium_snapshot)
 from stadium_reaper_bridge.editor.model import EditorModel
+from stadium_reaper_bridge.editor.lighting import LightingKind, create_lighting_event
+from stadium_reaper_bridge.analysis import SongAnalyzer
 from stadium_reaper_bridge.midi import RigMidiDecoder
 from stadium_reaper_bridge.stadium import MusicalPosition, StadiumFlag, StadiumSong
 from stadium_reaper_bridge.timeline import stadium_to_timeline
@@ -75,7 +77,7 @@ class SemanticEditingTests(unittest.TestCase):
             capability = model.edit_capability(0)
             self.assertIsNotNone(capability)
             self.assertEqual(capability.family, "helix_preset")
-            self.assertEqual(capability.values, {"channel": 3, "bank_msb": None,
+            self.assertEqual(capability.values, {"label": "BASS PRG", "channel": 3, "bank_msb": None,
                 "bank_lsb": None, "program": 3})
 
             # Saving the form without changing it is a successful no-op.
@@ -131,6 +133,80 @@ class SemanticEditingTests(unittest.TestCase):
             malformed_alias.data["rig_alias"] = {"system": "second_helix"}
             capability = editor_for_event(malformed_alias, model)
             self.assertEqual(capability.family, "midi_cc")
+
+    def test_user_labels_round_trip_without_changing_midi_semantics_or_position(self):
+        flags = [
+            "002-01.001|MIDI_CC;BASS SNAP 3;4;CC;3;69;2",
+            "003-02.011|MIDI_BANK_PROGRAM;BASS PRG;5;Bank/Prog;3;Off;Off;17",
+            "004-03.021|MIDI_CC;EXP2 100%;4;CC;3;2;127",
+            "005-04.031|MIDI_CC;BASS RECORD;4;CC;3;60;127",
+            "006-01.041|MIDI_CC;VIDEO 8 PLAY;4;CC;16;8;12",
+            "007-02.051|MIDI_CC;LIGHTS GO;4;CC;15;42;99",
+            "008-03.061|MIDI_CC;OTHER DEVICE;4;CC;1;7;64",
+        ]
+        labels = ("CODIE GOES BRRR", "VERSE PROGRAM", "SOLO WAH UP", "LOOP IT",
+                  "ROLL CAMERA", "ALL BLUE", "THE MYSTERY BUTTON")
+        with TemporaryDirectory() as directory:
+            model = self.model(flags, directory)
+            before = [(event.position, event.data.get("rig_alias"),
+                       tuple(event.source.fields[4:8])) for event in model.timeline.events]
+            for index, label in enumerate(labels):
+                capability = model.edit_capability(index)
+                self.assertIsNotNone(capability)
+                self.assertIn("label", capability.values)
+                self.assertTrue(model.edit_event(index, dict(capability.values, label=label)))
+                self.assertEqual(model.timeline.events[index].data["label"], label)
+            after = [(event.position, event.data.get("rig_alias"),
+                      tuple(event.source.fields[4:8])) for event in model.timeline.events]
+            self.assertEqual(after, before)
+            self.assertTrue(model.modified)
+
+            output = Path(directory) / "exported.json"
+            model.save_as(output)
+            saved = json.loads(output.read_text(encoding="utf-8"))
+            for label, rendered in zip(labels, saved["flags"]):
+                self.assertIn(f";{label};", rendered)
+            reopened = EditorModel.open(output, ROOT / "config/rig_midi.json")
+            self.assertEqual([event.data["label"] for event in reopened.timeline.events],
+                             list(labels))
+            snapshot = reopened.timeline.events[0]
+            self.assertEqual(snapshot.data["rig_alias"], {"system": "second_helix",
+                "action": "snapshot", "snapshot": 3})
+            self.assertEqual(reopened.lane(snapshot), "SECOND HELIX")
+            inventory = SongAnalyzer().analyze(reopened).summary.inventory
+            self.assertEqual(inventory["Second Helix snapshots"], 1)
+            self.assertEqual(inventory["Second Helix program changes"], 1)
+            self.assertEqual(inventory["Second Helix expression events"], 1)
+            self.assertEqual(inventory["Second Helix looper actions"], 1)
+            self.assertEqual(inventory["Video events"], 1)
+
+    def test_native_stadium_and_structure_editors_do_not_expose_label(self):
+        with TemporaryDirectory() as directory:
+            model = self.model([
+                "001-01.001|PRESETSNAP;;3;SET;PRESET;Snap 2",
+                "002-01.001|LOOPER;RECORD;1;Record",
+                "003-01.001|MARKER;VERSE;7;Off;Off;Off;false;SET;PRESET;Snap 2",
+            ], directory)
+            snapshot, looper, marker = (model.edit_capability(index) for index in range(3))
+            self.assertNotIn("label", snapshot.values)
+            self.assertNotIn("label", looper.values)
+            self.assertEqual(set(marker.values), {"name", "pause_at_marker", "cycle_marker"})
+
+    def test_lighting_label_uses_existing_cue_source_and_is_undoable(self):
+        with TemporaryDirectory() as directory:
+            model = self.model([], directory)
+            event = create_lighting_event(MusicalPosition(4, 2, 1), "WHITE HIT",
+                                          LightingKind.HIT, "white_hit")
+            index = model.insert_event(event)
+            capability = model.edit_capability(index)
+            self.assertEqual(capability.values, {"label": "WHITE HIT"})
+            self.assertTrue(model.edit_event(index, {"label": "CODIE LIGHTS BRRR"}))
+            changed = model.timeline.events[index]
+            self.assertEqual((changed.data["name"], changed.source.cue.name),
+                             ("CODIE LIGHTS BRRR", "CODIE LIGHTS BRRR"))
+            self.assertEqual(changed.position, event.position)
+            self.assertTrue(model.undo())
+            self.assertEqual(model.timeline.events[index].data["name"], "WHITE HIT")
 
     def test_protected_events_have_no_editor(self):
         with TemporaryDirectory() as directory:

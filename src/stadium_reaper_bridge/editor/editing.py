@@ -37,6 +37,15 @@ def _replace_flag(event: TimelineEvent, fields: list[str]) -> TimelineEvent:
     return replace(event, data=data, source=source)
 
 
+def _label(value: Any) -> str:
+    """Validate a user-authored Stadium flag label, including an empty one."""
+    if not isinstance(value, str):
+        raise ValueError("Label must be text")
+    if any(character in value for character in ";|\r\n"):
+        raise ValueError("Label cannot contain semicolons, pipes, or line breaks")
+    return value
+
+
 def update_marker(event: TimelineEvent, *, name: str, pause_at_marker: bool,
                   cycle_marker: bool) -> TimelineEvent:
     fields = _fields(event, "MARKER", 10)
@@ -82,7 +91,7 @@ def update_midi_cc(event: TimelineEvent, *, channel: int, cc: int, value: int,
     fields[5] = str(_integer("CC", cc, 0, 127))
     fields[6] = str(_integer("Value", value, 0, 127))
     if label is not None:
-        fields[1] = label
+        fields[1] = _label(label)
     updated = _replace_flag(event, fields)
     if alias is not None:
         updated.data["rig_alias"] = alias
@@ -97,23 +106,22 @@ def update_second_helix(event: TimelineEvent, decoder, *, command: dict, channel
 
 
 def update_second_helix_preset(event: TimelineEvent, *, bank_msb: Optional[int],
-                               bank_lsb: Optional[int], program: int, channel: int) -> TimelineEvent:
+                               bank_lsb: Optional[int], program: int, channel: int,
+                               label: str) -> TimelineEvent:
     fields = _fields(event, "MIDI_BANK_PROGRAM", 8)
     fields[4] = str(_integer("MIDI channel", channel, 1, 16))
     for index, name, value in ((5, "Bank MSB", bank_msb), (6, "Bank LSB", bank_lsb)):
         fields[index] = "Off" if value is None else str(_integer(name, value, 0, 127))
     program = _integer("Program", program, 0, 127)
-    # The display label is user-authored metadata, not part of the Program
-    # Change command.  Preserve it (and every unknown trailing field) while
-    # changing only the four proven semantic MIDI fields.
+    fields[1] = _label(label)
     fields[7] = str(program)
     return _replace_flag(event, fields)
 
 
-def update_lighting_cue(event: TimelineEvent, *, name: str) -> TimelineEvent:
+def update_lighting_cue(event: TimelineEvent, *, label: str) -> TimelineEvent:
     if not isinstance(event.source, LightingEventSource):
         raise ValueError("Expected a lighting event")
-    return replace(create_lighting_event(event.position, name, event.source.cue.kind,
+    return replace(create_lighting_event(event.position, label, event.source.cue.kind,
                                          event.source.cue.id), source_index=event.source_index)
 
 
@@ -129,7 +137,7 @@ def editor_for_event(event: TimelineEvent, model) -> Optional[EditCapability]:
     """Return one semantic editor descriptor; semantic aliases win over raw MIDI."""
     if isinstance(event.source, LightingEventSource):
         return EditCapability("lighting", f"EDIT LIGHTING {event.source.cue.kind.value}",
-                              {"name": event.source.cue.name}, update_lighting_cue)
+                              {"label": event.source.cue.name}, update_lighting_cue)
     kind = event.source.type
     if not FLAG_CAPABILITIES.get(kind, {}).get("editable"):
         return None
@@ -150,20 +158,20 @@ def editor_for_event(event: TimelineEvent, model) -> Optional[EditCapability]:
         return EditCapability("stadium_looper", "EDIT STADIUM LOOPER",
                               {"action": data["action"]}, update_stadium_looper)
     if kind == "MIDI_BANK_PROGRAM" and model.lane(event) == "SECOND HELIX":
-        values = {key: data[key] for key in ("channel", "bank_msb", "bank_lsb", "program")}
+        values = {key: data[key] for key in ("label", "channel", "bank_msb", "bank_lsb", "program")}
         return EditCapability("helix_preset", "EDIT SECOND HELIX PRESET", values,
                               update_second_helix_preset)
     if kind != "MIDI_CC":
         return None
     if (alias and alias.get("system") == "second_helix"
             and isinstance(alias.get("action"), str)):
-        values = {**alias, "channel": data["channel"]}
+        values = {"label": data.get("label", ""), **alias, "channel": data["channel"]}
         return EditCapability("helix_" + alias["action"], "EDIT SECOND HELIX " + alias["action"].upper(),
                               values, update_second_helix)
     if alias and alias.get("system") == "video" and isinstance(alias.get("action"), str):
-        return EditCapability("video", "EDIT VIDEO COMMAND", {**alias, "channel": data["channel"]},
+        return EditCapability("video", "EDIT VIDEO COMMAND", {"label": data.get("label", ""), **alias, "channel": data["channel"]},
                               update_second_helix)
-    return EditCapability("midi_cc", "EDIT MIDI CC", {k: data[k] for k in ("channel", "cc", "value")},
+    return EditCapability("midi_cc", "EDIT MIDI CC", {k: data[k] for k in ("label", "channel", "cc", "value")},
                           update_midi_cc)
 
 
@@ -180,23 +188,14 @@ def apply_semantic_edit(event: TimelineEvent, model, capability: EditCapability,
     if family in {"helix_snapshot", "helix_expression"} or (
             family.startswith("helix_") and "action" in values):
         action = values["action"]
-        command = {k: v for k, v in values.items() if k not in {"channel", "context"}}
-        if action == "snapshot":
-            label = f"BASS SNAP {values['snapshot']}"
-        elif action == "expression":
-            label = f"EXP{values['expression']} {0 if values['value'] == 0 else 100}%"
-        else:
-            label = f"BASS {action.upper()}"
+        command = {k: v for k, v in values.items() if k not in {"channel", "context", "label"}}
         return update_second_helix(event, model.decoder, command=command,
-                                   channel=values["channel"], label=label)
+                                   channel=values["channel"], label=values["label"])
     if family == "video":
         action = values["action"]
         command = {"system": "video", "action": action,
                    "video": 0 if action == "rescan_playlist" else values.get("video")}
-        alias = action.replace("play_", "").replace("_", " ").upper()
-        label = ("VIDEO RESCAN PLAYLIST" if action == "rescan_playlist" else
-                 f"VIDEO {values['video']} {alias}")
         return update_second_helix(event, model.decoder, command=command,
-                                   channel=values["channel"], label=label)
+                                   channel=values["channel"], label=values["label"])
     clean = {k: v for k, v in values.items() if k != "context"}
     return capability.apply(event, **clean)

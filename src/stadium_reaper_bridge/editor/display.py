@@ -45,6 +45,10 @@ def badge_text(event: TimelineEvent) -> str:
         return event.data.get("name", "LIGHTS")
     source, data = event.source, event.data
     alias = data.get("rig_alias", {})
+    # MIDI labels are authored presentation metadata.  Device semantics remain
+    # in the decoded alias and must not overwrite what Stadium/Showcase shows.
+    if source.type in {"MIDI_CC", "MIDI_BANK_PROGRAM"}:
+        return str(data.get("label", ""))
     if alias.get("system") == "video":
         return f"VIDEO {alias.get('video', '')} {alias['action'].replace('_', ' ').upper()}".replace("  ", " ")
     if alias.get("system") == "second_helix":
