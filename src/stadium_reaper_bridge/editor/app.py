@@ -6,7 +6,7 @@ Launch with ``PYTHONPATH=src python -m stadium_reaper_bridge.editor.app``.
 from __future__ import annotations
 from typing import Optional
 
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 import hashlib
 import logging
 import os
@@ -14,6 +14,7 @@ import threading
 import tkinter as tk
 import time
 import json
+import inspect
 from pathlib import Path
 from queue import Empty, Queue
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -25,7 +26,8 @@ from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_H
                      drag_units, fit_range_scale, fit_song_scale, horizontal_wheel_units,
                      marquee_candidates, normalized_rectangle, snap_drag_delta,
                      snapped_units_at_x, timeline_x, units_at_x,
-                     is_major_display_bar, timeline_grid_density, zoom_about_cursor)
+                     is_major_display_bar, timeline_grid_density, viewport_units,
+                     zoom_about_cursor)
 from .looper import derive_looper_regions, looper_display_label
 from .lighting import (HIT_PRESETS, STATE_PRESETS, LightingKind,
                        create_lighting_event, derive_lighting_regions)
@@ -1666,8 +1668,9 @@ class ReapcaseEditor(tk.Tk):
             if LOAD_PERF:
                 delivered = time.perf_counter()
                 if 'result' in locals():
-                    LOG.debug("UI audio: waveform timing %s queue=%.1f ms extraction=%.1f ms delivery=%.1f ms",
-                        path, (result.worker_started - submitted) * 1000,
+                    LOG.debug("UI audio: waveform timing %s cache=%s full_wav_scan=yes wav_bytes=%d wav_frames=%d queue=%.1f ms extraction=%.1f ms delivery=%.1f ms",
+                        path, result.cache_status, result.wav_bytes, result.wav_frames,
+                        (result.worker_started - submitted) * 1000,
                         (result.worker_completed - result.worker_started) * 1000,
                         (delivered - result.worker_completed) * 1000)
             if self.winfo_exists():
@@ -1838,7 +1841,12 @@ class ReapcaseEditor(tk.Tk):
         self._draw_ghost_waveform(layout, layout.lanes)
         self.canvas.tag_lower("ghost-waveform", "ghost-foreground-anchor")
 
-    def redraw(self):
+    def redraw(self, reason=None):
+        if LOAD_PERF:
+            caller = inspect.currentframe().f_back
+            LOG.debug("timeline full redraw reason=%s caller=%s:%d (%s)",
+                      reason or "unspecified", caller.f_code.co_filename,
+                      caller.f_lineno, caller.f_code.co_name)
         redraw_started = time.perf_counter() if self._waveform_perf.enabled else 0.0
         phase_started = redraw_started
         self.canvas.delete("all")
@@ -1849,6 +1857,7 @@ class ReapcaseEditor(tk.Tk):
         if phase_started:
             self._waveform_perf.record("canvas delete/reset", time.perf_counter() - phase_started)
         if not self.model: return
+        layer_counts = Counter()
         m = self.model
         total_beats = m.song_end_units / m.song.ppqn + 2
         width = HEADER_WIDTH + total_beats * self.pixels_per_beat
@@ -1886,6 +1895,7 @@ class ReapcaseEditor(tk.Tk):
             y += current_height
         if phase_started:
             self._waveform_perf.record("lane backgrounds", time.perf_counter() - phase_started)
+            layer_counts["audio backgrounds"] = len(m.audio_tracks) * 2
         # The FULL-SONG overview consumes the same cached peak pyramid and the
         # same tempo-aware viewport mapping as its ordinary audio track.  Draw
         # it directly over lane backgrounds so every semantic layer stays on
@@ -1895,6 +1905,7 @@ class ReapcaseEditor(tk.Tk):
         # timeline foreground primitives without reconstructing the canvas.
         self.canvas.create_line(0, 0, 0, 0, tags=("ghost-foreground-anchor",))
         grid_started = time.perf_counter() if self._waveform_perf.enabled else 0.0
+        grid_item_start = len(self.canvas.find_all())
         grid_end = m.song_end_units + 2 * m.song.ppqn
         visible_left = self.canvas.canvasx(0)
         visible_right = visible_left + max(1, self.canvas.winfo_width())
@@ -1919,7 +1930,9 @@ class ReapcaseEditor(tk.Tk):
             if prominent: self.canvas.create_text(x + 4, 2, text=f"{bar:03d}", anchor="nw", fill=TIMELINE.ruler_text)
         if grid_started:
             self._waveform_perf.record("grid", time.perf_counter() - grid_started)
+            layer_counts["timeline grid"] = len(self.canvas.find_all()) - grid_item_start
         semantic_started = time.perf_counter() if self._waveform_perf.enabled else 0.0
+        semantic_item_start = len(self.canvas.find_all())
         preview_selection = self._marquee_selection()
         self.event_bounds = {}
         self.sequence_bounds = {}
@@ -1927,22 +1940,28 @@ class ReapcaseEditor(tk.Tk):
         structure_layout = derive_structure_layout(m.timeline.events, m._units, m.song_end_units)
         region_sources = {i for region in structure_layout.regions for i in region.source_event_indices}
         view_left = self.canvas.canvasx(0) + HEADER_WIDTH
+        material_left = self.canvas.canvasx(0) - 256
+        material_right = (self.canvas.canvasx(0)
+                          + max(1, self.canvas.winfo_width()) + 256)
         colors = lane_colors("STRUCTURE")
         marker_region_number = 0
         for region in structure_layout.regions if "STRUCTURE" in visible_lanes else ():
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
+            marker_number = marker_region_number
+            if region.kind == "marker":
+                marker_region_number += 1
+            if x2 < material_left or x1 > material_right:
+                continue
             sub_y = lane_tops["STRUCTURE"] if region.kind == "marker" else lane_tops["STRUCTURE"] + MARKERS_HEIGHT + PAUSES_HEIGHT
             source = region.source_event_indices[0]
             selected = any(index in m.selected for index in region.source_event_indices)
             if selected:
                 fill = colors.selected
             elif region.kind == "marker":
-                fill = structure_region_fill(marker_region_number)
+                fill = structure_region_fill(marker_number)
             else:
                 fill = colors.normal
-            if region.kind == "marker":
-                marker_region_number += 1
             tags = (f"event:{source}",)
             self.semantic_sources[source] = region.source_event_indices
             self.canvas.create_rectangle(x1, sub_y + 3, max(x1 + 1, x2),
@@ -1967,6 +1986,8 @@ class ReapcaseEditor(tk.Tk):
             if region.system not in visible_lanes: continue
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
+            if x2 < material_left or x1 > material_right:
+                continue
             bounds = looper_item_bounds(visible_lanes, region.system, x1, x2)
             _, y1, _, y2 = bounds
             source = region.source_event_indices[0]
@@ -1990,6 +2011,8 @@ class ReapcaseEditor(tk.Tk):
         for region in lighting_regions if "LIGHTS" in visible_lanes else ():
             x1 = timeline_x(region.start_units, m.song.ppqn, self.pixels_per_beat)
             x2 = timeline_x(region.end_units, m.song.ppqn, self.pixels_per_beat)
+            if x2 < material_left or x1 > material_right:
+                continue
             y1, y2 = lane_tops["LIGHTS"] + 5, lane_tops["LIGHTS"] + LANE_HEIGHT - 5
             source = region.source_event_index
             selected = source in m.selected
@@ -2078,6 +2101,8 @@ class ReapcaseEditor(tk.Tk):
             if i in region_sources or i in looper_sources or i in lighting_sources:
                 continue
             event_lane = m.lane(event); x = timeline_x(m._units(event.position), m.song.ppqn, self.pixels_per_beat)
+            if x < material_left or x > material_right:
+                continue
             y = lane_tops[m.lane(event)] + 27
             if event_lane == "STRUCTURE":
                 sublane = structure_sublane(event)
@@ -2119,11 +2144,22 @@ class ReapcaseEditor(tk.Tk):
             elapsed = time.perf_counter() - semantic_started
             self._waveform_perf.record("semantic events", elapsed)
             self._waveform_perf.record("structure/events drawing", elapsed)
+            layer_counts["structure/events"] = (
+                len(self.canvas.find_all()) - semantic_item_start)
         audio_started = time.perf_counter() if self._waveform_perf.enabled else 0.0
         tile_stats_before = self._waveform_render_cache.stats.copy()
         tiles_requested = 0
+        audio_grid_item_total = 0
         for lane_offset, track in enumerate(m.audio_tracks if audio_visible else ()):
+            track_started = time.perf_counter()
+            track_items_started = len(self.canvas.find_all())
+            category = {name: (0.0, 0) for name in (
+                "audio clip/body drawing", "audio labels",
+                "waveform preparation", "waveform image placement",
+                "audio grid calculation", "audio grid Canvas creation")}
             y = layout.audio_top + lane_offset * LANE_HEIGHT
+            body_started = time.perf_counter()
+            body_items = len(self.canvas.find_all())
             flags = " ".join(word for enabled, word in ((track.source.get("mute"), "MUTE"),
                                                           (track.source.get("solo"), "SOLO")) if enabled)
             levels = f"trim {track.source.get('trim', '?')}  gain {track.source.get('gain', '?')}"
@@ -2146,21 +2182,36 @@ class ReapcaseEditor(tk.Tk):
                       "invalid": "Invalid"}.get(track.status, "Unavailable"))
             if track.offset != 0:
                 state += f" | raw offset {track.offset} (unit unknown)"
+            clip_body_started = time.perf_counter()
+            clip_body_items = len(self.canvas.find_all())
             self.canvas.create_rectangle(start_x, y + 22, end_x, y + 62,
                                          fill=AUDIO.clip if track.file_info else AUDIO.missing_clip,
                                          outline=AUDIO.clip_outline if track.file_info else AUDIO.missing_outline)
+            category["audio clip/body drawing"] = (
+                time.perf_counter() - clip_body_started,
+                len(self.canvas.find_all()) - clip_body_items)
             clip_label = self.canvas.create_text(start_x + 6, y + 32, anchor="w",
                                                  fill=AUDIO.text,
                                                  text=f"{track.filename}  |  {state}")
+            total_body_items = len(self.canvas.find_all()) - body_items
+            category["audio labels"] = (
+                max(0.0, time.perf_counter() - body_started
+                    - category["audio clip/body drawing"][0]),
+                total_body_items - category["audio clip/body drawing"][1])
             summary = self.waveforms.get(waveform_cache_key(track))
             if summary and m.tempo_map:
+                preparation_started = time.perf_counter()
                 center, amplitude = y + 42, 18
                 with self._waveform_perf.measure("normal waveform preparation"):
                     with self._waveform_perf.measure("waveform tile selection"):
                         prepared = self._prepared_tiles(waveform_cache_key(track), summary)
+                category["waveform preparation"] = (
+                    time.perf_counter() - preparation_started, 0)
                 tiles_requested += len(prepared)
                 foreground = tuple(bytes.fromhex(AUDIO.waveform.removeprefix("#")))
                 background = tuple(bytes.fromhex(AUDIO.clip.removeprefix("#")))
+                placement_started = time.perf_counter()
+                waveform_items = len(self.canvas.find_all())
                 for key, tile in prepared:
                     image = self._tile_photo(key, tile, 40, foreground, background)
                     self._waveform_images.append(image)
@@ -2172,10 +2223,32 @@ class ReapcaseEditor(tk.Tk):
                 self.canvas.create_line(start_x, center, end_x, center,
                                         fill=AUDIO.waveform, width=1)
                 self.canvas.tag_raise(clip_label)
-            if self.audio_grid_overlay and self.pixels_per_beat >= 40:
-                bar_starts = {point.units for point in
-                              m.timing_map.iter_bars(0, m.song_end_units)}
-                for unit in range(0, m.song_end_units + 1, max(1, m.song.ppqn // 4)):
+                category["waveform image placement"] = (
+                    time.perf_counter() - placement_started,
+                    len(self.canvas.find_all()) - waveform_items)
+            if self.audio_grid_overlay:
+                calculation_started = time.perf_counter()
+                grid_start, grid_stop = viewport_units(
+                    self.canvas.canvasx(0), max(1, self.canvas.winfo_width()),
+                    m.song.ppqn, self.pixels_per_beat, m.song_end_units)
+                shortest = m.timing_map.minimum_beats_per_bar(grid_start, grid_stop)
+                audio_density = timeline_grid_density(self.pixels_per_beat, shortest)
+                bars = tuple(m.timing_map.iter_bars(grid_start, grid_stop))
+                bar_starts = {point.units for point in bars
+                              if is_major_display_bar(point.position.bar, audio_density)}
+                if self.pixels_per_beat >= 40:
+                    step = max(1, m.song.ppqn // 4)
+                    first = grid_start - grid_start % step
+                    units = range(first, grid_stop + 1, step)
+                elif audio_density.show_beats:
+                    units = (point.units for point in
+                             m.timing_map.iter_beats(grid_start, grid_stop))
+                else:
+                    units = iter(sorted(bar_starts))
+                calculation_elapsed = time.perf_counter() - calculation_started
+                creation_started = time.perf_counter()
+                grid_items = len(self.canvas.find_all())
+                for unit in units:
                     x = timeline_units_to_x(unit, m.song.ppqn, self.pixels_per_beat,
                                             HEADER_WIDTH)
                     beat = unit % m.song.ppqn == 0
@@ -2183,12 +2256,25 @@ class ReapcaseEditor(tk.Tk):
                     self.canvas.create_line(x, y + 22, x, y + 62,
                         fill=AUDIO.grid_bar if bar else (AUDIO.grid_beat if beat else AUDIO.grid_subdivision),
                         width=2 if bar else 1, dash=() if beat else (1, 3))
+                category["audio grid calculation"] = (calculation_elapsed, 0)
+                category["audio grid Canvas creation"] = (
+                    time.perf_counter() - creation_started,
+                    len(self.canvas.find_all()) - grid_items)
+                audio_grid_item_total += category["audio grid Canvas creation"][1]
+            if LOAD_PERF:
+                LOG.debug("AUDIO %s: %s total=%.1f ms/%d items", track.name,
+                    ", ".join("%s %.1f ms/%d items" % (name, seconds * 1000, count)
+                              for name, (seconds, count) in category.items()),
+                    (time.perf_counter() - track_started) * 1000,
+                    len(self.canvas.find_all()) - track_items_started)
         if audio_started:
             self._waveform_perf.record("audio lane drawing", time.perf_counter() - audio_started)
             LOG.debug("timeline waveform viewport width=%d zoom=%.3f tiles=%d hits=%d misses=%d",
                 max(1, self.canvas.winfo_width()), self.pixels_per_beat, tiles_requested,
                 self._waveform_render_cache.stats["tile_hit"] - tile_stats_before["tile_hit"],
                 self._waveform_render_cache.stats["tile_miss"] - tile_stats_before["tile_miss"])
+            layer_counts["audio grids"] = audio_grid_item_total
+            layer_counts["waveform images"] = len(self.canvas.find_withtag("waveform-layer"))
         if self.marquee_anchor and self.marquee_point:
             bounds = normalized_rectangle(*self.marquee_anchor, *self.marquee_point)
             self.canvas.create_rectangle(*bounds, fill=TIMELINE.marquee_fill, stipple="gray50",
@@ -2278,6 +2364,7 @@ class ReapcaseEditor(tk.Tk):
                                     tags=("track-drag",))
         if headers_started:
             self._waveform_perf.record("fixed headers", time.perf_counter() - headers_started)
+            layer_counts["headers"] = len(self.canvas.find_withtag("fixed-header"))
         unsupported = ", ".join(m.unsupported_types) or "none"
         resolved = sum(track.file_info is not None for track in m.audio_tracks)
         ready = sum(str(track.resolved_path) in self.waveforms for track in m.audio_tracks
@@ -2296,6 +2383,7 @@ class ReapcaseEditor(tk.Tk):
             LOG.debug("timeline canvas items=%d visible_width=%d zoom=%.3f",
                       len(self.canvas.find_all()), max(1, self.canvas.winfo_width()),
                       self.pixels_per_beat)
+            LOG.debug("timeline canvas layers: %s", dict(layer_counts))
         if redraw_started:
             self._waveform_perf.record("full redraw", time.perf_counter() - redraw_started)
             self._waveform_perf.log(LOG)

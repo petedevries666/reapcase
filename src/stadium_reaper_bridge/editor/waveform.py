@@ -62,14 +62,24 @@ class TimedWaveformResult:
     summary: "WaveformPyramid"
     worker_started: float
     worker_completed: float
+    cache_status: str = "MISS"
+    wav_bytes: int = 0
+    wav_frames: int = 0
 
 
 def timed_extract_waveform(path: Union[str, Path], **kwargs) -> TimedWaveformResult:
     """Run extraction while measuring only time actually spent by the worker."""
     started = time.perf_counter()
-    summary = extract_waveform(path, **kwargs)
+    # There is not yet a persistent .reapwave reader in this application.  Be
+    # explicit about that in diagnostics instead of making a fast/slow scan
+    # look like an unexplained cache result.
+    source = Path(path)
+    cache = source.with_suffix(".reapwave")
+    cache_status = "INVALID" if cache.exists() else "MISS"
+    summary = extract_waveform(source, **kwargs)
     completed = time.perf_counter()
-    return TimedWaveformResult(summary, started, completed)
+    return TimedWaveformResult(summary, started, completed, cache_status,
+                               source.stat().st_size, summary.total_frames)
 
 
 class WaveformRenderCache:

@@ -28,6 +28,23 @@ class TimelineGridDensity:
     bar_stride: int
 
 
+def viewport_units(viewport_left: float, viewport_width: float, ppqn: int,
+                   pixels_per_beat: float, song_end_units: int,
+                   margin_pixels: float = 256.0) -> tuple[int, int]:
+    """Return the bounded timeline interval worth materializing on a Canvas.
+
+    The fixed header is included in canvas coordinates, so :func:`units_at_x`
+    is deliberately used rather than duplicating that origin adjustment.
+    ``margin_pixels`` gives scrolling a small ready-to-display buffer without
+    turning off-screen Song detail into thousands of Tk objects.
+    """
+    left = units_at_x(max(HEADER_WIDTH, viewport_left - margin_pixels),
+                      ppqn, pixels_per_beat)
+    right = units_at_x(viewport_left + max(1.0, viewport_width) + margin_pixels,
+                       ppqn, pixels_per_beat)
+    return max(0, left), min(song_end_units, max(left, right))
+
+
 def timeline_grid_density(pixels_per_beat: float, beats_per_bar: int,
                           minimum_spacing: float = GRID_MAJOR_MIN_SPACING) -> TimelineGridDensity:
     """Choose a musically aligned display bucket for the current screen scale.
