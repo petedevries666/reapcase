@@ -209,6 +209,10 @@ class ReapcaseEditor(tk.Tk):
         self._migration_window = None
         self.audio_grid_overlay = tk.BooleanVar(value=False)
         self._waveform_pending = set()
+        self._initial_waveform_generation = None
+        self._initial_waveform_targets = set()
+        self._initial_waveform_terminal = set()
+        self._initial_waveform_presentation_scheduled = False
         # Two analyzers overlap decode and I/O without turning a Song open into
         # an unbounded burst that competes with playback or Tk.
         self._waveform_pool = _new_waveform_executor()
@@ -1238,9 +1242,11 @@ class ReapcaseEditor(tk.Tk):
         self._waveform_cancel = threading.Event()
         audio_cancel = self._audio_cancel
         self.waveforms.clear(); self._waveform_pending.clear()
+        self._initial_waveform_generation = generation = self._load_generation + 1
+        self._initial_waveform_targets.clear(); self._initial_waveform_terminal.clear()
+        self._initial_waveform_presentation_scheduled = False
         self._waveform_render_cache.clear(); self._waveform_photo_cache.clear()
-        self._load_generation += 1
-        generation = self._load_generation
+        self._load_generation = generation
         self._audio_ready = False; self._audio_error = None
         if hasattr(self, "play_button"): self.play_button.state(["disabled"])
         self.loading = True
@@ -1482,6 +1488,16 @@ class ReapcaseEditor(tk.Tk):
             return
         tracks = [track for track in model.audio_tracks
                   if track.resolved_path and track.file_info]
+        targets = {str(track.resolved_path) for track in tracks}
+        if getattr(self, "_initial_waveform_generation", None) != generation:
+            self._initial_waveform_generation = generation
+            self._initial_waveform_terminal = set()
+        self._initial_waveform_targets = targets
+        self._initial_waveform_terminal.intersection_update(targets)
+        self._initial_waveform_terminal.update(
+            targets.intersection(getattr(self, "waveforms", {})))
+        self._initial_waveform_presentation_scheduled = False
+        ReapcaseEditor._update_waveform_header(self, generation)
         # Submission order is executor priority. Prefer vertically visible
         # audio lanes; an optional FULL-SONG ghost is next, and offscreen lanes
         # cannot occupy both workers before visible material is queued.
@@ -1509,6 +1525,41 @@ class ReapcaseEditor(tk.Tk):
         tracks.sort(key=lambda track: priority[id(track)])
         for track in tracks:
             self._request_waveform(track.resolved_path, generation)
+        # Targeted invalidation schedules the first visible tiles as each result
+        # arrives. Submission of every eligible source completes the initial
+        # presentation plan; later viewport tile work is intentionally absent.
+        self._initial_waveform_presentation_scheduled = True
+        ReapcaseEditor._update_waveform_header(self, generation)
+
+    def _update_waveform_header(self, generation=None):
+        """Publish initial analysis progress without touching the Timeline."""
+        current_generation = getattr(self, "_load_generation", generation)
+        generation = current_generation if generation is None else generation
+        if (generation != current_generation or not self._audio_ready or
+                getattr(self, "_initial_waveform_generation", None) != generation):
+            return
+        if not hasattr(self, "audio_status") or not hasattr(self, "model"):
+            return
+        targets = self._initial_waveform_targets
+        complete = len(targets.intersection(self._initial_waveform_terminal))
+        waveforms = ("WAVEFORMS READY" if
+                     complete == len(targets) and
+                     self._initial_waveform_presentation_scheduled else
+                     f"WAVEFORMS {complete}/{len(targets)}")
+        self.audio_status.set(ReapcaseEditor._audio_ready_text(self.model) +
+                              f"  •  {waveforms}")
+
+    @staticmethod
+    def _audio_ready_text(model):
+        ready = sum(t.status == "ready" for t in model.audio_tracks)
+        missing = sum(t.status == "missing" for t in model.audio_tracks)
+        invalid = sum(t.status == "invalid" for t in model.audio_tracks)
+        suffix = []
+        if missing: suffix.append(f"{missing} missing")
+        if invalid: suffix.append(f"{invalid} invalid")
+        return ("Audio: READY" +
+                (f" — {ready}/{len(model.audio_tracks)} resolved, " +
+                 ", ".join(suffix) if suffix else ""))
 
     def _set_audio_ready(self, model):
         self._audio_ready = True
@@ -1518,15 +1569,16 @@ class ReapcaseEditor(tk.Tk):
             self.audio_progress.stop()
             self.audio_progress.configure(mode="determinate", maximum=max(1, len(model.audio_tracks)),
                                           value=len(model.audio_tracks))
-        ready = sum(t.status == "ready" for t in model.audio_tracks)
-        missing = sum(t.status == "missing" for t in model.audio_tracks)
-        invalid = sum(t.status == "invalid" for t in model.audio_tracks)
-        suffix = []
-        if missing: suffix.append(f"{missing} missing")
-        if invalid: suffix.append(f"{invalid} invalid")
-        self.audio_status.set("Audio: READY" +
-                              (f" — {ready}/{len(model.audio_tracks)} resolved, " +
-                               ", ".join(suffix) if suffix else ""))
+        targets = {str(t.resolved_path) for t in model.audio_tracks
+                   if getattr(t, "resolved_path", None) and
+                   getattr(t, "file_info", None)}
+        self._initial_waveform_generation = self._load_generation
+        self._initial_waveform_targets = targets
+        self._initial_waveform_terminal = targets.intersection(
+            getattr(self, "waveforms", {}))
+        self._initial_waveform_presentation_scheduled = False
+        self.audio_status.set(ReapcaseEditor._audio_ready_text(model))
+        ReapcaseEditor._update_waveform_header(self)
 
     def _set_audio_error(self, diagnostic):
         self._audio_ready = False; self._audio_error = diagnostic
@@ -1647,9 +1699,8 @@ class ReapcaseEditor(tk.Tk):
         else:
             self._set_audio_ready(self.model)
         if request_waveforms:
-            for track in tracks:
-                if track.resolved_path: self._request_waveform(track.resolved_path,
-                                                                self._load_generation)
+            self._request_initial_waveforms(self.model, self._load_generation,
+                                            self._waveform_cancel)
 
     def refresh_audio(self):
         if not self.model: return
@@ -1703,18 +1754,22 @@ class ReapcaseEditor(tk.Tk):
             if generation != self._load_generation or cancel.is_set(): return
             try: result = future.result()
             except Exception:
-                return
+                result = None
             else: self.waveforms[path] = result.summary
             if LOAD_PERF:
                 delivered = time.perf_counter()
-                if 'result' in locals():
+                if result is not None:
                     LOG.debug("UI audio: waveform timing %s cache=%s full_wav_scan=yes wav_bytes=%d wav_frames=%d queue=%.1f ms extraction=%.1f ms delivery=%.1f ms",
                         path, result.cache_status, result.wav_bytes, result.wav_frames,
                         (result.worker_started - submitted) * 1000,
                         (result.worker_completed - result.worker_started) * 1000,
                         (delivered - result.worker_completed) * 1000)
-            if self.winfo_exists():
+            if result is not None and self.winfo_exists():
                 self._invalidate_waveform_track(path, generation)
+            if (generation == getattr(self, "_initial_waveform_generation", None) and
+                    path in getattr(self, "_initial_waveform_targets", ())):
+                self._initial_waveform_terminal.add(path)
+                ReapcaseEditor._update_waveform_header(self, generation)
         self.after(40, poll)
 
     def _tile_photo(self, tile_key, tile, height, foreground, background=None,

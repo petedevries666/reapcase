@@ -7,6 +7,7 @@ name = "stadium-reaper-bridge"
 version = "0.1.0"
 description = "Lossless foundation for Helix Stadium Song and REAPER conversion"
 requires-python = ">=3.9"
+dependencies = ["audioop-lts>=0.2.1; python_version >= '3.13'"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",

@@ -9,7 +9,8 @@ from concurrent.futures import CancelledError
 
 from stadium_reaper_bridge.editor.layout import HEADER_WIDTH
 from stadium_reaper_bridge.editor.waveform import (
-    WaveformRenderCache, analyze_grid_sync, choose_peak_level, display_peaks, extract_waveform,
+    DEFAULT_BASE_BUCKET_FRAMES, WaveformRenderCache, analyze_grid_sync,
+    choose_peak_level, display_peaks, extract_waveform,
     frame_to_canvas_x, frame_x, raster_ppm, timed_extract_waveform, viewport_columns,
 )
 from stadium_reaper_bridge.editor.audio import TempoChange, TempoMap
@@ -50,6 +51,26 @@ class WaveformTests(unittest.TestCase):
             self.assertGreaterEqual(max(level.maximum), 0.99)
             self.assertLessEqual(min(level.minimum), -0.99)
         self.assertEqual(summary.channels, 2)
+
+    def test_musical_default_reduces_buckets_without_moving_timeline(self):
+        self.assertEqual(DEFAULT_BASE_BUCKET_FRAMES, 256)
+        tempo, _ = self.tempo()
+        marker_units = 3 * 240 + 60  # a sixteenth-note anticipation
+        marker_x = HEADER_WIDTH + marker_units / 240 * 360
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "resolution.wav"
+            write_impulses(path, RATE, {12_345: (1, 0)})
+            fine = extract_waveform(path, base_bucket_frames=32)
+            default = extract_waveform(path)
+        self.assertLessEqual(len(default.levels[0]),
+                             (len(fine.levels[0]) + 7) // 8)
+        # Waveform resolution is not an input to exact marker/playhead mapping.
+        self.assertEqual(frame_to_canvas_x(12_345, RATE, tempo, 240, 360,
+                                           HEADER_WIDTH),
+                         frame_to_canvas_x(12_345, default.sample_rate, tempo,
+                                           240, 360, HEADER_WIDTH))
+        self.assertEqual(marker_x, HEADER_WIDTH + marker_units / 240 * 360)
+        self.assertGreater(max(default.levels[0].maximum), .99)
 
     def test_stale_waveform_scan_cancels_cooperatively(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,12 +149,14 @@ class WaveformTests(unittest.TestCase):
             tempo, _ = self.tempo()
             with patch("stadium_reaper_bridge.editor.waveform.wave.open",
                        side_effect=AssertionError("renderer reread WAV")):
-                left, columns = viewport_columns(summary, tempo, 240, 400, 0, 900,
+                left, columns = viewport_columns(summary, tempo, 240, 360, 0, 900,
                                                  HEADER_WIDTH, margin=0)
                 ppm = raster_ppm(columns)
         active = [index for index, (low, high) in enumerate(columns) if high > .9]
         self.assertTrue(active)
-        self.assertLessEqual(len(active), 2)  # narrow vertical impulse, never a polygon slope
+        # A default bucket is at most 3.84 pixels at the editor's real maximum
+        # zoom. It remains a narrow vertical cue, never a polygon slope.
+        self.assertLessEqual(len(active), 5)
         self.assertTrue(ppm.startswith(b"P6\n"))
         self.assertEqual(left, HEADER_WIDTH)
 
