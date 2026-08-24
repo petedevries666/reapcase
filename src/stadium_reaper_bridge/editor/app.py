@@ -792,6 +792,8 @@ class ReapcaseEditor(tk.Tk):
         for device,actions in s.looper_actions.items(): loop.append(f"{device} Looper: " + (" / ".join(f"{k} {v}" for k,v in actions.items()) if actions else "NONE"))
         bpm = f"{s.bpm:g}" if s.bpm is not None else "—"
         positions = f"First {s.first_position.render() if s.first_position else '—'}   Last {s.last_position.render() if s.last_position else '—'}   END {s.end_position.render() if s.end_position else '—'}"
+        if s.end_behavior:
+            positions += f"   End behavior: {s.end_behavior}"
         win.summary.set(f"SONG SUMMARY — {s.name}\nDuration {int(s.duration_seconds//60):02d}:{s.duration_seconds%60:06.3f}   Bars {s.bars}   Regions {s.regions}   BPM {bpm}   Time signature {s.time_signature}\n{positions}\n" + "   ".join(f"{k} {v}" for k,v in s.inventory.items()) + "\n" + "   ".join(loop) + f"\n\nANALYSIS   {counts[Severity.ERROR]} ERRORS   {counts[Severity.WARNING]} WARNINGS   {counts[Severity.INFO]} INFO" + ("\n✓ No critical issue detected" if not counts[Severity.ERROR] else ""))
         win.results.delete(*win.results.get_children())
         for n,r in enumerate(report.results): win.results.insert("", "end",iid=str(n),values=(r.severity.value,r.category,r.position.render() if r.position else "—",r.message))
@@ -2892,6 +2894,11 @@ class ReapcaseEditor(tk.Tk):
             "midi_cc": (("label", "Label", "text"), ("channel", "Channel", "int"), ("cc", "CC", "int"),
                         ("value", "Value", "int")),
             "lighting": (("label", "Label", "text"),),
+            "end": (("end_behavior", "End of Song", ("Pause", "Play Next", "Cue Next", "Repeat", "Cue Same")),
+                    ("fade_out", "Fade Out", "bool"),
+                    ("fade_length", "Fade Length", "float"),
+                    ("gap_before_next_song", "Gap Before Next Song", "bool"),
+                    ("gap_length", "Gap Length", "float")),
         }
         if family == "video":
             schemas[family] = (("label", "Label", "text"), ("video", "Video", "optional_int"),
@@ -2908,6 +2915,7 @@ class ReapcaseEditor(tk.Tk):
         dialog.transient(self); dialog.grab_set()
         frame = ttk.Frame(dialog, padding=14); frame.pack(fill="both", expand=True)
         variables = {}
+        widgets = {}
         for row, (key, label, kind) in enumerate(schema):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
             if kind == "bool":
@@ -2921,8 +2929,26 @@ class ReapcaseEditor(tk.Tk):
                 variable = tk.StringVar(value="" if current is None else str(current))
                 widget = ttk.Entry(frame, textvariable=variable, width=28,
                                    state="readonly" if kind == "readonly" else "normal")
-            variables[key] = (variable, kind); widget.grid(row=row, column=1, sticky="ew", pady=4)
-        buttons = ttk.Frame(frame); buttons.grid(row=len(schema), column=0, columnspan=2, sticky="e", pady=(14, 0))
+            variables[key] = (variable, kind); widgets[key] = widget
+            widget.grid(row=row, column=1, sticky="ew", pady=4)
+        if family == "end":
+            ttk.Label(frame, text="Final behavior may also depend on Stadium Global Settings > Songs.",
+                      wraplength=360).grid(row=len(schema), column=0, columnspan=2,
+                                           sticky="w", pady=(8, 0))
+            def refresh_end_states(*_args):
+                widgets["fade_length"].configure(
+                    state="normal" if variables["fade_out"][0].get() else "disabled")
+                gap_allowed = variables["end_behavior"][0].get() != "Pause"
+                widgets["gap_before_next_song"].configure(
+                    state="normal" if gap_allowed else "disabled")
+                widgets["gap_length"].configure(state="normal" if gap_allowed and
+                    variables["gap_before_next_song"][0].get() else "disabled")
+            variables["fade_out"][0].trace_add("write", refresh_end_states)
+            variables["gap_before_next_song"][0].trace_add("write", refresh_end_states)
+            variables["end_behavior"][0].trace_add("write", refresh_end_states)
+            refresh_end_states()
+        button_row = len(schema) + (1 if family == "end" else 0)
+        buttons = ttk.Frame(frame); buttons.grid(row=button_row, column=0, columnspan=2, sticky="e", pady=(14, 0))
         ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="left", padx=4)
         def save():
             edited = dict(values)
@@ -2931,6 +2957,7 @@ class ReapcaseEditor(tk.Tk):
                     if kind == "readonly": continue
                     raw = variable.get()
                     if kind == "bool": edited[key] = bool(raw)
+                    elif kind == "float": edited[key] = float(raw)
                     elif kind in {"int", "optional_int"} or (isinstance(kind, tuple) and kind and isinstance(kind[0], int)):
                         edited[key] = None if kind == "optional_int" and not raw.strip() else int(raw)
                     else: edited[key] = raw

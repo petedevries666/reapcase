@@ -15,9 +15,11 @@
 | Lighting | show-layer `LIGHTS` | name (kind is fixed) |
 | Instruction | show-layer instruction | label, sample ID, muted |
 
-`START`, `TIME`, `END`, `CYCLE_END`, and derived `SEQCLICK` points are intentionally
-non-editable. START/TIME edits require validated timing-map reconstruction; END and
-CYCLE_END have no proven useful property; SEQCLICK timing is derived from that map.
+`START`, `TIME`, `CYCLE_END`, and derived `SEQCLICK` points are intentionally
+non-editable. START/TIME edits require validated timing-map reconstruction;
+CYCLE_END has no proven editable property; SEQCLICK timing is derived from that map.
+Native `END` flags expose Stadium fade, gap, and End of Song behavior fields while
+retaining their structural position and any unknown trailing payload fields.
 
 ## Dispatch and replacement
 

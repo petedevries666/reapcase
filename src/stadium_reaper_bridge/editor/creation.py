@@ -126,7 +126,7 @@ FLAG_CAPABILITIES = {
     "CYCLE_END": {"parseable": True, "creatable": True, "editable": False},
     "START": {"parseable": True, "creatable": False, "editable": False},
     "TIME": {"parseable": True, "creatable": False, "editable": False},
-    "END": {"parseable": True, "creatable": False, "editable": False},
+    "END": {"parseable": True, "creatable": False, "editable": True},
     "LOOPER": {"parseable": True, "creatable": True, "editable": True},
     "MIDI_CC": {"parseable": True, "creatable": True, "editable": True},
     "MIDI_BANK_PROGRAM": {"parseable": True, "creatable": True, "editable": True},

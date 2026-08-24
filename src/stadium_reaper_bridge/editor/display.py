@@ -61,6 +61,8 @@ def badge_text(event: TimelineEvent) -> str:
     if source.type == "TIME":
         return (f"{data.get('tempo', '?'):g} BPM · "
                 f"{data.get('time_signature_numerator', '?')}/{data.get('time_signature_denominator', '?')}")
+    if source.type == "END" and data.get("end_behavior"):
+        return f"END · {str(data['end_behavior']).upper()}"
     if source.type == "LOOPER":
         return f"LOOPER {data.get('action', '').upper()}".strip()
     if source.type == "PRESETSNAP" and data.get("snapshot"):
