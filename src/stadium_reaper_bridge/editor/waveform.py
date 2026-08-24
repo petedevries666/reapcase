@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import struct
 import time
+import warnings
 from concurrent.futures import CancelledError
 import wave
 import zlib
@@ -23,9 +24,15 @@ from typing import Callable, Hashable, Iterator, MutableMapping, Optional, Proto
 from .audio_engine import AudioEngine
 
 
-# 32 frames is below one display pixel at common DAW zoom levels at 48 kHz,
-# while the upper pyramid levels keep long recordings compact to render.
-DEFAULT_BASE_BUCKET_FRAMES = 32
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+    import audioop
+
+
+# At the editor's 360-pixel-per-beat maximum zoom, 256 frames span 3.84 pixels
+# at 48 kHz/120 BPM (versus 90 pixels for a sixteenth note).  This retains a
+# crisp transient cue without storing detail the musical timeline cannot use.
+DEFAULT_BASE_BUCKET_FRAMES = 256
 DEFAULT_READ_FRAMES = 65536
 DEFAULT_TILE_WIDTH = 512
 
@@ -323,6 +330,12 @@ def _pcm_integers(data: bytes, width: int):
     return values
 
 
+def _sample_extrema(values, start: int = 0, stop: Optional[int] = None):
+    """Return native-integer extrema without boxing every sample in Python."""
+    view = memoryview(values)
+    return audioop.minmax(view[start:stop], values.itemsize)
+
+
 def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_BASE_BUCKET_FRAMES,
                      read_frames: int = DEFAULT_READ_FRAMES,
                      pause_requested: Optional[Callable[[], bool]] = None,
@@ -356,8 +369,7 @@ def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_B
             raise ValueError("Waveforms support 16/24-bit PCM")
         timings["WAV open"] = time.perf_counter() - opened
         scale = 32768.0 if width == 2 else 8388608.0
-        pending_samples = 0
-        bucket_low, bucket_high = int(scale), -int(scale)
+        pending = array("h" if width == 2 else "i")
         remaining = frames
         while remaining:
             if cancel_requested and cancel_requested():
@@ -381,16 +393,31 @@ def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_B
             remaining -= decoded_frames
             phase = time.perf_counter()
             bucket_sample_limit = base_bucket_frames * channels
-            for sample in samples:
-                if sample < bucket_low: bucket_low = sample
-                if sample > bucket_high: bucket_high = sample
-                pending_samples += 1
-                if pending_samples == bucket_sample_limit:
-                    low_values.append(bucket_low / scale); high_values.append(bucket_high / scale)
-                    pending_samples, bucket_low, bucket_high = 0, int(scale), -int(scale)
+            start = 0
+            # Complete the bucket carried across a read boundary first.  The
+            # remaining full buckets can then use a bounded C-level min/max
+            # scan rather than branching once for every sample in Python.
+            if pending:
+                take = min(bucket_sample_limit - len(pending), len(samples))
+                pending.extend(samples[:take]); start = take
+                if len(pending) == bucket_sample_limit:
+                    bucket_low, bucket_high = _sample_extrema(pending)
+                    low_values.append(bucket_low / scale)
+                    high_values.append(bucket_high / scale)
+                    pending = array(pending.typecode)
+            full_stop = len(samples) - ((len(samples) - start) % bucket_sample_limit)
+            for bucket_start in range(start, full_stop, bucket_sample_limit):
+                bucket_low, bucket_high = _sample_extrema(
+                    samples, bucket_start, bucket_start + bucket_sample_limit)
+                low_values.append(bucket_low / scale)
+                high_values.append(bucket_high / scale)
+            if full_stop < len(samples):
+                pending.extend(samples[full_stop:])
             timings["per-block min/max"] += time.perf_counter() - phase
-        if pending_samples:
-            low_values.append(bucket_low / scale); high_values.append(bucket_high / scale)
+        if pending:
+            bucket_low, bucket_high = _sample_extrema(pending)
+            low_values.append(bucket_low / scale)
+            high_values.append(bucket_high / scale)
 
     phase = time.perf_counter()
     levels = [PeakLevel(base_bucket_frames, low_values, high_values)]
