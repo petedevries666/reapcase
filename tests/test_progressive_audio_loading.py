@@ -9,6 +9,7 @@ from stadium_reaper_bridge.editor.audio_engine import PlaybackState
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.editor.model import AudioProgress, AudioProgressPhase
 from stadium_reaper_bridge.editor.audio import AudioResolver
+from stadium_reaper_bridge.editor.waveform import TimedWaveformResult
 
 
 FIXTURE = Path("tests/fixtures/perfect_picture_336.json")
@@ -194,6 +195,35 @@ def test_stale_initial_waveform_callback_does_nothing():
     editor._request_waveform = lambda *_args: (_ for _ in ()).throw(
         AssertionError("stale waveform request"))
     ReapcaseEditor._request_initial_waveforms(editor, model, 1, threading.Event())
+
+
+def test_waveform_completion_invalidates_track_without_full_redraw():
+    future = Future()
+    now = 10.0
+    future.set_result(TimedWaveformResult(object(), now, now + .25))
+    callbacks, invalidated, redraws = [], [], []
+    editor = SimpleNamespace(
+        _load_generation=2, _waveform_cancel=threading.Event(),
+        _waveform_pending=set(), waveforms={}, audio_engine=Engine(),
+        _waveform_pool=SimpleNamespace(submit=lambda *_args, **_kwargs: future),
+        after=lambda _delay, callback: callbacks.append(callback),
+        winfo_exists=lambda: True, redraw=lambda: redraws.append(True),
+        _invalidate_waveform_track=lambda source, generation: invalidated.append(
+            (source, generation)))
+    ReapcaseEditor._request_waveform(editor, "CLICK.wav", 2)
+    callbacks.pop()()
+    assert redraws == []
+    assert invalidated == [("CLICK.wav", 2)]
+    assert "CLICK.wav" in editor.waveforms
+
+
+def test_stale_waveform_completion_cannot_render_items():
+    deleted = []
+    editor = SimpleNamespace(
+        _load_generation=3, model=object(), canvas=SimpleNamespace(
+            delete=lambda tag: deleted.append(tag)))
+    ReapcaseEditor._invalidate_waveform_track(editor, "CLICK.wav", generation=2)
+    assert deleted == []
 
 
 def test_engine_failure_keeps_play_disabled_and_non_modal():

@@ -10,7 +10,7 @@ from concurrent.futures import CancelledError
 from stadium_reaper_bridge.editor.layout import HEADER_WIDTH
 from stadium_reaper_bridge.editor.waveform import (
     WaveformRenderCache, analyze_grid_sync, choose_peak_level, display_peaks, extract_waveform,
-    frame_to_canvas_x, frame_x, raster_ppm, viewport_columns,
+    frame_to_canvas_x, frame_x, raster_ppm, timed_extract_waveform, viewport_columns,
 )
 from stadium_reaper_bridge.editor.audio import TempoChange, TempoMap
 from stadium_reaper_bridge.stadium import MusicalPosition
@@ -57,6 +57,14 @@ class WaveformTests(unittest.TestCase):
             write_impulses(path, 4096, {})
             with self.assertRaises(CancelledError):
                 extract_waveform(path, read_frames=32, cancel_requested=lambda: True)
+
+    def test_worker_timing_measures_actual_extraction_interval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "timed.wav"
+            write_impulses(path, 512, {})
+            result = timed_extract_waveform(path)
+        self.assertLessEqual(result.worker_started, result.worker_completed)
+        self.assertEqual(result.summary.total_frames, 512)
 
     def test_zoom_selects_the_finest_useful_pyramid_level(self):
         with tempfile.TemporaryDirectory() as directory:
