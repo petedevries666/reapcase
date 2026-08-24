@@ -4,6 +4,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 
+from stadium_reaper_bridge.editor import app as editor_app
 from stadium_reaper_bridge.editor.app import ReapcaseEditor
 from stadium_reaper_bridge.editor.audio_engine import PlaybackState
 from stadium_reaper_bridge.editor.model import EditorModel
@@ -183,6 +184,77 @@ def test_initial_waveforms_are_scheduled_only_after_ready():
     assert requested == []
     editor._idle_callbacks.pop()()
     assert requested == [(track.resolved_path, 2)]
+
+
+class CanvasViewport:
+    def __init__(self, top, height):
+        self.top, self.height = top, height
+    def canvasy(self, _y): return self.top
+    def winfo_height(self): return self.height
+
+
+class BoolVariable:
+    def __init__(self, value): self.value = value
+    def get(self): return self.value
+
+
+def waveform_scheduling_editor(monkeypatch, *, ghost_visible):
+    """Editor double whose viewport contains audio track indices two and three."""
+    audio_top = 100
+    monkeypatch.setattr(editor_app, "visible_lane_layout",
+                        lambda *_args: SimpleNamespace(audio_top=audio_top))
+    requested = []
+    editor = SimpleNamespace(
+        _audio_ready=True, canvas=CanvasViewport(
+            audio_top + editor_app.LANE_HEIGHT * 2 + 1,
+            editor_app.LANE_HEIGHT * 2 - 2),
+        lane_order=[], full_song_ghost_visible=BoolVariable(ghost_visible),
+        _effective_lane_visibility=lambda: {},
+        _audio_load_current=lambda *_args: True,
+        _request_waveform=lambda path, generation: requested.append((path, generation)))
+    return editor, requested
+
+
+def scheduling_model():
+    names = ("CUES", "FULL-SONG", "VISIBLE", "CLICK")
+    return SimpleNamespace(audio_tracks=[
+        SimpleNamespace(name=name, resolved_path=Path(f"{name}.wav"), file_info=object())
+        for name in names])
+
+
+def test_visible_waveform_tracks_are_submitted_before_offscreen_tracks(monkeypatch):
+    editor, requested = waveform_scheduling_editor(monkeypatch, ghost_visible=False)
+    ReapcaseEditor._request_initial_waveforms(
+        editor, scheduling_model(), 7, threading.Event())
+    assert [path.name for path, _generation in requested] == [
+        "VISIBLE.wav", "CLICK.wav", "CUES.wav", "FULL-SONG.wav"]
+
+
+def test_visible_ghost_source_precedes_ordinary_offscreen_tracks(monkeypatch):
+    editor, requested = waveform_scheduling_editor(monkeypatch, ghost_visible=True)
+    ReapcaseEditor._request_initial_waveforms(
+        editor, scheduling_model(), 7, threading.Event())
+    assert [path.name for path, _generation in requested] == [
+        "VISIBLE.wav", "CLICK.wav", "FULL-SONG.wav", "CUES.wav"]
+
+
+def test_hidden_ghost_has_no_priority_and_order_is_deterministic(monkeypatch):
+    orders = []
+    for _ in range(2):
+        editor, requested = waveform_scheduling_editor(monkeypatch, ghost_visible=False)
+        ReapcaseEditor._request_initial_waveforms(
+            editor, scheduling_model(), 7, threading.Event())
+        orders.append([path.name for path, _generation in requested])
+    assert orders == [["VISIBLE.wav", "CLICK.wav", "CUES.wav", "FULL-SONG.wav"]] * 2
+
+
+def test_waveform_executor_is_bounded_to_two_workers():
+    pool = editor_app._new_waveform_executor()
+    try:
+        assert editor_app.WAVEFORM_MAX_WORKERS == 2
+        assert pool._max_workers == 2
+    finally:
+        pool.shutdown()
 
 
 def test_stale_initial_waveform_callback_does_nothing():

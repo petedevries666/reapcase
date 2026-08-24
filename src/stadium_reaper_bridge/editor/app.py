@@ -77,6 +77,13 @@ from .background_operations import BackgroundOperations
 
 LOG = logging.getLogger(__name__)
 LOAD_PERF = os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes")
+WAVEFORM_MAX_WORKERS = 2
+
+
+def _new_waveform_executor():
+    """Create the deliberately small analyzer pool."""
+    return ThreadPoolExecutor(max_workers=WAVEFORM_MAX_WORKERS,
+                              thread_name_prefix="waveform")
 UI_AUDIO_POLL_BUDGET_SECONDS = 0.012
 MARKER_MANAGER_COLUMNS = ("kind", "name")
 MARKER_FLAG_FILTER_LANES = ("STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER")
@@ -204,7 +211,7 @@ class ReapcaseEditor(tk.Tk):
         self._waveform_pending = set()
         # Two analyzers overlap decode and I/O without turning a Song open into
         # an unbounded burst that competes with playback or Tk.
-        self._waveform_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="waveform")
+        self._waveform_pool = _new_waveform_executor()
         self._audio_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-resolve")
         self._load_generation = 0
         self._audio_ready = False
@@ -1464,6 +1471,13 @@ class ReapcaseEditor(tk.Tk):
         self.after_idle(lambda: self._request_initial_waveforms(model, generation, cancel))
 
     def _request_initial_waveforms(self, model, generation, cancel):
+        """Queue eligible tracks in deterministic presentation priority.
+
+        This is submission-order priority, not lazy scheduling: all eligible
+        tracks may be submitted immediately.  The bounded executor ensures the
+        visible tracks at the front of the queue begin before ordinary
+        offscreen tracks.
+        """
         if not self._audio_load_current(model, generation, cancel) or not self._audio_ready:
             return
         tracks = [track for track in model.audio_tracks
