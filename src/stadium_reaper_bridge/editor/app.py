@@ -72,6 +72,8 @@ from .background_operations import BackgroundOperations
 
 
 LOG = logging.getLogger(__name__)
+LOAD_PERF = os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes")
+UI_AUDIO_POLL_BUDGET_SECONDS = 0.012
 MARKER_MANAGER_COLUMNS = ("kind", "name")
 MARKER_FLAG_FILTER_LANES = ("STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER")
 
@@ -1306,50 +1308,102 @@ class ReapcaseEditor(tk.Tk):
                               (time.perf_counter() - started) * 1000)
                 if cancel.is_set():
                     prepared.close(); return
-                updates.put(("prepared", prepared))
+                queued_at = time.perf_counter()
+                updates.put(("prepared", (prepared, queued_at)))
+                if LOAD_PERF:
+                    LOG.debug("UI audio: prepared result queued")
             except BaseException as exc:
                 if not cancel.is_set(): updates.put(("error", exc))
         self._audio_pool.submit(work)
         completed = 0
+        if LOAD_PERF:
+            self._start_load_heartbeat(model, generation, cancel)
 
         def poll():
             nonlocal completed
+            callback_started = time.perf_counter()
+            if LOAD_PERF:
+                LOG.debug("UI audio: queue callback start")
             if not self._audio_load_current(model, generation, cancel) or not self.winfo_exists():
                 try:
                     while True:
                         kind, value = updates.get_nowait()
-                        if kind == "prepared": value.close()
+                        if kind == "prepared": value[0].close()
                 except Empty:
                     pass
                 return
+            redraw_needed = False
+            continuation = False
             try:
                 while True:
                     kind, value = updates.get_nowait()
                     if kind == "track":
+                        apply_started = time.perf_counter()
                         model.apply_audio_resolution(value)
+                        if LOAD_PERF:
+                            LOG.debug("UI audio: apply track %d %.1f ms", value.track.number,
+                                      (time.perf_counter() - apply_started) * 1000)
                         completed += 1
                         self._show_audio_progress(AudioProgress(
                             AudioProgressPhase.TRACK_COMPLETE, completed, total,
                             value.track.filename))
-                        if value.track.resolved_path and value.track.file_info:
-                            self._request_waveform(value.track.resolved_path, generation)
-                        self.redraw()
+                        redraw_needed = True
                     elif kind == "progress":
                         self._show_audio_progress(value, completed)
                     elif kind == "resolved":
                         self.audio_status.set("Audio: preparing engine…")
-                        self.after(35, poll)
-                        return
                     elif kind == "prepared":
-                        self._commit_prepared_audio(value, model, generation, cancel)
-                        return
+                        prepared, queued_at = value
+                        received_at = time.perf_counter()
+                        if LOAD_PERF:
+                            LOG.debug("UI audio: prepared result received by Tk %.1f ms after queue",
+                                      (received_at - queued_at) * 1000)
+                        if redraw_needed:
+                            self._timed_loading_redraw(completed)
+                            redraw_needed = False
+                        self._commit_prepared_audio(prepared, model, generation, cancel,
+                                                    received_at=received_at)
+                        continuation = False
+                        break
                     elif kind == "error":
                         self._set_audio_error(str(value))
-                        return
+                        continuation = False
+                        break
+                    if (redraw_needed and
+                            time.perf_counter() - callback_started >= UI_AUDIO_POLL_BUDGET_SECONDS):
+                        continuation = True
+                        break
             except Empty:
-                pass
-            self.after(35, poll)
+                continuation = True
+            if redraw_needed:
+                self._timed_loading_redraw(completed)
+            if LOAD_PERF:
+                LOG.debug("UI audio: queue callback total %.1f ms",
+                          (time.perf_counter() - callback_started) * 1000)
+            if continuation and self._audio_load_current(model, generation, cancel):
+                self.after(0 if not updates.empty() else 35, poll)
         self.after(0, poll)
+
+    def _timed_loading_redraw(self, completed):
+        started = time.perf_counter()
+        self.redraw()
+        if LOAD_PERF:
+            LOG.debug("UI audio: redraw through track %d %.1f ms", completed,
+                      (time.perf_counter() - started) * 1000)
+
+    def _start_load_heartbeat(self, model, generation, cancel, interval_ms=100):
+        """Report Tk starvation while the critical audio startup path is active."""
+        expected = time.perf_counter() + interval_ms / 1000
+        worst = 0.0
+        def beat():
+            nonlocal expected, worst
+            delay = max(0.0, time.perf_counter() - expected)
+            worst = max(worst, delay)
+            LOG.debug("Tk heartbeat max delay: %.1f ms", worst * 1000)
+            if self._audio_load_current(model, generation, cancel) and not self._audio_ready:
+                expected = time.perf_counter() + interval_ms / 1000
+                self.after(interval_ms, beat)
+        self.after(interval_ms, beat)
 
     def _show_audio_progress(self, message, completed=0):
         """Update only header widgets; timeline redraws are track-result driven."""
@@ -1381,15 +1435,34 @@ class ReapcaseEditor(tk.Tk):
         return (generation == self._load_generation and model is self.model
                 and not cancel.is_set())
 
-    def _commit_prepared_audio(self, prepared, model, generation, cancel):
+    def _commit_prepared_audio(self, prepared, model, generation, cancel, received_at=None):
         """Perform the small, I/O-free engine state swap on Tk's thread."""
         if not self._audio_load_current(model, generation, cancel):
             prepared.close()
             return
+        received_at = received_at or time.perf_counter()
+        commit_started = time.perf_counter()
         self.audio_engine.commit(prepared)
+        if LOAD_PERF:
+            LOG.debug("UI audio: AudioEngine.commit() %.1f ms",
+                      (time.perf_counter() - commit_started) * 1000)
         self.monitor_muted = [False] * len(model.audio_tracks)
         self.monitor_solo = [False] * len(model.audio_tracks)
+        ready_started = time.perf_counter()
         self._set_audio_ready(model)
+        if LOAD_PERF:
+            LOG.debug("UI audio: _set_audio_ready() %.1f ms",
+                      (time.perf_counter() - ready_started) * 1000)
+            LOG.debug("UI audio: prepared-received to READY total %.1f ms",
+                      (time.perf_counter() - received_at) * 1000)
+        self.after_idle(lambda: self._request_initial_waveforms(model, generation, cancel))
+
+    def _request_initial_waveforms(self, model, generation, cancel):
+        if not self._audio_load_current(model, generation, cancel) or not self._audio_ready:
+            return
+        for track in model.audio_tracks:
+            if track.resolved_path and track.file_info:
+                self._request_waveform(track.resolved_path, generation)
 
     def _set_audio_ready(self, model):
         self._audio_ready = True
@@ -1573,6 +1646,7 @@ class ReapcaseEditor(tk.Tk):
         path = str(path)
         if path in self.waveforms or path in self._waveform_pending: return
         self._waveform_pending.add(path)
+        extraction_started = time.perf_counter()
         future = self._waveform_pool.submit(
             extract_waveform, path,
             pause_requested=lambda: self.audio_engine.state is PlaybackState.PLAYING,
@@ -1583,7 +1657,15 @@ class ReapcaseEditor(tk.Tk):
             if generation != self._load_generation or cancel.is_set(): return
             try: self.waveforms[path] = future.result()
             except Exception: pass
-            if self.winfo_exists(): self.redraw()
+            if LOAD_PERF:
+                LOG.debug("UI audio: waveform extraction completion %s %.1f ms", path,
+                          (time.perf_counter() - extraction_started) * 1000)
+            if self.winfo_exists():
+                redraw_started = time.perf_counter()
+                self.redraw()
+                if LOAD_PERF:
+                    LOG.debug("UI audio: waveform-triggered redraw %s %.1f ms", path,
+                              (time.perf_counter() - redraw_started) * 1000)
         self.after(40, poll)
 
     def _tile_photo(self, tile_key, tile, height, foreground, background=None,
@@ -1594,6 +1676,7 @@ class ReapcaseEditor(tk.Tk):
         if image is not None:
             self._waveform_photo_cache.move_to_end(variant)
             return image
+        tile_started = time.perf_counter()
         with self._waveform_perf.measure("PhotoImage creation"):
             if background is not None:
                 image = tk.PhotoImage(data=raster_ppm(
@@ -1612,6 +1695,9 @@ class ReapcaseEditor(tk.Tk):
                     image.put(foreground, to=(x, min(y0, y1),
                                                min(len(tile.columns), x + stride),
                                                max(y0, y1) + 1))
+        if LOAD_PERF:
+            LOG.debug("UI audio: waveform tile/photo generation %.1f ms",
+                      (time.perf_counter() - tile_started) * 1000)
         self._waveform_photo_cache[variant] = image
         while len(self._waveform_photo_cache) > self._waveform_render_cache.max_tiles * 2:
             self._waveform_photo_cache.popitem(last=False)

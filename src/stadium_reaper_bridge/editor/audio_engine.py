@@ -10,11 +10,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+import logging
+import os
 import threading
+import time
 import wave
 from typing import Optional, Protocol, Sequence
 
 from .audio import AudioFileInfo, read_wav_info
+
+LOG = logging.getLogger(__name__)
+PERF = os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes")
 
 
 class PlaybackError(ValueError):
@@ -141,7 +147,12 @@ class AudioEngine:
 
     def commit(self, prepared: PreparedAudio) -> None:
         """Install fully prepared resources as one stable engine configuration."""
+        started = time.perf_counter()
+        close_started = time.perf_counter()
         self.close()
+        if PERF:
+            LOG.debug("AudioEngine.close inside commit %.1f ms",
+                      (time.perf_counter() - close_started) * 1000)
         infos = prepared.infos
         self._readers, self._infos, self._stream = (prepared.readers, prepared.infos,
                                                      prepared.stream)
@@ -149,6 +160,9 @@ class AudioEngine:
         self.total_frames = max(i.frames for i in infos)
         self._muted = [False] * len(infos); self._solo = [False] * len(infos)
         self.diagnostic = f"Engine: ready | {self.sample_rate} Hz | Stereo | Buffer: {self.blocksize}"
+        if PERF:
+            LOG.debug("AudioEngine.commit total %.1f ms",
+                      (time.perf_counter() - started) * 1000)
 
     def set_monitor(self, index: int, *, muted: Optional[bool] = None,
                     solo: Optional[bool] = None) -> None:
