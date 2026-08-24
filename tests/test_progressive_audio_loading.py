@@ -1,5 +1,6 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +34,7 @@ class Engine:
         self.state = PlaybackState.STOPPED
         self.commits = self.plays = 0
     def commit(self, _prepared): self.commits += 1
+    def prepare(self, _tracks): return Prepared()
     def play(self): self.plays += 1
     def pause(self): pass
 
@@ -44,12 +46,44 @@ class Progressbar:
     def stop(self): self.running = False
 
 
+class ImmediatePool:
+    def submit(self, function, *args):
+        future = Future()
+        try: future.set_result(function(*args))
+        except BaseException as exc: future.set_exception(exc)
+        return future
+
+
+def polling_editor(model):
+    callbacks, redraws, idle = [], [], []
+    editor = editor_state(model)
+    editor._audio_pool = ImmediatePool()
+    editor.manual_audio_root = None
+    editor.after = lambda _delay, callback: callbacks.append(callback)
+    editor.after_idle = idle.append
+    editor.winfo_exists = lambda: True
+    editor.redraw = lambda: redraws.append(True)
+    editor._show_audio_progress = lambda *_args: None
+    editor._audio_load_current = lambda candidate, generation, cancel: \
+        ReapcaseEditor._audio_load_current(editor, candidate, generation, cancel)
+    editor._timed_loading_redraw = lambda completed: \
+        ReapcaseEditor._timed_loading_redraw(editor, completed)
+    editor._commit_prepared_audio = lambda prepared, candidate, generation, cancel, received_at=None: \
+        ReapcaseEditor._commit_prepared_audio(
+            editor, prepared, candidate, generation, cancel, received_at)
+    editor._set_audio_ready = lambda candidate: ReapcaseEditor._set_audio_ready(editor, candidate)
+    editor._request_initial_waveforms = lambda candidate, generation, cancel: None
+    return editor, callbacks, redraws
+
+
 def editor_state(model=None, generation=2):
+    idle = []
     return SimpleNamespace(
         model=model, _load_generation=generation, _audio_ready=False,
         _audio_error=None, loading=False, audio_engine=Engine(),
         play_button=Button(), audio_status=Variable(), status=Variable(),
-        monitor_muted=[], monitor_solo=[])
+        monitor_muted=[], monitor_solo=[], _idle_callbacks=idle,
+        after_idle=idle.append)
 
 
 def test_resolution_stops_between_tracks_when_cancelled(monkeypatch):
@@ -128,6 +162,38 @@ def test_single_engine_commit_enables_ready_without_waveform_completion():
     assert editor._audio_ready
     assert editor.play_button.states == [["!disabled"]]
     assert editor.audio_status.value == "Audio: READY — 1/2 resolved, 1 missing"
+    assert len(editor._idle_callbacks) == 1
+
+
+def test_initial_waveforms_are_scheduled_only_after_ready():
+    track = SimpleNamespace(resolved_path=Path("track.wav"), file_info=object(), status="ready")
+    model = SimpleNamespace(audio_tracks=[track])
+    editor = editor_state(model)
+    requested = []
+    editor._audio_load_current = lambda candidate, generation, cancel: \
+        ReapcaseEditor._audio_load_current(editor, candidate, generation, cancel)
+    editor._set_audio_ready = lambda candidate: ReapcaseEditor._set_audio_ready(editor, candidate)
+    editor._request_initial_waveforms = lambda candidate, generation, cancel: \
+        ReapcaseEditor._request_initial_waveforms(editor, candidate, generation, cancel)
+    editor._request_waveform = lambda path, generation: requested.append((path, generation))
+
+    ReapcaseEditor._commit_prepared_audio(editor, Prepared(), model, 2, threading.Event())
+    assert editor._audio_ready
+    assert requested == []
+    editor._idle_callbacks.pop()()
+    assert requested == [(track.resolved_path, 2)]
+
+
+def test_stale_initial_waveform_callback_does_nothing():
+    track = SimpleNamespace(resolved_path=Path("track.wav"), file_info=object(), status="ready")
+    model = SimpleNamespace(audio_tracks=[track])
+    editor = editor_state(model)
+    editor._audio_ready = True
+    editor._audio_load_current = lambda candidate, generation, cancel: \
+        ReapcaseEditor._audio_load_current(editor, candidate, generation, cancel)
+    editor._request_waveform = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("stale waveform request"))
+    ReapcaseEditor._request_initial_waveforms(editor, model, 1, threading.Event())
 
 
 def test_engine_failure_keeps_play_disabled_and_non_modal():
@@ -216,3 +282,43 @@ def test_header_progress_switches_modes_without_redrawing_timeline():
     assert not editor.audio_progress.running
     assert editor.audio_progress.config["mode"] == "determinate"
     assert editor.audio_progress.config["value"] == 1
+
+
+def test_queued_track_results_are_applied_with_one_redraw():
+    results = [SimpleNamespace(track=SimpleNamespace(
+        number=index, filename=f"{index}.wav", resolved_path=None, file_info=None,
+        status="missing"))
+        for index in range(1, 4)]
+    applied = []
+    model = SimpleNamespace(
+        audio_tracks=[result.track for result in results],
+        audio_resolution_results=lambda *_args: iter(results),
+        apply_audio_resolution=applied.append)
+    editor, callbacks, redraws = polling_editor(model)
+
+    ReapcaseEditor._start_audio_resolution(editor, model, 2, threading.Event())
+    callbacks.pop(0)()
+    assert applied == results
+    assert len(redraws) == 1
+    assert editor.audio_engine.commits == 1
+
+
+def test_queue_budget_yields_before_draining_every_track(monkeypatch):
+    monkeypatch.setattr("stadium_reaper_bridge.editor.app.UI_AUDIO_POLL_BUDGET_SECONDS", 0)
+    results = [SimpleNamespace(track=SimpleNamespace(
+        number=index, filename=f"{index}.wav", resolved_path=None, file_info=None,
+        status="missing"))
+        for index in range(1, 4)]
+    applied = []
+    model = SimpleNamespace(
+        audio_tracks=[result.track for result in results],
+        audio_resolution_results=lambda *_args: iter(results),
+        apply_audio_resolution=applied.append)
+    editor, callbacks, redraws = polling_editor(model)
+
+    ReapcaseEditor._start_audio_resolution(editor, model, 2, threading.Event())
+    callbacks.pop(0)()
+    assert len(applied) == 1
+    assert len(redraws) == 1
+    assert editor.audio_engine.commits == 0
+    assert callbacks  # after(0, ...) gives Tk a paint/event opportunity.

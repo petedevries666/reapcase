@@ -2,6 +2,8 @@ from pathlib import Path
 import tempfile
 import unittest
 import wave
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from stadium_reaper_bridge.editor.audio_engine import (AudioEngine, PlaybackError,
     PlaybackState, PlaybackTrack)
@@ -27,6 +29,19 @@ def make_wav(path, *, rate=100, frames=20, channels=2, value=8192, width=2):
     with wave.open(str(path), "wb") as target:
         target.setnchannels(channels); target.setsampwidth(width); target.setframerate(rate)
         target.writeframes(sample * channels * frames)
+
+
+class CommitPerformanceTests(unittest.TestCase):
+    def test_commit_reports_close_and_total_timings(self):
+        engine = AudioEngine()
+        engine.close = lambda: None
+        info = SimpleNamespace(sample_rate=48000, frames=100)
+        prepared = SimpleNamespace(readers=[], infos=[info], stream=object())
+        with patch("stadium_reaper_bridge.editor.audio_engine.PERF", True):
+            with self.assertLogs("stadium_reaper_bridge.editor.audio_engine", "DEBUG") as logs:
+                engine.commit(prepared)
+        self.assertTrue(any("AudioEngine.close inside commit" in line for line in logs.output))
+        self.assertTrue(any("AudioEngine.commit total" in line for line in logs.output))
 
 class AudioEngineTests(unittest.TestCase):
     def setUp(self): self.temp=tempfile.TemporaryDirectory(); self.root=Path(self.temp.name)
