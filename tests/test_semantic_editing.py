@@ -7,6 +7,7 @@ from stadium_reaper_bridge.editor.editing import (editor_for_event, update_marke
     update_midi_cc, update_stadium_snapshot)
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.editor.lighting import LightingKind, create_lighting_event
+from stadium_reaper_bridge.editor.creation import create_second_helix_preset
 from stadium_reaper_bridge.analysis import SongAnalyzer
 from stadium_reaper_bridge.midi import RigMidiDecoder
 from stadium_reaper_bridge.stadium import MusicalPosition, StadiumFlag, StadiumSong
@@ -113,6 +114,48 @@ class SemanticEditingTests(unittest.TestCase):
             reopened = EditorModel.open(output, ROOT / "config/rig_midi.json")
             self.assertEqual((reopened.timeline.events[0].data["bank_msb"],
                               reopened.timeline.events[0].data["bank_lsb"]), (12, 34))
+
+    def test_midi_other_program_label_round_trip_preserves_command_and_lane(self):
+        fixture = "009-04.177|MIDI_BANK_PROGRAM;KEYS PATCH;5;Bank/Prog;7;12;34;56;future;opaque"
+        with TemporaryDirectory() as directory:
+            model = self.model([fixture], directory)
+            event = model.timeline.events[0]
+            self.assertEqual(model.lane(event), "MIDI / OTHER")
+            self.assertNotIn("rig_alias", event.data)
+            capability = model.edit_capability(0)
+            self.assertEqual(capability.family, "midi_program")
+            self.assertEqual(capability.values, {"label": "KEYS PATCH", "channel": 7,
+                "bank_msb": 12, "bank_lsb": 34, "program": 56})
+
+            position = event.position
+            semantics = tuple(event.source.fields[2:])
+            self.assertTrue(model.edit_event(0, dict(capability.values,
+                                                     label="CODIE KEYS BRRR")))
+            edited = model.timeline.events[0]
+            self.assertEqual(edited.position, position)
+            self.assertEqual(tuple(edited.source.fields[2:]), semantics)
+            self.assertEqual(edited.source.render(), fixture.replace("KEYS PATCH",
+                                                                      "CODIE KEYS BRRR"))
+            self.assertEqual(model.lane(edited), "MIDI / OTHER")
+            self.assertNotIn("rig_alias", edited.data)
+
+            output = Path(directory) / "program-edited.json"
+            model.save_as(output)
+            reopened = EditorModel.open(output, ROOT / "config/rig_midi.json")
+            reopened_event = reopened.timeline.events[0]
+            self.assertEqual(reopened_event.data, {"label": "CODIE KEYS BRRR",
+                "channel": 7, "bank_msb": 12, "bank_lsb": 34, "program": 56})
+            self.assertEqual(reopened_event.position, position)
+            self.assertEqual(tuple(reopened_event.source.fields[2:]), semantics)
+            self.assertEqual(reopened.lane(reopened_event), "MIDI / OTHER")
+
+    def test_second_helix_program_creation_default_label_is_unchanged(self):
+        event = create_second_helix_preset(MusicalPosition(3, 1, 1), None, 2, 19,
+                                           DECODER)
+        self.assertEqual(event.data["label"], "BASS PRESET 19")
+        self.assertEqual(event.source.fields,
+            ("MIDI_BANK_PROGRAM", "BASS PRESET 19", "5", "Bank/Prog", "3",
+             "Off", "2", "19"))
 
     def test_second_helix_action_editors_still_dispatch_by_action(self):
         with TemporaryDirectory() as directory:

@@ -105,9 +105,9 @@ def update_second_helix(event: TimelineEvent, decoder, *, command: dict, channel
     return update_midi_cc(event, **midi, label=label, alias=command)
 
 
-def update_second_helix_preset(event: TimelineEvent, *, bank_msb: Optional[int],
-                               bank_lsb: Optional[int], program: int, channel: int,
-                               label: str) -> TimelineEvent:
+def update_midi_program(event: TimelineEvent, *, bank_msb: Optional[int],
+                        bank_lsb: Optional[int], program: int, channel: int,
+                        label: str) -> TimelineEvent:
     fields = _fields(event, "MIDI_BANK_PROGRAM", 8)
     fields[4] = str(_integer("MIDI channel", channel, 1, 16))
     for index, name, value in ((5, "Bank MSB", bank_msb), (6, "Bank LSB", bank_lsb)):
@@ -160,7 +160,11 @@ def editor_for_event(event: TimelineEvent, model) -> Optional[EditCapability]:
     if kind == "MIDI_BANK_PROGRAM" and model.lane(event) == "SECOND HELIX":
         values = {key: data[key] for key in ("label", "channel", "bank_msb", "bank_lsb", "program")}
         return EditCapability("helix_preset", "EDIT SECOND HELIX PRESET", values,
-                              update_second_helix_preset)
+                              update_midi_program)
+    if kind == "MIDI_BANK_PROGRAM":
+        values = {key: data[key] for key in ("label", "channel", "bank_msb", "bank_lsb", "program")}
+        return EditCapability("midi_program", "EDIT MIDI PROGRAM CHANGE", values,
+                              update_midi_program)
     if kind != "MIDI_CC":
         return None
     if (alias and alias.get("system") == "second_helix"
