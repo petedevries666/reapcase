@@ -11,6 +11,7 @@ from collections import OrderedDict, Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 import logging
+import os
 from pathlib import Path
 import struct
 import time
@@ -25,7 +26,7 @@ from .audio_engine import AudioEngine
 # 32 frames is below one display pixel at common DAW zoom levels at 48 kHz,
 # while the upper pyramid levels keep long recordings compact to render.
 DEFAULT_BASE_BUCKET_FRAMES = 32
-DEFAULT_READ_FRAMES = 4096
+DEFAULT_READ_FRAMES = 65536
 DEFAULT_TILE_WIDTH = 512
 
 
@@ -280,11 +281,31 @@ class SyncTransient:
 
 def _next_level(source: PeakLevel) -> PeakLevel:
     low, high = array("f"), array("f")
-    for start in range(0, len(source), 2):
-        stop = min(start + 2, len(source))
-        low.append(min(source.minimum[start:stop]))
-        high.append(max(source.maximum[start:stop]))
+    source_low, source_high = source.minimum, source.maximum
+    pairs = len(source) // 2
+    for pair in range(pairs):
+        start = pair * 2
+        low.append(min(source_low[start], source_low[start + 1]))
+        high.append(max(source_high[start], source_high[start + 1]))
+    if len(source) & 1:
+        low.append(source_low[-1]); high.append(source_high[-1])
     return PeakLevel(source.frames_per_bucket * 2, low, high)
+
+
+def _pcm_integers(data: bytes, width: int):
+    """Decode PCM into a compact native array rather than Python int lists."""
+    if width == 2:
+        values = array("h")
+        values.frombytes(data)
+        if struct.pack("=h", 1) != struct.pack("<h", 1):
+            values.byteswap()
+        return values
+    # ``struct`` has no 24-bit format.  Indexing a memoryview avoids allocating
+    # a three-byte slice and an int object conversion for every sample.
+    view = memoryview(data)
+    return array("i", ((view[i] | view[i + 1] << 8 | view[i + 2] << 16) -
+                       ((view[i + 2] & 0x80) << 17)
+                       for i in range(0, len(view), 3)))
 
 
 def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_BASE_BUCKET_FRAMES,
@@ -300,6 +321,10 @@ def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_B
     """
     if base_bucket_frames < 1 or read_frames < 1:
         raise ValueError("Waveform bucket and read sizes must be positive")
+    perf = os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes")
+    timings = Counter()
+    processed_frames = processed_bytes = blocks = 0
+    opened = time.perf_counter()
     low_values, high_values = array("f"), array("f")
     with wave.open(str(path), "rb") as source:
         frames, rate, channels, width = (source.getnframes(), source.getframerate(),
@@ -314,8 +339,10 @@ def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_B
             raise ValueError("Waveforms support mono/stereo PCM")
         if width not in (2, 3):
             raise ValueError("Waveforms support 16/24-bit PCM")
-        pending = 0
-        bucket_low, bucket_high = 1.0, -1.0
+        timings["WAV open"] = time.perf_counter() - opened
+        scale = 32768.0 if width == 2 else 8388608.0
+        pending_samples = 0
+        bucket_low, bucket_high = int(scale), -int(scale)
         remaining = frames
         while remaining:
             if cancel_requested and cancel_requested():
@@ -325,38 +352,48 @@ def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_B
                     raise CancelledError()
                 time.sleep(0.05)
             request = min(read_frames, remaining)
+            phase = time.perf_counter()
             data = source.readframes(request)
+            timings["block reads"] += time.perf_counter() - phase
             if not data:
                 break
-            samples = AudioEngine._samples(data, width)
-            decoded_frames = len(samples) // channels
+            blocks += 1; processed_bytes += len(data)
+            phase = time.perf_counter()
+            samples = _pcm_integers(data, width)
+            timings["sample decode/conversion"] += time.perf_counter() - phase
+            decoded_frames = len(data) // (width * channels)
+            processed_frames += decoded_frames
             remaining -= decoded_frames
-            chunk_frame = 0
-            while chunk_frame < decoded_frames:
-                used = min(base_bucket_frames - pending,
-                           decoded_frames - chunk_frame)
-                sample_start = chunk_frame * channels
-                sample_stop = (chunk_frame + used) * channels
-                portion = samples[sample_start:sample_stop]
-                # Combining channels by extrema is compact and cannot hide a
-                # click present in only the left or right channel.
-                bucket_low = min(bucket_low, min(portion, default=0.0))
-                bucket_high = max(bucket_high, max(portion, default=0.0))
-                pending += used
-                chunk_frame += used
-                if pending == base_bucket_frames:
-                    low_values.append(bucket_low); high_values.append(bucket_high)
-                    pending, bucket_low, bucket_high = 0, 1.0, -1.0
-        if pending:
-            low_values.append(bucket_low); high_values.append(bucket_high)
+            phase = time.perf_counter()
+            bucket_sample_limit = base_bucket_frames * channels
+            for sample in samples:
+                if sample < bucket_low: bucket_low = sample
+                if sample > bucket_high: bucket_high = sample
+                pending_samples += 1
+                if pending_samples == bucket_sample_limit:
+                    low_values.append(bucket_low / scale); high_values.append(bucket_high / scale)
+                    pending_samples, bucket_low, bucket_high = 0, int(scale), -int(scale)
+            timings["per-block min/max"] += time.perf_counter() - phase
+        if pending_samples:
+            low_values.append(bucket_low / scale); high_values.append(bucket_high / scale)
 
+    phase = time.perf_counter()
     levels = [PeakLevel(base_bucket_frames, low_values, high_values)]
     while len(levels[-1]) > 1:
         if cancel_requested and cancel_requested():
             raise CancelledError()
         levels.append(_next_level(levels[-1]))
-    return WaveformPyramid(frames / rate if rate else 0.0, rate, channels,
-                           frames, tuple(levels))
+    timings["pyramid level construction"] = time.perf_counter() - phase
+    phase = time.perf_counter()
+    result = WaveformPyramid(frames / rate if rate else 0.0, rate, channels,
+                             frames, tuple(levels))
+    timings["summary finalization"] = time.perf_counter() - phase
+    if perf:
+        logging.getLogger(__name__).debug(
+            "waveform extraction %s frames=%d bytes=%d block_size=%d blocks=%d phases_ms=%s",
+            path, processed_frames, processed_bytes, read_frames, blocks,
+            {name: round(seconds * 1000, 3) for name, seconds in timings.items()})
+    return result
 
 
 def choose_peak_level(summary: WaveformPyramid, pixel_width: float,
