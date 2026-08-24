@@ -330,13 +330,14 @@ class EditorModel:
         return tuple(sorted({e.source.type for e in self.timeline.events if e.source.type not in KNOWN}))
 
     def lane(self, event: TimelineEvent) -> str:
+        from ..analysis import second_helix_program_change
         kind = event.source.type
         if kind in STRUCTURE:
             return "STRUCTURE"
         if kind in {"PRESETSNAP", "LOOPER"}:
             return "STADIUM"
         alias = event.data.get("rig_alias", {})
-        if alias.get("system") == "second_helix" or (kind == "MIDI_BANK_PROGRAM" and event.data.get("channel") == 3):
+        if alias.get("system") == "second_helix" or second_helix_program_change(self, event) is not None:
             return "SECOND HELIX"
         if alias.get("system") == "video":
             return "VIDEO"

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import re
 from typing import Any, Optional, Protocol
 
 from .stadium import MusicalPosition
@@ -36,8 +37,7 @@ class AnalysisResult:
 class AnalysisConfig:
     initialization_before_bar: int = 2
     require_bass_program_zero: bool = True
-    require_target_bass_program: bool = True
-    bass_preset: int = 1
+    require_bass_program_nonzero: bool = True
     require_target_bass_snapshot: bool = True
     bass_snapshot: int = 1
     require_exp_1: bool = True
@@ -55,6 +55,10 @@ class AnalysisConfig:
     @classmethod
     def from_dict(cls, value: Any) -> "AnalysisConfig":
         if not isinstance(value, dict): return cls()
+        value = dict(value)
+        # Preserve the useful part of settings saved by the former target-preset UI.
+        if "require_bass_program_nonzero" not in value and "require_target_bass_program" in value:
+            value["require_bass_program_nonzero"] = value["require_target_bass_program"]
         known = cls.__dataclass_fields__
         return cls(**{key: val for key, val in value.items() if key in known})
 
@@ -109,8 +113,29 @@ def _identity(model, event):
         return alias.get("system"), alias.get("action"), alias.get("expression"), alias.get("snapshot", data.get("value"))
     if kind == "PRESETSNAP": return "stadium", "snapshot", None, data.get("snapshot")
     if kind == "LOOPER": return "stadium", "looper", None, str(data.get("action", "")).casefold()
-    if kind == "MIDI_BANK_PROGRAM": return "second_helix" if data.get("channel") == 3 else "midi", "program", (data.get("bank_msb"), data.get("bank_lsb")), data.get("program")
+    if kind == "MARKER":
+        pause = str(data.get("pause_at_marker", "Off")).casefold() == "on"
+        subtype = "pause" if pause else "region"
+        # Source fields remain stable even when the structure projection
+        # disambiguates equal display labels with duration suffixes.
+        fields = list(getattr(event.source, "fields", ())[1:])
+        if fields:
+            fields[0] = re.sub(r" \(\d+m\)$", "", fields[0])
+        value = tuple(fields) or tuple(sorted(
+            (k, str(v)) for k, v in data.items() if k != "rig_alias"))
+        return "structure", "marker", subtype, value
+    program = second_helix_program_change(model, event)
+    if program is not None:
+        return "second_helix", "program", (data.get("bank_msb"), data.get("bank_lsb")), program
+    if kind == "MIDI_BANK_PROGRAM": return "midi", "program", (data.get("channel"), data.get("bank_msb"), data.get("bank_lsb")), data.get("program")
     return model.lane(event), kind, data.get("label"), tuple(sorted((k, str(v)) for k, v in data.items() if k != "rig_alias"))
+
+
+def second_helix_program_change(model, event) -> Optional[int]:
+    """Return the program for a canonical Second Helix Program Change event."""
+    if event.source.type != "MIDI_BANK_PROGRAM":
+        return None
+    return model.decoder.second_helix_program_change(event.data)
 
 
 def _looper_device(event, alias):
@@ -140,8 +165,8 @@ class StartRule:
     def analyze(self, c):
         cfg, found, output = c.config, [], []
         requirements = []
-        if cfg.require_bass_program_zero: requirements.append(("BASS PRG CHANGE = 0", lambda e: e.source.type == "MIDI_BANK_PROGRAM" and e.data.get("channel") == 3 and e.data.get("program") == 0))
-        if cfg.require_target_bass_program: requirements.append((f"BASS PRG CHANGE = {cfg.bass_preset}", lambda e: e.source.type == "MIDI_BANK_PROGRAM" and e.data.get("channel") == 3 and e.data.get("program") == cfg.bass_preset))
+        if cfg.require_bass_program_zero: requirements.append(("BASS PRG CHANGE = 0", lambda e: second_helix_program_change(c.model, e) == 0))
+        if cfg.require_bass_program_nonzero: requirements.append(("BASS PRG CHANGE != 0", lambda e: (second_helix_program_change(c.model, e) or 0) != 0))
         if cfg.require_target_bass_snapshot: requirements.append((f"BASS SNAP = {cfg.bass_snapshot}", lambda e: (e.data.get("rig_alias") or {}).get("system") == "second_helix" and (e.data.get("rig_alias") or {}).get("action") == "snapshot" and (e.data.get("rig_alias") or {}).get("snapshot") == cfg.bass_snapshot))
         for pedal, enabled in ((1, cfg.require_exp_1), (2, cfg.require_exp_2)):
             if enabled: requirements.append((f"EXP PDL {pedal} = 0", lambda e, p=pedal: (e.data.get("rig_alias") or {}).get("action") == "expression" and (e.data.get("rig_alias") or {}).get("expression") == p and e.data.get("value") == 0))
@@ -152,7 +177,8 @@ class StartRule:
             why = "occurs too late" if all_matches else "is missing"
             pair = all_matches[0] if all_matches else None
             output.append(_result(Severity.ERROR, self.rule_id, "Second Helix initialization incomplete", f"{label} {why} before {cfg.initialization_before_bar}.1.00", "START", pair, "SECOND HELIX"))
-        if cfg.enforce_start_order and len(found) == len(requirements) and [c.units[i] for i, _ in found] != sorted(c.units[i] for i, _ in found):
+        if cfg.enforce_start_order and len(found) == len(requirements) and any(
+                c.units[found[n][0]] >= c.units[found[n + 1][0]] for n in range(len(found) - 1)):
             output.append(_result(Severity.ERROR, "start.order", "Second Helix initialization out of order", "Required initialization events do not follow the configured sequence.", "START", found[0], "SECOND HELIX"))
         clears = [p for p in c.ordered if p[1].source.type == "LOOPER" and "clear" in str(p[1].data.get("action", "")).casefold()]
         if cfg.require_clear_loop and not any(e.position.bar < cfg.initialization_before_bar for _, e in clears):
@@ -218,7 +244,7 @@ class TimingRule:
         for a,b in zip(c.ordered,c.ordered[1:]):
             ia,ea=a; ib,eb=b; delta=c.units[ib]-c.units[ia]; ka=_identity(c.model,ea); kb=_identity(c.model,eb)
             if delta==0 and ka==kb: out.append(_result(Severity.WARNING,"timing.duplicate","Exact duplicate event",f"Duplicate {ka[1]} command at {_pos(eb.position)}.","TIMING",b))
-            elif delta==0 and ka[:3]==kb[:3] and ka[3]!=kb[3]: out.append(_result(Severity.ERROR,"timing.conflict","Conflicting simultaneous events",f"Same-device {ka[1]} events set conflicting values at {_pos(eb.position)}.","TIMING",b))
+            elif delta==0 and ka[:3]==kb[:3] and ka[3]!=kb[3] and ka[1] != "marker": out.append(_result(Severity.ERROR,"timing.conflict","Conflicting simultaneous events",f"Same-device {ka[1]} events set conflicting values at {_pos(eb.position)}.","TIMING",b))
             elif 0 < delta <= c.config.close_tolerance_ticks and ka[:2]==kb[:2]: out.append(_result(Severity.INFO,"timing.close","Events unusually close",f"Two {ka[0]} {ka[1]} events occur unusually close together: {_pos(ea.position)} and {_pos(eb.position)}.","TIMING",b))
         return out
 
@@ -254,7 +280,7 @@ class SongAnalyzer:
                 inventory["Stadium snapshots"]=inventory.get("Stadium snapshots",0)+1
                 if str(e.data.get("preset","")).strip() and str(e.data.get("preset","")).casefold()!="current": inventory["Stadium presets"]=inventory.get("Stadium presets",0)+1
             if alias.get("system")=="second_helix" and alias.get("action")=="snapshot": inventory["Second Helix snapshots"]=inventory.get("Second Helix snapshots",0)+1
-            if e.source.type=="MIDI_BANK_PROGRAM" and e.data.get("channel")==c.model.decoder.second_helix_channel: inventory["Second Helix program changes"]=inventory.get("Second Helix program changes",0)+1
+            if second_helix_program_change(c.model,e) is not None: inventory["Second Helix program changes"]=inventory.get("Second Helix program changes",0)+1
             if _expression_number(c.model,e,alias) is not None: inventory["Second Helix expression events"]=inventory.get("Second Helix expression events",0)+1
             if lane=="VIDEO": inventory["Video events"]=inventory.get("Video events",0)+1
             elif lane=="LIGHTS": inventory["Lights events"]=inventory.get("Lights events",0)+1

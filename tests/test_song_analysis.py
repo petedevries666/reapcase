@@ -26,7 +26,7 @@ def good_flags():
 
 
 def config(**changes):
-    cfg=AnalysisConfig(bass_preset=4,bass_snapshot=2)
+    cfg=AnalysisConfig(bass_snapshot=2)
     for key,value in changes.items(): setattr(cfg,key,value)
     return cfg
 
@@ -44,8 +44,8 @@ def test_correct_start_passes_and_analysis_is_read_only():
 def test_missing_late_wrong_and_order_are_detected():
     missing=good_flags(); del missing[1]
     assert "start.initialization" in ids(SongAnalyzer().analyze(model(missing),config()))
-    wrong=good_flags(); wrong[2]=wrong[2].replace(";4", ";5", 1).replace(";Off;Off;4",";Off;Off;5")
-    assert any("BASS PRG CHANGE = 4" in r.message for r in SongAnalyzer().analyze(model(wrong),config()).results)
+    wrong=good_flags(); del wrong[2]
+    assert any("BASS PRG CHANGE != 0" in r.message for r in SongAnalyzer().analyze(model(wrong),config()).results)
     late=[x.replace("001-01.060","002-01.060") if "EXP PDL 1" in x else x for x in good_flags()]
     assert any("too late" in r.message for r in SongAnalyzer().analyze(model(late),config()).results)
     ordered=good_flags()
@@ -138,10 +138,10 @@ def test_current_fields_are_diagnosed_independently():
 
 def test_analysis_sidecar_round_trip(tmp_path):
     path=tmp_path/"song.json"; path.write_text(StadiumSong.from_dict({"name":"x","ppqn":240,"params":None,"flags":good_flags(),"tracks":[]}).to_json_text())
-    m=EditorModel.open(path); configured=config(bass_preset=17,max_hold_bars=3.5)
+    m=EditorModel.open(path); configured=config(require_bass_program_nonzero=False,max_hold_bars=3.5)
     m.set_analysis_config(configured); m.save_as(path)
     restored=EditorModel.open(path).analysis_config()
-    assert restored.bass_preset==17 and restored.max_hold_bars==3.5
+    assert not restored.require_bass_program_nonzero and restored.max_hold_bars==3.5
     assert "analysis" not in StadiumSong.from_json_text(path.read_text()).to_dict()
 
 
@@ -157,3 +157,46 @@ def test_song_summary_semantic_inventory_and_positions():
     assert summary.inventory["Second Helix looper actions"]==1
     assert summary.first_position.render()=="001-01.001"
     assert summary.last_position.render()==summary.end_position.render()=="008-01.001"
+
+
+def test_second_helix_start_accepts_any_later_nonzero_program():
+    for program in (1, 17):
+        flags=[f.replace(";Off;Off;4", f";Off;Off;{program}") for f in good_flags()]
+        assert "start.initialization" not in ids(SongAnalyzer().analyze(model(flags),config()))
+
+
+def test_second_helix_program_pair_is_required_and_ordered():
+    no_nonzero=[f for f in good_flags() if "BASS PRG 4" not in f]
+    assert "start.initialization" in ids(SongAnalyzer().analyze(model(no_nonzero),config()))
+    no_zero=[f for f in good_flags() if "BASS PRG 0" not in f]
+    assert "start.initialization" in ids(SongAnalyzer().analyze(model(no_zero),config()))
+    reversed_pair=good_flags()
+    reversed_pair[1]=reversed_pair[1].replace("001-01.001", "001-01.020")
+    reversed_pair[2]=reversed_pair[2].replace("001-01.020", "001-01.001")
+    assert "start.order" in ids(SongAnalyzer().analyze(model(reversed_pair),config()))
+
+
+def test_real_clocksick_program_representation_is_canonical_and_counted():
+    real="001-03.001|MIDI_BANK_PROGRAM;BASS PRG;5;Bank/Prog;3;Off;Off;17"
+    flags=[real if "BASS PRG 4" in f else f for f in good_flags()]
+    report=SongAnalyzer().analyze(model(flags),config())
+    assert "start.initialization" not in ids(report)
+    assert report.summary.inventory["Second Helix program changes"] == 2
+
+
+def test_marker_collision_identity_distinguishes_structural_subtypes():
+    base=good_flags()[:-1]
+    region="003-01.001|MARKER;VERSE;7;Off;Off;Off;false;SET;PRESET;Snap 1"
+    pause="003-01.001|MARKER;PAUSE;7;Off;On;Off;false;SET;PRESET;Snap 1"
+    report=SongAnalyzer().analyze(model(base+[region,pause,"008-01.001|END;;0"]),config())
+    assert not any(r.rule_id in {"timing.conflict", "timing.duplicate"} and r.position.bar == 3 for r in report.results)
+
+    duplicate=SongAnalyzer().analyze(model(base+[pause,pause,"008-01.001|END;;0"]),config())
+    assert any(r.rule_id == "timing.duplicate" and r.position.bar == 3 for r in duplicate.results)
+
+    other_region=region.replace(";VERSE;", ";CHORUS;")
+    compatible=SongAnalyzer().analyze(model(base+[region,other_region,"008-01.001|END;;0"]),config())
+    assert not any(r.rule_id == "timing.conflict" and r.position.bar == 3 for r in compatible.results)
+
+    duplicate_region=SongAnalyzer().analyze(model(base+[region,region,"008-01.001|END;;0"]),config())
+    assert any(r.rule_id == "timing.duplicate" and r.position.bar == 3 for r in duplicate_region.results)
