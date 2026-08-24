@@ -69,6 +69,7 @@ from .navigation import (ViewState, event_list_rows, jump_viewport_left,
 from .inspector import inspector_projection
 from .display import song_header_metadata
 from .preferences import application_config_path
+from .song_browser import SongBrowser, initial_song_folder, workspace_for_song
 from .stadium_workspace import (discover_workspace_songs, import_backup, inspect_import,
                                 load_manifest, unique_workspace)
 from .stadium_export import analyze_build, build_package
@@ -1132,9 +1133,32 @@ class ReapcaseEditor(tk.Tk):
 
     def open_json(self):
         if self.loading: return
-        path = filedialog.askopenfilename(filetypes=(("JSON", "*.json"), ("All files", "*")))
-        if not path: return
-        self._begin_song_open(path)
+        remembered = self._load_last_song_folder()
+        initial = initial_song_folder(self.stadium_workspace, remembered)
+        SongBrowser(self, initial, self._begin_song_open, self.stadium_workspace,
+                    self._remember_song_folder)
+
+    def _load_last_song_folder(self):
+        try:
+            data = json.loads(application_config_path().read_text(encoding="utf-8"))
+            value = data.get("last_song_folder") if isinstance(data, dict) else None
+            return Path(value) if value else None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _remember_song_folder(self, folder):
+        path = application_config_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict): data = {}
+            except (OSError, ValueError, TypeError):
+                data = {}
+            data["last_song_folder"] = str(Path(folder).resolve())
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
 
     def _require_stadium_workspace(self):
         if self.stadium_workspace:
@@ -1399,6 +1423,7 @@ class ReapcaseEditor(tk.Tk):
                 phase.set("Finalizing UI…")
                 self.audio_engine.close()
                 self.model = candidate
+                self._activate_workspace_for_song(candidate.path)
                 self.monitor_muted = [False] * len(candidate.audio_tracks)
                 self.monitor_solo = [False] * len(candidate.audio_tracks)
                 self._reset_lane_visibility()
@@ -1419,6 +1444,15 @@ class ReapcaseEditor(tk.Tk):
                 self._start_audio_resolution(candidate, generation, audio_cancel)
         self.after(0, poll)
         return True
+
+    def _activate_workspace_for_song(self, path):
+        """Update context only once the normal loading pipeline has succeeded."""
+        workspace = workspace_for_song(path)
+        if workspace:
+            self.set_stadium_workspace(workspace)
+        else:
+            self.stadium_workspace = None
+            self.invalidate_workspace_song_inventory()
 
     def _start_audio_resolution(self, model, generation, cancel):
         """Progressively apply immutable worker output on Tk's event loop."""

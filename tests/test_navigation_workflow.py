@@ -10,6 +10,8 @@ from stadium_reaper_bridge.editor.navigation import (
     structure_manager_rows, structure_region_indices)
 from stadium_reaper_bridge.editor.stadium_workspace import (
     MANIFEST_NAME, discover_workspace_songs)
+from stadium_reaper_bridge.editor.song_browser import (
+    SongDirectory, SongMetadataCache, initial_song_folder, workspace_for_song)
 from stadium_reaper_bridge.editor.structure import is_pause_marker
 from stadium_reaper_bridge.editor.style import LANE_PALETTE, lane_colors
 
@@ -78,6 +80,88 @@ def test_dirty_song_can_cancel_normal_opening_pipeline(monkeypatch, tmp_path):
     monkeypatch.setattr("stadium_reaper_bridge.editor.app.messagebox.askyesnocancel",
                         lambda *args, **kwargs: None)
     assert ReapcaseEditor._begin_song_open(editor, tmp_path / "next.json") is False
+
+
+def test_song_browser_reads_headers_sorts_naturally_and_ignores_non_songs(tmp_path):
+    for filename, document in {
+        "101.json": {"name": "ONE OH ONE", "flags": []},
+        "10.json": {"name": "TEN", "flags": []},
+        "9.json": {"name": "NINE", "flags": []},
+        "431.json": {"name": "LATE NIGHT PARTY", "flags": []},
+        "broken.json": "{bad",
+        "settings.json": {"name": "Not a Song"},
+    }.items():
+        (tmp_path / filename).write_text(
+            document if isinstance(document, str) else json.dumps(document))
+
+    directory = SongDirectory(tmp_path).scan()
+
+    assert [(song.file_id, song.title) for song in directory.songs] == [
+        ("9", "NINE"), ("10", "TEN"), ("101", "ONE OH ONE"),
+        ("431", "LATE NIGHT PARTY")]
+    assert not {"broken", "settings"} & {song.file_id for song in directory.songs}
+
+
+def test_song_browser_searches_title_and_file_number(tmp_path):
+    (tmp_path / "453.json").write_text(json.dumps({"name": "CLOCKSICK", "flags": []}))
+    (tmp_path / "431.json").write_text(json.dumps({"name": "LATE NIGHT PARTY", "flags": []}))
+    directory = SongDirectory(tmp_path).scan()
+    assert [song.file_id for song in directory.filtered_songs("clocks")] == ["453"]
+    assert [song.title for song in directory.filtered_songs("431")] == ["LATE NIGHT PARTY"]
+
+
+def test_song_browser_keeps_folders_navigable(tmp_path):
+    (tmp_path / "Songs 10").mkdir(); (tmp_path / "Songs 9").mkdir()
+    directory = SongDirectory(tmp_path).scan()
+    assert [folder.name for folder in directory.folders] == ["Songs 9", "Songs 10"]
+
+
+def test_song_browser_metadata_cache_avoids_reparsing_unchanged_song(monkeypatch, tmp_path):
+    song = tmp_path / "431.json"
+    song.write_text(json.dumps({"name": "LATE NIGHT PARTY", "flags": []}))
+    cache = SongMetadataCache()
+    assert cache.inspect(song).title == "LATE NIGHT PARTY"
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("unchanged metadata was reparsed")))
+    assert cache.inspect(song).title == "LATE NIGHT PARTY"
+
+
+def test_metadata_browser_never_constructs_editor_model_or_resolves_audio(monkeypatch, tmp_path):
+    (tmp_path / "1.json").write_text(json.dumps({"name": "LIGHTWEIGHT", "flags": []}))
+    monkeypatch.setattr(EditorModel, "open", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("heavy EditorModel constructed")))
+    monkeypatch.setattr(EditorModel, "open_phased", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("audio-capable loading pipeline invoked")))
+    assert SongDirectory(tmp_path).scan().songs[0].title == "LIGHTWEIGHT"
+
+
+def test_workspace_song_detection_and_initial_folder_preference(tmp_path):
+    workspace = make_workspace(tmp_path / "imported", {
+        "453.json": {"name": "CLOCKSICK", "flags": []}})
+    songs = workspace / "showcase/songs/workspace"
+    remembered = tmp_path / "remembered"; remembered.mkdir()
+    assert workspace_for_song(songs / "453.json") == workspace.resolve()
+    assert initial_song_folder(workspace, remembered) == songs.resolve()
+    assert initial_song_folder(None, remembered) == remembered.resolve()
+    assert workspace_for_song(remembered / "standalone.json") is None
+
+
+def test_normal_open_pipeline_activates_workspace_and_standalone_clears_it(tmp_path):
+    workspace = make_workspace(tmp_path / "imported", {
+        "4.json": {"name": "FOUR", "flags": []}})
+    song = workspace / "showcase/songs/workspace/4.json"
+    calls = []
+    editor = SimpleNamespace(
+        stadium_workspace=None,
+        set_stadium_workspace=lambda path: calls.append(Path(path)),
+        invalidate_workspace_song_inventory=lambda: calls.append("invalidate"))
+    ReapcaseEditor._activate_workspace_for_song(editor, song)
+    assert calls == [workspace.resolve()]
+
+    editor.stadium_workspace = workspace
+    ReapcaseEditor._activate_workspace_for_song(editor, tmp_path / "standalone.json")
+    assert editor.stadium_workspace is None
+    assert calls[-1] == "invalidate"
 
 
 def test_structure_region_navigation_excludes_pauses_and_cycles_and_clamps():
@@ -286,7 +370,7 @@ def test_arrow_and_file_bindings_use_existing_editor_commands():
 
 def test_file_menu_displays_standard_accelerators():
     source = Path("src/stadium_reaper_bridge/editor/app.py").read_text(encoding="utf-8")
-    assert 'label="Open...", command=self.open_json, accelerator="Ctrl+O"' in source
+    assert 'label="Open Song...", command=self.open_json, accelerator="Ctrl+O"' in source
     assert 'label="Save", command=self.save, accelerator="Ctrl+S"' in source
     assert 'accelerator="Ctrl+Shift+S"' in source
 
