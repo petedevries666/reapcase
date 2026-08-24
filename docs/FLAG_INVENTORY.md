@@ -7,7 +7,7 @@ Fields below are zero-based after splitting the exact payload at `;`. Empty fiel
 | Type | Fields | Empirically interpreted layout |
 |---|---:|---|
 | `START` | 12 | 3 tempo, 5/6 signature, 9 setlist, 10 preset, 11 snapshot |
-| `END` | 8 | End boundary; opaque options retained |
+| `END` | 8+ | End boundary; native fade, gap, and End of Song behavior; trailing options retained |
 | `TIME` | 7 | 1 label, 3 tempo, 5/6 signature |
 | `MARKER` | 10 | 1 name, 3 count-in, 4 pause, 5 cycle, 6 recalls-preset, 7–9 target |
 | `PRESETSNAP` | 6 | 3 setlist, 4 preset, 5 snapshot |

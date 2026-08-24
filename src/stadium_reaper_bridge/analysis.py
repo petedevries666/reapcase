@@ -80,6 +80,7 @@ class SongSummary:
     first_position: Optional[MusicalPosition]
     last_position: Optional[MusicalPosition]
     end_position: Optional[MusicalPosition]
+    end_behavior: Optional[str] = None
 
 
 @dataclass
@@ -291,7 +292,9 @@ class SongAnalyzer:
         events=[e for _,e in c.ordered]; end=next((e.position for e in reversed(events) if e.source.type=="END"),None); bars=end.bar if end else (events[-1].position.bar if events else 0); duration=c.model.timing_map.units_to_seconds(c.end_units) if hasattr(c.model.timing_map,"units_to_seconds") else 0
         from .editor.structure import derive_structure_layout
         regions=len(derive_structure_layout(events,c.model._units,c.end_units).regions)
-        return SongSummary(str(c.model.song.name),bars,duration,c.model.tempo,f"{c.model.numerator}/{c.model.denominator}",regions,counts,inventory,loops,events[0].position if events else None,events[-1].position if events else None,end)
+        end_event=next((e for e in reversed(events) if e.source.type=="END"),None)
+        end_behavior=end_event.data.get("end_behavior") if end_event else None
+        return SongSummary(str(c.model.song.name),bars,duration,c.model.tempo,f"{c.model.numerator}/{c.model.denominator}",regions,counts,inventory,loops,events[0].position if events else None,events[-1].position if events else None,end,end_behavior)
 
 
 @dataclass(frozen=True)

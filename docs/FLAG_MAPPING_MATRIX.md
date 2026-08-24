@@ -5,7 +5,7 @@ This matrix separates the vendor's UI contract from the empirical Song JSON cont
 | Vendor Feature | Observed JSON | Current parser | Evidence | Action |
 |---|---|---|---|---|
 | Start | `START` | Partial: tempo, signature, setlist/preset/snapshot | `vendor_documented+fixture_observed` | Retain lossless remainder |
-| End | `END` | Partial: label only | `vendor_documented+fixture_observed` | Keep fade/playback options opaque until mapped by fixtures |
+| End | `END` | Editable: fade, gap, End of Song behavior | `vendor_documented+fixture_observed` | Preserve reserved and unknown trailing fields |
 | Marker | `MARKER` | Partial: name and tentative option/recall fields | `vendor_documented+fixture_observed` | Validate field associations with controlled exports |
 | Cycle | `CYCLE_START`, `CYCLE_END` | Partial: repeat and opaque option | `vendor_documented+fixture_observed` | Validate option semantics with controlled exports |
 | Preset/Snap | `PRESETSNAP` | Partial: setlist/preset/snapshot | `vendor_documented+fixture_observed` | Retain current view |

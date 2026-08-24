@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import math
 from typing import Any, Callable, Optional
 
 from ..stadium import StadiumFlag
@@ -14,6 +15,7 @@ from .lighting import LightingEventSource, create_lighting_event
 STADIUM_LOOPER_ACTIONS = ("Clear Loop", "Record", "Stop", "Play", "Play Once")
 CYCLE_COUNTS = ("Infinite",)  # the sole value established by native fixtures
 CYCLE_OPTIONS = ("Off",)     # the sole value established by native fixtures
+END_BEHAVIORS = ("Pause", "Play Next", "Cue Next", "Repeat", "Cue Same")
 
 
 def _integer(name: str, value: Any, low: int, high: int) -> int:
@@ -71,6 +73,32 @@ def update_cycle_start(event: TimelineEvent, *, repeat_count: str, option: str) 
     if repeat_count not in CYCLE_COUNTS or option not in CYCLE_OPTIONS:
         raise ValueError("Cycle values are not proven native Stadium options")
     fields[3], fields[4] = repeat_count, option
+    return _replace_flag(event, fields)
+
+
+def update_end(event: TimelineEvent, *, end_behavior: str, fade_out: bool,
+               fade_length: float, gap_before_next_song: bool,
+               gap_length: float) -> TimelineEvent:
+    """Edit the established native Stadium END fields in place."""
+    fields = _fields(event, "END", 8)
+    if fields[3] not in {"On", "Off"} or fields[6] not in {"On", "Off"}:
+        raise ValueError("END options do not use proven On/Off values")
+    if end_behavior not in END_BEHAVIORS:
+        raise ValueError(f"Unknown Stadium End of Song behavior: {end_behavior!r}")
+    lengths = []
+    for name, value in (("Fade Length", fade_length), ("Gap Length", gap_length)):
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be a non-negative number")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be a non-negative number") from None
+        if not math.isfinite(number) or number < 0:
+            raise ValueError(f"{name} must be a non-negative number")
+        lengths.append(str(number))
+    fields[3], fields[4], fields[5] = ("On" if fade_out else "Off",
+                                       lengths[0], end_behavior)
+    fields[6], fields[7] = ("On" if gap_before_next_song else "Off", lengths[1])
     return _replace_flag(event, fields)
 
 
@@ -157,6 +185,10 @@ def editor_for_event(event: TimelineEvent, model) -> Optional[EditCapability]:
     if kind == "LOOPER" and data.get("action") in STADIUM_LOOPER_ACTIONS:
         return EditCapability("stadium_looper", "EDIT STADIUM LOOPER",
                               {"action": data["action"]}, update_stadium_looper)
+    if kind == "END" and data.get("end_behavior") in END_BEHAVIORS:
+        return EditCapability("end", "EDIT END", {key: data[key] for key in (
+            "end_behavior", "fade_out", "fade_length", "gap_before_next_song",
+            "gap_length")}, update_end)
     if kind == "MIDI_BANK_PROGRAM" and model.lane(event) == "SECOND HELIX":
         values = {key: data[key] for key in ("label", "channel", "bank_msb", "bank_lsb", "program")}
         return EditCapability("helix_preset", "EDIT SECOND HELIX PRESET", values,

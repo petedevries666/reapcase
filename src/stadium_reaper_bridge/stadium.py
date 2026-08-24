@@ -128,6 +128,15 @@ class StadiumFlag:
             if self.type == "CYCLE_END":
                 return {}
             if self.type == "END":
+                # Native Stadium END payload (observed in device-authored Song
+                # backups): reserved field, fade toggle/length, playback
+                # behavior, then gap toggle/length.  Additional fields are
+                # deliberately left in ``payload`` for lossless forwarding.
+                if len(f) >= 8 and f[3] in {"On", "Off"} and f[6] in {"On", "Off"}:
+                    return {"label": f[1], "fade_out": f[3] == "On",
+                            "fade_length": float(f[4]), "end_behavior": f[5],
+                            "gap_before_next_song": f[6] == "On",
+                            "gap_length": float(f[7])}
                 return {"label": f[1] if len(f) > 1 else ""}
         except (ValueError, IndexError):
             # A malformed known variant is still valid lossless source data.
