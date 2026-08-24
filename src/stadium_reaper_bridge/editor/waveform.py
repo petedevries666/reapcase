@@ -51,6 +51,27 @@ class WaveformTile:
     display: DisplayLevel
 
 
+@dataclass(frozen=True)
+class TimedWaveformResult:
+    """An analysis result carrying worker-side timestamps.
+
+    Worker timestamps are essential when the executor has one worker: elapsed
+    time observed by Tk otherwise incorrectly attributes queueing to extraction.
+    """
+
+    summary: "WaveformPyramid"
+    worker_started: float
+    worker_completed: float
+
+
+def timed_extract_waveform(path: Union[str, Path], **kwargs) -> TimedWaveformResult:
+    """Run extraction while measuring only time actually spent by the worker."""
+    started = time.perf_counter()
+    summary = extract_waveform(path, **kwargs)
+    completed = time.perf_counter()
+    return TimedWaveformResult(summary, started, completed)
+
+
 class WaveformRenderCache:
     """Bounded cache shared by normal and ghost waveform presentations.
 
