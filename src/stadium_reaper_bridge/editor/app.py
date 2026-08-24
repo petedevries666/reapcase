@@ -28,7 +28,7 @@ from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_H
 from .looper import derive_looper_regions, looper_display_label
 from .lighting import (HIT_PRESETS, STATE_PRESETS, LightingKind,
                        create_lighting_event, derive_lighting_regions)
-from .model import EditorModel, LANES, MovePreview
+from .model import AudioProgress, AudioProgressPhase, EditorModel, LANES, MovePreview
 from .style import (AUDIO, LOOPER_STATE_FILLS, REAPCASE_TREEVIEW_STYLE, THEME,
                     TIMELINE, LaneBackgroundCache, apply_ttk_theme, lane_colors,
                     structure_region_fill)
@@ -1280,15 +1280,16 @@ class ReapcaseEditor(tk.Tk):
     def _start_audio_resolution(self, model, generation, cancel):
         """Progressively apply immutable worker output on Tk's event loop."""
         total = len(model.audio_tracks)
-        self.audio_progress.configure(maximum=max(1, total), value=0)
-        self.audio_status.set(f"Audio: resolving 0/{total}")
+        self._show_audio_progress(AudioProgress(AudioProgressPhase.RESOLVING_PATH,
+                                               1 if total else None, total))
         updates = Queue()
 
         def work():
             try:
                 resolved = []
                 for result in model.audio_resolution_results(
-                        self.manual_audio_root, cancel.is_set):
+                        self.manual_audio_root, cancel.is_set,
+                        lambda message: updates.put(("progress", message))):
                     if cancel.is_set(): return
                     resolved.append(result.track)
                     updates.put(("track", result))
@@ -1296,6 +1297,8 @@ class ReapcaseEditor(tk.Tk):
                 updates.put(("resolved", None))
                 tracks = [PlaybackTrack(t.resolved_path, t.name, t.offset, t.file_info)
                           for t in resolved if t.resolved_path and t.file_info]
+                updates.put(("progress", AudioProgress(
+                    AudioProgressPhase.PREPARING_ENGINE, total, total)))
                 started = time.perf_counter()
                 prepared = self.audio_engine.prepare(tracks)
                 if os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes"):
@@ -1325,11 +1328,14 @@ class ReapcaseEditor(tk.Tk):
                     if kind == "track":
                         model.apply_audio_resolution(value)
                         completed += 1
-                        self.audio_progress.configure(value=completed)
-                        self.audio_status.set(f"Audio: resolving {completed}/{total}")
+                        self._show_audio_progress(AudioProgress(
+                            AudioProgressPhase.TRACK_COMPLETE, completed, total,
+                            value.track.filename))
                         if value.track.resolved_path and value.track.file_info:
                             self._request_waveform(value.track.resolved_path, generation)
                         self.redraw()
+                    elif kind == "progress":
+                        self._show_audio_progress(value, completed)
                     elif kind == "resolved":
                         self.audio_status.set("Audio: preparing engine…")
                         self.after(35, poll)
@@ -1344,6 +1350,31 @@ class ReapcaseEditor(tk.Tk):
                 pass
             self.after(35, poll)
         self.after(0, poll)
+
+    def _show_audio_progress(self, message, completed=0):
+        """Update only header widgets; timeline redraws are track-result driven."""
+        phase, index, total, filename = (message.phase, message.track_index,
+                                         message.total_tracks or 0, message.filename)
+        suffix = f" {index}/{total}" if index and total else ""
+        suffix += f" — {filename}" if filename else ""
+        if phase in (AudioProgressPhase.INDEXING_AUDIO,
+                     AudioProgressPhase.PREPARING_ENGINE):
+            self.audio_progress.stop()
+            self.audio_progress.configure(mode="indeterminate", maximum=max(1, total), value=0)
+            self.audio_progress.start(12)
+            label = ("indexing Audio library…" if phase == AudioProgressPhase.INDEXING_AUDIO
+                     else "preparing engine…")
+            self.audio_status.set(f"Audio: {label}")
+        elif phase in (AudioProgressPhase.RESOLVING_PATH, AudioProgressPhase.READING_HEADER):
+            self.audio_progress.stop()
+            self.audio_progress.configure(mode="indeterminate", maximum=max(1, total), value=0)
+            self.audio_progress.start(12)
+            verb = "locating" if phase == AudioProgressPhase.RESOLVING_PATH else "reading header"
+            self.audio_status.set(f"Audio: {verb}{suffix}")
+        elif phase == AudioProgressPhase.TRACK_COMPLETE:
+            self.audio_progress.stop()
+            self.audio_progress.configure(mode="determinate", maximum=max(1, total), value=completed)
+            self.audio_status.set(f"Audio: {completed}/{total} ready")
 
     def _audio_load_current(self, model, generation, cancel):
         """Single guard for progress, engine readiness, and playback enablement."""
@@ -1364,6 +1395,10 @@ class ReapcaseEditor(tk.Tk):
         self._audio_ready = True
         self._audio_error = None
         self.play_button.state(["!disabled"])
+        if hasattr(self, "audio_progress"):
+            self.audio_progress.stop()
+            self.audio_progress.configure(mode="determinate", maximum=max(1, len(model.audio_tracks)),
+                                          value=len(model.audio_tracks))
         ready = sum(t.status == "ready" for t in model.audio_tracks)
         missing = sum(t.status == "missing" for t in model.audio_tracks)
         invalid = sum(t.status == "invalid" for t in model.audio_tracks)

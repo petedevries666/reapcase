@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import copy
 import json
 from pathlib import Path
@@ -43,6 +44,24 @@ class AudioResolutionResult:
     changed: bool
     stat_seconds: float = 0.0
     inspection_seconds: float = 0.0
+
+
+class AudioProgressPhase(str, Enum):
+    INDEXING_AUDIO = "INDEXING_AUDIO"
+    RESOLVING_PATH = "RESOLVING_PATH"
+    READING_HEADER = "READING_HEADER"
+    TRACK_COMPLETE = "TRACK_COMPLETE"
+    PREPARING_ENGINE = "PREPARING_ENGINE"
+    READY = "READY"
+
+
+@dataclass(frozen=True)
+class AudioProgress:
+    """Lightweight worker notification; contains no Tk-owned state."""
+    phase: AudioProgressPhase
+    track_index: Optional[int] = None
+    total_tracks: Optional[int] = None
+    filename: str = ""
 
 
 @dataclass(frozen=True)
@@ -158,16 +177,23 @@ class EditorModel:
                                   else {"name": str(source)})
                                   for i, source in enumerate(sources[:MAX_AUDIO_TRACKS], 1))
 
-    def audio_resolution_results(self, root=None, cancelled=lambda: False):
+    def audio_resolution_results(self, root=None, cancelled=lambda: False,
+                                 progress=lambda _message: None):
         """Yield independently resolved/inspected tracks without mutating this model."""
         if root is not None:
             root = Path(root)
         else:
             root = self.audio_root
         automatic = stadium_backup_audio_paths(self.path)
+        total = len(self.audio_tracks)
+        current = {"index": None, "filename": ""}
+        def resolver_progress(phase):
+            progress(AudioProgress(AudioProgressPhase(phase), current["index"], total,
+                                   current["filename"]))
         resolver = AudioResolver(self.path.parent, root,
                                  automatic[0] if automatic else None,
-                                 automatic[1] if automatic else None)
+                                 automatic[1] if automatic else None,
+                                 cancelled=cancelled, progress=resolver_progress)
         previous = {track.resolved_path: track for track in self.audio_tracks
                     if track.resolved_path and track.file_info}
         identities = dict(self._audio_identities)
@@ -175,6 +201,10 @@ class EditorModel:
         for index, placeholder in enumerate(self.audio_tracks):
             if cancelled():
                 return
+            filename = placeholder.filename
+            current.update(index=index + 1, filename=filename)
+            progress(AudioProgress(AudioProgressPhase.RESOLVING_PATH, index + 1,
+                                   total, filename))
             path_started = time.perf_counter()
             path = resolver.resolve(placeholder.source.get("filename"))
             self._log_timing("audio path resolution", path_started)
@@ -196,6 +226,8 @@ class EditorModel:
                     if old and identities.get(path) == identity:
                         info = old.file_info
                     else:
+                        progress(AudioProgress(AudioProgressPhase.READING_HEADER, index + 1,
+                                               total, filename))
                         inspect_started = time.perf_counter()
                         try: info = read_wav_info(path)
                         except (wave.Error, OSError, EOFError): pass
@@ -207,9 +239,12 @@ class EditorModel:
             if cancelled():
                 return
             view = AudioTrackView(placeholder.number, placeholder.source, path, info, status)
-            yield AudioResolutionResult(index, view, identity,
-                                        identity != identities.get(path), stat_elapsed,
-                                        inspect_elapsed)
+            result = AudioResolutionResult(index, view, identity,
+                                           identity != identities.get(path), stat_elapsed,
+                                           inspect_elapsed)
+            progress(AudioProgress(AudioProgressPhase.TRACK_COMPLETE, index + 1,
+                                   total, filename))
+            yield result
 
     def apply_audio_resolution(self, result: AudioResolutionResult) -> None:
         """Commit a worker result; callers invoke this only on their UI thread."""
