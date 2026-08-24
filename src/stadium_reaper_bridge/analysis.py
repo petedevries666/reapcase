@@ -71,6 +71,7 @@ class SongSummary:
     time_signature: str
     regions: int
     counts: dict[str, int]
+    inventory: dict[str, int]
     looper_actions: dict[str, dict[str, int]]
     first_position: Optional[MusicalPosition]
     last_position: Optional[MusicalPosition]
@@ -110,6 +111,28 @@ def _identity(model, event):
     if kind == "LOOPER": return "stadium", "looper", None, str(data.get("action", "")).casefold()
     if kind == "MIDI_BANK_PROGRAM": return "second_helix" if data.get("channel") == 3 else "midi", "program", (data.get("bank_msb"), data.get("bank_lsb")), data.get("program")
     return model.lane(event), kind, data.get("label"), tuple(sorted((k, str(v)) for k, v in data.items() if k != "rig_alias"))
+
+
+def _looper_device(event, alias):
+    """Return the owning state machine, never a guessed shared looper."""
+    if event.source.type == "LOOPER":
+        return "Stadium"
+    action = str(alias.get("action", "")).casefold().replace("_", " ")
+    if alias.get("system") == "second_helix" and action in {
+            "record", "overdub", "play", "play once", "stop", "clear", "clear loop",
+            "undo/redo", "forward", "reverse", "full speed", "half speed", "off", "on"}:
+        return "Second Helix"
+    return None
+
+
+def _expression_number(model, event, alias):
+    """Resolve pedals through RigMidiDecoder's configured expression mapping."""
+    if alias.get("system") == "second_helix" and alias.get("action") == "expression":
+        return alias.get("expression")
+    if event.source.type != "MIDI_CC" or event.data.get("channel") != model.decoder.second_helix_channel:
+        return None
+    configured = {cc: expression for expression, cc in model.decoder.second_helix_expressions()}
+    return configured.get(event.data.get("cc"))
 
 
 class StartRule:
@@ -157,32 +180,34 @@ class CurrentAndMidiRule:
 class StatefulRule:
     rule_id="stateful"
     def analyze(self,c):
-        out=[]; exp={}; loop={"recorded":False,"active":False,"last":None}
+        out=[]; exp={}
+        loop={device: {"recorded":False,"active":False,"last":None}
+              for device in ("Stadium", "Second Helix")}
         threshold=int(c.config.max_hold_bars*c.model.song.ppqn*max(1,c.model.numerator))
         for pair in c.ordered:
             i,e=pair; alias=e.data.get("rig_alias") or {}; action=str(alias.get("action") or e.data.get("action") or "").casefold().replace("_"," ")
-            pedal = alias.get("expression") if alias.get("action") == "expression" else (
-                e.data.get("cc") if e.source.type == "MIDI_CC" and
-                e.data.get("channel") == 3 and e.data.get("cc") in (1, 2) else None)
+            pedal = _expression_number(c.model, e, alias)
             if pedal is not None:
                 value=e.data.get("value"); previous=exp.get(pedal)
                 if previous and previous[0] == 127 and c.units[i]-previous[1] >= threshold: out.append(_result(Severity.WARNING,"expression.long_max","Expression held at maximum",f"Second Helix EXP PDL {pedal} stays at 100% from {_pos(previous[2].position)} to {_pos(e.position)} ({(c.units[i]-previous[1])/(c.model.song.ppqn*c.model.numerator):.1f} bars).","EXPRESSION",previous[3],"SECOND HELIX"))
                 exp[pedal]=(value,c.units[i],e,pair)
-            is_loop=e.source.type=="LOOPER" or action in {"record","rec","play","play once","stop","clear","clear loop"}
-            if is_loop:
+            device = _looper_device(e, alias)
+            if device and action in {"record","rec","play","play once","stop","clear","clear loop"}:
+                state = loop[device]
                 if action in {"record","rec"}:
-                    if loop["last"] in {"record","rec"}: out.append(_result(Severity.WARNING,"looper.repeated_rec","Repeated looper REC",f"REC at {_pos(e.position)} follows REC without PLAY, STOP, or CLEAR.","LOOPER",pair))
-                    loop.update(recorded=True,active=True,last=action)
+                    if state["last"] in {"record","rec"}: out.append(_result(Severity.WARNING,"looper.repeated_rec","Repeated looper REC",f"{device} REC at {_pos(e.position)} follows REC without PLAY, STOP, or CLEAR.","LOOPER",pair,device))
+                    state.update(recorded=True,active=True,last=action)
                 elif action.startswith("play"):
-                    if not loop["recorded"]: out.append(_result(Severity.WARNING,"looper.play_without_rec","Looper PLAY without REC",f"Stadium LOOPER PLAY at {_pos(e.position)} has no previous REC in this Song. This may be intentional if recording is performed manually.","LOOPER",pair))
-                    loop.update(active=True,last=action)
-                elif "clear" in action: loop.update(recorded=False,active=False,last="clear")
+                    if not state["recorded"]: out.append(_result(Severity.WARNING,"looper.play_without_rec","Looper PLAY without REC",f"{device} LOOPER PLAY at {_pos(e.position)} has no previous REC in this Song. This may be intentional if recording is performed manually.","LOOPER",pair,device))
+                    state.update(active=True,last=action)
+                elif "clear" in action: state.update(recorded=False,active=False,last="clear")
                 elif action=="stop":
-                    if not loop["active"]: out.append(_result(Severity.INFO,"looper.inactive_stop","STOP with no active looper",f"LOOPER STOP at {_pos(e.position)} occurs while no looper is known active.","LOOPER",pair))
-                    loop.update(active=False,last=action)
+                    if not state["active"]: out.append(_result(Severity.INFO,"looper.inactive_stop","STOP with no active looper",f"{device} LOOPER STOP at {_pos(e.position)} occurs while that looper is not known active.","LOOPER",pair,device))
+                    state.update(active=False,last=action)
         for pedal,last in exp.items():
             if c.config.check_exp_end and last[0] != c.config.exp_rest_value: out.append(_result(Severity.WARNING,"end.expression_rest","Expression not at resting value",f"Second Helix EXP PDL {pedal} finishes at {round(last[0]*100/127)}%. Last change: {_pos(last[2].position)}. Expected resting value: {c.config.exp_rest_value}","END",last[3],"SECOND HELIX"))
-        if loop["active"]: out.append(_result(Severity.WARNING,"end.looper_active","Looper active at Song end","Song ends while the looper appears active or recording.","END"))
+        for device,state in loop.items():
+            if state["active"]: out.append(_result(Severity.WARNING,"end.looper_active","Looper active at Song end",f"Song ends while the {device} looper appears active or recording.","END",device=device))
         return out
 
 
@@ -218,15 +243,29 @@ class SongAnalyzer:
         for rule in self.rules: results.extend(rule.analyze(context))
         return AnalysisReport(self._summary(context),tuple(sorted(results,key=lambda r:(list(Severity).index(r.severity),r.position or MusicalPosition(999999,1,1)))) )
     def _summary(self,c):
-        counts={}; loops={"Stadium":{},"Second Helix":{}}
+        counts={}; inventory={}; loops={"Stadium":{},"Second Helix":{}}
         for _,e in c.ordered:
             lane=c.model.lane(e); counts[lane]=counts.get(lane,0)+1; alias=e.data.get("rig_alias") or {}; action=str(alias.get("action") or e.data.get("action") or "")
-            if e.source.type=="LOOPER" or action.casefold() in {"record","play","stop","clear loop","clear","play once"}:
-                device="Second Helix" if alias.get("system")=="second_helix" else "Stadium"; loops[device][action.upper()]=loops[device].get(action.upper(),0)+1
+            device=_looper_device(e,alias)
+            if device and action:
+                loops[device][action.upper()]=loops[device].get(action.upper(),0)+1
+                inventory[f"{device} looper actions"]=inventory.get(f"{device} looper actions",0)+1
+            if e.source.type=="PRESETSNAP":
+                inventory["Stadium snapshots"]=inventory.get("Stadium snapshots",0)+1
+                if str(e.data.get("preset","")).strip() and str(e.data.get("preset","")).casefold()!="current": inventory["Stadium presets"]=inventory.get("Stadium presets",0)+1
+            if alias.get("system")=="second_helix" and alias.get("action")=="snapshot": inventory["Second Helix snapshots"]=inventory.get("Second Helix snapshots",0)+1
+            if e.source.type=="MIDI_BANK_PROGRAM" and e.data.get("channel")==c.model.decoder.second_helix_channel: inventory["Second Helix program changes"]=inventory.get("Second Helix program changes",0)+1
+            if _expression_number(c.model,e,alias) is not None: inventory["Second Helix expression events"]=inventory.get("Second Helix expression events",0)+1
+            if lane=="VIDEO": inventory["Video events"]=inventory.get("Video events",0)+1
+            elif lane=="LIGHTS": inventory["Lights events"]=inventory.get("Lights events",0)+1
+            elif lane=="MIDI / OTHER": inventory["MIDI / Others"]=inventory.get("MIDI / Others",0)+1
+        tracks = c.model.song.tracks if isinstance(c.model.song.tracks, list) else []
+        audio=len(tracks)
+        if audio: inventory["Audio tracks"]=audio
         events=[e for _,e in c.ordered]; end=next((e.position for e in reversed(events) if e.source.type=="END"),None); bars=end.bar if end else (events[-1].position.bar if events else 0); duration=c.model.timing_map.units_to_seconds(c.end_units) if hasattr(c.model.timing_map,"units_to_seconds") else 0
         from .editor.structure import derive_structure_layout
         regions=len(derive_structure_layout(events,c.model._units,c.end_units).regions)
-        return SongSummary(str(c.model.song.name),bars,duration,c.model.tempo,f"{c.model.numerator}/{c.model.denominator}",regions,counts,loops,events[0].position if events else None,events[-1].position if events else None,end)
+        return SongSummary(str(c.model.song.name),bars,duration,c.model.tempo,f"{c.model.numerator}/{c.model.denominator}",regions,counts,inventory,loops,events[0].position if events else None,events[-1].position if events else None,end)
 
 
 @dataclass(frozen=True)

@@ -791,7 +791,8 @@ class ReapcaseEditor(tk.Tk):
         loop=[]
         for device,actions in s.looper_actions.items(): loop.append(f"{device} Looper: " + (" / ".join(f"{k} {v}" for k,v in actions.items()) if actions else "NONE"))
         bpm = f"{s.bpm:g}" if s.bpm is not None else "—"
-        win.summary.set(f"SONG SUMMARY — {s.name}\nDuration {int(s.duration_seconds//60):02d}:{s.duration_seconds%60:06.3f}   Bars {s.bars}   Regions {s.regions}   BPM {bpm}   Time signature {s.time_signature}\n" + "   ".join(f"{k} events {v}" for k,v in s.counts.items()) + "\n" + "   ".join(loop) + f"\n\nANALYSIS   {counts[Severity.ERROR]} ERRORS   {counts[Severity.WARNING]} WARNINGS   {counts[Severity.INFO]} INFO" + ("\n✓ No critical issue detected" if not counts[Severity.ERROR] else ""))
+        positions = f"First {s.first_position.render() if s.first_position else '—'}   Last {s.last_position.render() if s.last_position else '—'}   END {s.end_position.render() if s.end_position else '—'}"
+        win.summary.set(f"SONG SUMMARY — {s.name}\nDuration {int(s.duration_seconds//60):02d}:{s.duration_seconds%60:06.3f}   Bars {s.bars}   Regions {s.regions}   BPM {bpm}   Time signature {s.time_signature}\n{positions}\n" + "   ".join(f"{k} {v}" for k,v in s.inventory.items()) + "\n" + "   ".join(loop) + f"\n\nANALYSIS   {counts[Severity.ERROR]} ERRORS   {counts[Severity.WARNING]} WARNINGS   {counts[Severity.INFO]} INFO" + ("\n✓ No critical issue detected" if not counts[Severity.ERROR] else ""))
         win.results.delete(*win.results.get_children())
         for n,r in enumerate(report.results): win.results.insert("", "end",iid=str(n),values=(r.severity.value,r.category,r.position.render() if r.position else "—",r.message))
 

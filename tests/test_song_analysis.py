@@ -81,3 +81,79 @@ def test_structure_after_end_and_summary_use_live_timeline():
     m.timeline.events[1].position=m.timeline.events[1].position.__class__(7,1,1)
     report=SongAnalyzer().analyze(m,config())
     assert report.summary.bars==6 and "structure.after_end" in ids(report)
+
+
+def test_missing_stadium_clear_loop_and_independent_expression_initialization():
+    no_clear=[f for f in good_flags() if "LOOPER" not in f]
+    assert "start.clear_loop" in ids(SongAnalyzer().analyze(model(no_clear),config()))
+    for label in ("EXP PDL 1", "EXP PDL 2"):
+        report=SongAnalyzer().analyze(model([f for f in good_flags() if label not in f]),config())
+        assert any(label in r.message for r in report.results if r.rule_id=="start.initialization")
+
+
+def test_looper_state_is_completely_device_specific():
+    base=good_flags()[:-1]
+    # Real rig mapping: Second Helix CC60 high=Record cannot satisfy Stadium PLAY.
+    stadium_play=base+["002-01.001|MIDI_CC;HELIX REC;4;CC;3;60;127",
+                       "003-01.001|LOOPER;PLAY;1;Play","008-01.001|END;;0"]
+    report=SongAnalyzer().analyze(model(stadium_play),config())
+    warning=next(r for r in report.results if r.rule_id=="looper.play_without_rec")
+    assert warning.device=="Stadium" and "Stadium" in warning.message
+    # A Stadium REC likewise cannot satisfy Second Helix CC61 high=Play.
+    helix_play=base+["002-01.001|LOOPER;RECORD;1;Record",
+                    "003-01.001|MIDI_CC;HELIX PLAY;4;CC;3;61;127","008-01.001|END;;0"]
+    report=SongAnalyzer().analyze(model(helix_play),config())
+    warning=next(r for r in report.results if r.rule_id=="looper.play_without_rec")
+    assert warning.device=="Second Helix" and "Second Helix" in warning.message
+    end_devices={r.device for r in report.results if r.rule_id=="end.looper_active"}
+    assert end_devices=={"Stadium", "Second Helix"}
+
+
+def test_real_configured_expression_mapping_recognizes_non_extreme_values():
+    m=model(good_flags())
+    mappings=dict(m.decoder.second_helix_expressions())
+    assert mappings[1]==1 and mappings[2]==2
+    flags=good_flags()[:-1]+[f"007-01.001|MIDI_CC;EXP;4;CC;3;{mappings[2]};64",
+                            "008-01.001|END;;0"]
+    report=SongAnalyzer().analyze(model(flags),config())
+    assert report.summary.inventory["Second Helix expression events"]==3
+    assert any("EXP PDL 2" in r.message for r in report.results if r.rule_id=="end.expression_rest")
+
+
+def test_simultaneous_device_isolation_and_same_device_conflict():
+    legitimate=good_flags()[:-1]+["003-01.001|PRESETSNAP;;3;SET;PRESET;Snap 2",
+        "003-01.001|MIDI_CC;BASS SNAP 3;4;CC;3;69;2","008-01.001|END;;0"]
+    assert "timing.conflict" not in ids(SongAnalyzer().analyze(model(legitimate),config()))
+    conflict=good_flags()[:-1]+["003-01.001|MIDI_CC;BASS SNAP 2;4;CC;3;69;1",
+        "003-01.001|MIDI_CC;BASS SNAP 3;4;CC;3;69;2","008-01.001|END;;0"]
+    assert "timing.conflict" in ids(SongAnalyzer().analyze(model(conflict),config()))
+
+
+def test_current_fields_are_diagnosed_independently():
+    preset=good_flags()[:-1]+["003-01.001|PRESETSNAP;;3;SET;CURRENT;Snap 2","008-01.001|END;;0"]
+    assert {r.rule_id for r in SongAnalyzer().analyze(model(preset),config()).results if "current" in r.rule_id}=={"state.current_preset"}
+    snap=good_flags()[:-1]+["003-01.001|PRESETSNAP;;3;SET;PRESET;CURRENT","008-01.001|END;;0"]
+    assert {r.rule_id for r in SongAnalyzer().analyze(model(snap),config()).results if "current" in r.rule_id}=={"state.current_snapshot"}
+
+
+def test_analysis_sidecar_round_trip(tmp_path):
+    path=tmp_path/"song.json"; path.write_text(StadiumSong.from_dict({"name":"x","ppqn":240,"params":None,"flags":good_flags(),"tracks":[]}).to_json_text())
+    m=EditorModel.open(path); configured=config(bass_preset=17,max_hold_bars=3.5)
+    m.set_analysis_config(configured); m.save_as(path)
+    restored=EditorModel.open(path).analysis_config()
+    assert restored.bass_preset==17 and restored.max_hold_bars==3.5
+    assert "analysis" not in StadiumSong.from_json_text(path.read_text()).to_dict()
+
+
+def test_song_summary_semantic_inventory_and_positions():
+    flags=good_flags()[:-1]+["002-01.001|PRESETSNAP;;3;SET;PRESET;Snap 2",
+        "003-01.001|MIDI_CC;HELIX REC;4;CC;3;60;127","008-01.001|END;;0"]
+    summary=SongAnalyzer().analyze(model(flags),config()).summary
+    assert summary.inventory["Stadium snapshots"]==1
+    assert summary.inventory["Stadium presets"]==1
+    assert summary.inventory["Second Helix snapshots"]==1
+    assert summary.inventory["Second Helix program changes"]==2
+    assert summary.inventory["Second Helix expression events"]==2
+    assert summary.inventory["Second Helix looper actions"]==1
+    assert summary.first_position.render()=="001-01.001"
+    assert summary.last_position.render()==summary.end_position.render()=="008-01.001"
