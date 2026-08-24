@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+import logging
+import os
+import time
 import wave
 from typing import Any, Callable, Iterable, Optional, Union
 
 from ..stadium import MusicalPosition
 
 MAX_AUDIO_TRACKS = 8
+LOG = logging.getLogger(__name__)
+PERF = os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes")
 
 
 @dataclass(frozen=True)
@@ -38,48 +43,98 @@ class AudioResolver:
 
     def __init__(self, song_directory: Union[str, Path], audio_root: Optional[Union[str, Path]] = None,
                  automatic_audio_dir: Optional[Union[str, Path]] = None,
-                 backup_audio_root: Optional[Union[str, Path]] = None):
+                 backup_audio_root: Optional[Union[str, Path]] = None, *,
+                 cancelled: Callable[[], bool] = lambda: False,
+                 progress: Callable[[str], None] = lambda _phase: None):
         self.song_directory = Path(song_directory)
         self.audio_root = Path(audio_root) if audio_root else None
         self.automatic_audio_dir = Path(automatic_audio_dir) if automatic_audio_dir else None
         self.backup_audio_root = Path(backup_audio_root) if backup_audio_root else None
+        self.cancelled = cancelled
+        self.progress = progress
+        self._indexes: dict[Path, dict[str, list[Path]]] = {}
 
     def resolve(self, filename: Any) -> Optional[Path]:
         if not isinstance(filename, str) or not filename:
             return None
         stored = Path(filename)
+        started = time.perf_counter()
         for candidate in (stored, self.song_directory / stored):
             if candidate.is_file():
+                self._timing("direct path lookup", started)
                 return candidate.resolve()
+        self._timing("direct path lookup", started)
         # Stadium backups deliberately keep JSON and audio in sibling trees.
         # Resolve the Song-specific directory before any recursive fallback.
         if self.automatic_audio_dir:
+            started = time.perf_counter()
             candidate = self.automatic_audio_dir / PurePosixPath(
                 filename.replace("\\", "/")).name
             if candidate.is_file():
+                self._timing("Song-specific audio lookup", started)
                 return candidate.resolve()
+            self._timing("Song-specific audio lookup", started)
         match = self._unique_tail_match(filename, self.backup_audio_root)
         if match:
             return match
         return self._unique_tail_match(filename, self.audio_root)
 
-    @staticmethod
-    def _unique_tail_match(filename: str, root: Optional[Path]) -> Optional[Path]:
+    def _unique_tail_match(self, filename: str, root: Optional[Path]) -> Optional[Path]:
         if not root or not root.is_dir():
             return None
         # A root commonly points at .../workspace/Audio while the JSON contains
         # .../Audio/453/CLICK.wav. Prefer unique longest relative-tail matches.
         normalized = PurePosixPath(filename.replace("\\", "/"))
         parts = normalized.parts
-        files = [p for p in root.rglob(normalized.name) if p.is_file()]
+        files = self._index(root).get(normalized.name.casefold(), [])
+        if self.cancelled():
+            return None
+        started = time.perf_counter()
         for length in range(min(len(parts), 6), 1, -1):
             tail = tuple(part.casefold() for part in parts[-length:])
             matches = [p for p in files if tuple(part.casefold() for part in p.parts[-length:]) == tail]
             if len(matches) == 1:
-                return matches[0].resolve()
+                result = matches[0].resolve()
+                self._timing("tail-match lookup", started)
+                return result
             if len(matches) > 1:
+                self._timing("tail-match lookup", started)
                 return None
-        return files[0].resolve() if len(files) == 1 else None
+        result = files[0].resolve() if len(files) == 1 else None
+        self._timing("tail-match lookup", started)
+        return result
+
+    def _index(self, root: Path) -> dict[str, list[Path]]:
+        """Return this session's lazy, cancellation-aware recursive file index."""
+        root = root.resolve()
+        if root in self._indexes:
+            return self._indexes[root]
+        if self.cancelled():
+            return {}
+        self.progress("INDEXING_AUDIO")
+        started = time.perf_counter()
+        index: dict[str, list[Path]] = {}
+        count = 0
+        for directory, _directories, filenames in os.walk(root):
+            if self.cancelled():
+                return {}
+            base = Path(directory)
+            for name in filenames:
+                if self.cancelled():
+                    return {}
+                index.setdefault(name.casefold(), []).append(base / name)
+                count += 1
+        self._indexes[root] = index
+        if PERF:
+            LOG.debug("Song load timing: fallback Audio-root indexing %.1f ms (%d files, %s)",
+                      (time.perf_counter() - started) * 1000, count, root)
+        return index
+
+    @staticmethod
+    def _timing(label: str, started: float) -> None:
+        if PERF:
+            LOG.debug("Song load timing: %s %.1f ms", label,
+                      (time.perf_counter() - started) * 1000)
 
 
 def stadium_backup_audio_paths(json_path: Union[str, Path]) -> Optional[tuple[Path, Path]]:

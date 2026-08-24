@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from stadium_reaper_bridge.editor.app import ReapcaseEditor
 from stadium_reaper_bridge.editor.audio_engine import PlaybackState
 from stadium_reaper_bridge.editor.model import EditorModel
+from stadium_reaper_bridge.editor.model import AudioProgress, AudioProgressPhase
+from stadium_reaper_bridge.editor.audio import AudioResolver
 
 
 FIXTURE = Path("tests/fixtures/perfect_picture_336.json")
@@ -33,6 +35,13 @@ class Engine:
     def commit(self, _prepared): self.commits += 1
     def play(self): self.plays += 1
     def pause(self): pass
+
+
+class Progressbar:
+    def __init__(self): self.config = {}; self.running = False
+    def configure(self, **values): self.config.update(values)
+    def start(self, _interval): self.running = True
+    def stop(self): self.running = False
 
 
 def editor_state(model=None, generation=2):
@@ -128,3 +137,82 @@ def test_engine_failure_keeps_play_disabled_and_non_modal():
     assert editor.play_button.states == [["disabled"]]
     assert editor.audio_status.value == "Audio: ERROR"
     assert editor.status.value == "device unavailable"
+
+
+def test_resolution_session_indexes_fallback_once_and_preserves_tail_safety(tmp_path, monkeypatch):
+    root = tmp_path / "Audio"
+    (root / "one" / "deep").mkdir(parents=True)
+    (root / "two").mkdir()
+    wanted = root / "one" / "deep" / "CLICK.wav"
+    wanted.write_bytes(b"wav")
+    (root / "two" / "OTHER.wav").write_bytes(b"wav")
+    import stadium_reaper_bridge.editor.audio as audio_module
+    real_walk, calls = audio_module.os.walk, []
+    monkeypatch.setattr(audio_module.os, "walk",
+                        lambda path: (calls.append(path) or real_walk(path)))
+    resolver = AudioResolver(tmp_path / "song", root)
+    assert resolver.resolve("deep/CLICK.wav") == wanted.resolve()
+    assert resolver.resolve("two/OTHER.wav") == (root / "two" / "OTHER.wav").resolve()
+    assert len(calls) == 1
+
+    (root / "duplicate").mkdir()
+    (root / "duplicate" / "CLICK.wav").write_bytes(b"wav")
+    fresh = AudioResolver(tmp_path / "song", root)
+    assert fresh.resolve("CLICK.wav") is None
+
+
+def test_song_specific_match_skips_global_index(tmp_path, monkeypatch):
+    automatic = tmp_path / "Audio" / "SONG"
+    automatic.mkdir(parents=True)
+    match = automatic / "CLICK.wav"
+    match.write_bytes(b"wav")
+    monkeypatch.setattr("stadium_reaper_bridge.editor.audio.os.walk",
+                        lambda _path: (_ for _ in ()).throw(AssertionError("unexpected scan")))
+    assert AudioResolver(tmp_path, tmp_path / "Audio", automatic).resolve("CLICK.wav") == match.resolve()
+
+
+def test_cancellation_interrupts_index_while_files_are_being_added(tmp_path, monkeypatch):
+    root = tmp_path / "Audio"
+    root.mkdir()
+    walked = []
+
+    def walk(path):
+        walked.append(path)
+        yield path, (), ("first.wav", "second.wav", "third.wav")
+
+    checks = 0
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        # Initial, directory, and first-file checks pass.  Cancellation is
+        # observed while iterating the remaining files in that directory.
+        return checks >= 4
+
+    monkeypatch.setattr("stadium_reaper_bridge.editor.audio.os.walk", walk)
+    resolver = AudioResolver(tmp_path, root, cancelled=cancelled)
+    assert resolver.resolve("missing.wav") is None
+    assert walked == [root.resolve()]
+    assert checks >= 4
+
+
+def test_worker_progress_does_not_publish_completion_before_result_is_applied():
+    model = EditorModel.open_phased(FIXTURE)
+    messages = []
+    results = list(model.audio_resolution_results(progress=messages.append))
+    assert results
+    assert messages[0].phase == AudioProgressPhase.RESOLVING_PATH
+    assert AudioProgressPhase.TRACK_COMPLETE not in {message.phase for message in messages}
+
+
+def test_header_progress_switches_modes_without_redrawing_timeline():
+    editor = SimpleNamespace(audio_progress=Progressbar(), audio_status=Variable())
+    editor.redraw = lambda: (_ for _ in ()).throw(AssertionError("timeline redraw"))
+    ReapcaseEditor._show_audio_progress(editor, AudioProgress(
+        AudioProgressPhase.INDEXING_AUDIO, 1, 8, "CLICK.wav"))
+    assert editor.audio_progress.running
+    assert editor.audio_progress.config["mode"] == "indeterminate"
+    ReapcaseEditor._show_audio_progress(editor, AudioProgress(
+        AudioProgressPhase.TRACK_COMPLETE, 1, 8, "CLICK.wav"), 1)
+    assert not editor.audio_progress.running
+    assert editor.audio_progress.config["mode"] == "determinate"
+    assert editor.audio_progress.config["value"] == 1
