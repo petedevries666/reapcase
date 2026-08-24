@@ -104,6 +104,15 @@ class RigMidiDecoder:
     def second_helix_channel(self) -> int:
         return _midi_int("channel", self.config["second_helix"]["channel"], 1, 16)
 
+    def second_helix_program_change(self, midi: dict[str, Any]) -> Optional[int]:
+        """Return a Second Helix program using the configured rig semantics."""
+        if midi.get("channel") != self.second_helix_channel:
+            return None
+        program = midi.get("program")
+        if isinstance(program, bool) or not isinstance(program, int) or not 0 <= program <= 127:
+            return None
+        return program
+
     def second_helix_snapshots(self) -> tuple[int, ...]:
         snap = self.config["second_helix"]["snapshot"]
         return tuple(range(snap["value_min"] + snap["offset"],

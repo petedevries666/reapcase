@@ -753,13 +753,13 @@ class ReapcaseEditor(tk.Tk):
             config.pack(fill="x", pady=8); win.config_vars = {}
             cfg = self.model.analysis_config()
             fields = (("initialization_before_bar","Initialization before bar"),
-                      ("bass_preset","Bass preset"),("bass_snapshot","Bass snapshot"),
+                      ("bass_snapshot","Bass snapshot"),
                       ("max_hold_bars","Maximum pedal hold (bars)"),("close_tolerance_ticks","Close tolerance (ticks)"))
             for col,(name,label) in enumerate(fields):
                 ttk.Label(config,text=label).grid(row=0,column=col,sticky="w",padx=3)
                 var=tk.StringVar(value=str(getattr(cfg,name))); win.config_vars[name]=var
                 ttk.Entry(config,textvariable=var,width=10).grid(row=1,column=col,padx=3)
-            checks=(("require_bass_program_zero","BASS PRG 0"),("require_target_bass_program","Target BASS PRG"),("require_target_bass_snapshot","Target BASS SNAP"),("require_exp_1","EXP 1 = 0"),("require_exp_2","EXP 2 = 0"),("enforce_start_order","Enforce order"),("require_clear_loop","CLEAR LOOP"),("reject_current","Reject CURRENT"),("check_exp_end","Expression rest at END"))
+            checks=(("require_bass_program_zero","BASS PRG 0"),("require_bass_program_nonzero","BASS PRG != 0"),("require_target_bass_snapshot","BASS SNAP"),("require_exp_1","EXP 1 = 0"),("require_exp_2","EXP 2 = 0"),("enforce_start_order","Enforce order"),("require_clear_loop","CLEAR LOOP"),("reject_current","Reject CURRENT"),("check_exp_end","Expression rest at END"))
             for n,(name,label) in enumerate(checks):
                 var=tk.BooleanVar(value=getattr(cfg,name)); win.config_vars[name]=var
                 ttk.Checkbutton(config,text=label,variable=var).grid(row=2+n//5,column=n%5,sticky="w",padx=3)
