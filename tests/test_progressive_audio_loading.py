@@ -163,7 +163,8 @@ def test_single_engine_commit_enables_ready_without_waveform_completion():
     assert editor.audio_engine.commits == 1
     assert editor._audio_ready
     assert editor.play_button.states == [["!disabled"]]
-    assert editor.audio_status.value == "Audio: READY — 1/2 resolved, 1 missing"
+    assert editor.audio_status.value == ("Audio: READY — 1/2 resolved, 1 missing"
+                                         "  •  WAVEFORMS 0/0")
     assert len(editor._idle_callbacks) == 1
 
 
@@ -287,6 +288,87 @@ def test_waveform_completion_invalidates_track_without_full_redraw():
     assert redraws == []
     assert invalidated == [("CLICK.wav", 2)]
     assert "CLICK.wav" in editor.waveforms
+
+
+def waveform_progress_editor(paths, generation=4):
+    tracks = [SimpleNamespace(status="ready", resolved_path=Path(path),
+                              file_info=object()) for path in paths]
+    model = SimpleNamespace(audio_tracks=tracks)
+    editor = editor_state(model, generation)
+    editor._audio_ready = True
+    editor.waveforms = {}
+    editor._waveform_pending = set()
+    editor._waveform_cancel = threading.Event()
+    editor._initial_waveform_generation = generation
+    editor._initial_waveform_targets = set(paths)
+    editor._initial_waveform_terminal = set()
+    editor._initial_waveform_presentation_scheduled = True
+    return editor
+
+
+def test_audio_ready_coexists_with_real_waveform_progress_without_redraw():
+    editor = waveform_progress_editor([f"{index}.wav" for index in range(8)])
+    editor._initial_waveform_terminal.update(("0.wav", "1.wav"))
+    editor.redraw = lambda: (_ for _ in ()).throw(AssertionError("timeline redraw"))
+    ReapcaseEditor._update_waveform_header(editor, 4)
+    assert editor.audio_status.value.endswith("WAVEFORMS 2/8")
+    assert editor._audio_ready
+    assert editor.play_button.states == []
+
+
+def test_progress_advances_only_when_extraction_future_completes():
+    editor = waveform_progress_editor(["CLICK.wav"])
+    future = Future()
+    callbacks, invalidated = [], []
+    editor._waveform_pool = SimpleNamespace(submit=lambda *_args, **_kwargs: future)
+    editor.after = lambda _delay, callback: callbacks.append(callback)
+    editor.winfo_exists = lambda: True
+    editor._invalidate_waveform_track = lambda path, generation: invalidated.append(path)
+    ReapcaseEditor._request_waveform(editor, "CLICK.wav", 4)
+    callbacks.pop()()  # not done: this merely schedules another Tk poll
+    assert editor.audio_status.value is None
+    future.set_result(TimedWaveformResult(object(), 10, 11))
+    callbacks.pop()()
+    assert invalidated == ["CLICK.wav"]
+    assert editor.audio_status.value.endswith("WAVEFORMS READY")
+
+
+def test_missing_and_invalid_tracks_do_not_stall_waveforms_ready():
+    tracks = [SimpleNamespace(status="missing", resolved_path=None, file_info=None),
+              SimpleNamespace(status="invalid", resolved_path=None, file_info=None)]
+    model = SimpleNamespace(audio_tracks=tracks)
+    editor = editor_state(model, 5)
+    editor._audio_ready = True
+    editor.waveforms = {}; editor._load_generation = 5
+    editor._audio_load_current = lambda *_args: True
+    editor._request_waveform = lambda *_args: None
+    ReapcaseEditor._request_initial_waveforms(editor, model, 5, threading.Event())
+    assert editor.audio_status.value.endswith("WAVEFORMS READY")
+
+
+def test_stale_waveform_result_cannot_advance_new_song_header():
+    editor = waveform_progress_editor(["NEW.wav"], generation=9)
+    editor.audio_status.set("Audio: READY  •  WAVEFORMS 0/1")
+    future = Future(); future.set_result(TimedWaveformResult(object(), 1, 2))
+    callbacks = []
+    editor._waveform_pool = SimpleNamespace(submit=lambda *_args, **_kwargs: future)
+    editor.after = lambda _delay, callback: callbacks.append(callback)
+    editor.winfo_exists = lambda: True
+    editor._invalidate_waveform_track = lambda *_args: None
+    ReapcaseEditor._request_waveform(editor, "OLD.wav", generation=8)
+    callbacks.pop()()
+    assert editor.audio_status.value.endswith("WAVEFORMS 0/1")
+
+
+def test_lazy_tile_work_does_not_revert_global_waveform_ready():
+    editor = waveform_progress_editor(["CLICK.wav"])
+    editor._initial_waveform_terminal.add("CLICK.wav")
+    ReapcaseEditor._update_waveform_header(editor, 4)
+    ready = editor.audio_status.value
+    # Pan/zoom changes tile/pending presentation state, not the initial job set.
+    editor._waveform_pending.add("viewport tile")
+    ReapcaseEditor._update_waveform_header(editor, 4)
+    assert editor.audio_status.value == ready
 
 
 def test_stale_waveform_completion_cannot_render_items():
