@@ -242,8 +242,6 @@ class EditorModel:
             result = AudioResolutionResult(index, view, identity,
                                            identity != identities.get(path), stat_elapsed,
                                            inspect_elapsed)
-            progress(AudioProgress(AudioProgressPhase.TRACK_COMPLETE, index + 1,
-                                   total, filename))
             yield result
 
     def apply_audio_resolution(self, result: AudioResolutionResult) -> None:

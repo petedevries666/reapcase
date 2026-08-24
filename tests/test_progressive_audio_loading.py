@@ -161,7 +161,7 @@ def test_resolution_session_indexes_fallback_once_and_preserves_tail_safety(tmp_
     assert fresh.resolve("CLICK.wav") is None
 
 
-def test_song_specific_match_skips_global_index_and_index_can_cancel(tmp_path, monkeypatch):
+def test_song_specific_match_skips_global_index(tmp_path, monkeypatch):
     automatic = tmp_path / "Audio" / "SONG"
     automatic.mkdir(parents=True)
     match = automatic / "CLICK.wav"
@@ -170,10 +170,38 @@ def test_song_specific_match_skips_global_index_and_index_can_cancel(tmp_path, m
                         lambda _path: (_ for _ in ()).throw(AssertionError("unexpected scan")))
     assert AudioResolver(tmp_path, tmp_path / "Audio", automatic).resolve("CLICK.wav") == match.resolve()
 
-    cancelled = threading.Event()
-    cancelled.set()
-    resolver = AudioResolver(tmp_path, tmp_path / "Audio", cancelled=cancelled.is_set)
+
+def test_cancellation_interrupts_index_while_files_are_being_added(tmp_path, monkeypatch):
+    root = tmp_path / "Audio"
+    root.mkdir()
+    walked = []
+
+    def walk(path):
+        walked.append(path)
+        yield path, (), ("first.wav", "second.wav", "third.wav")
+
+    checks = 0
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        # Initial, directory, and first-file checks pass.  Cancellation is
+        # observed while iterating the remaining files in that directory.
+        return checks >= 4
+
+    monkeypatch.setattr("stadium_reaper_bridge.editor.audio.os.walk", walk)
+    resolver = AudioResolver(tmp_path, root, cancelled=cancelled)
     assert resolver.resolve("missing.wav") is None
+    assert walked == [root.resolve()]
+    assert checks >= 4
+
+
+def test_worker_progress_does_not_publish_completion_before_result_is_applied():
+    model = EditorModel.open_phased(FIXTURE)
+    messages = []
+    results = list(model.audio_resolution_results(progress=messages.append))
+    assert results
+    assert messages[0].phase == AudioProgressPhase.RESOLVING_PATH
+    assert AudioProgressPhase.TRACK_COMPLETE not in {message.phase for message in messages}
 
 
 def test_header_progress_switches_modes_without_redrawing_timeline():
