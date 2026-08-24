@@ -8,11 +8,55 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from .stadium_archive import ArchiveInspection, inspect_archive, safe_extract
 
 MANIFEST_NAME = ".reapcase-workspace.json"
+SONGS_DIRECTORY = Path("showcase/songs/workspace")
+
+
+@dataclass(frozen=True)
+class WorkspaceSong:
+    """The small amount of Song data needed by workspace navigation."""
+
+    path: Path
+    title: str
+
+    @property
+    def label(self) -> str:
+        return "%s   %s" % (self.path.stem, self.title)
+
+
+def _natural_filename_key(path: Path):
+    """Put numeric Stadium ids in numeric order, with a stable general fallback."""
+    stem = path.stem
+    return (0, int(stem), stem.casefold()) if stem.isdigit() else (1, stem.casefold(), stem)
+
+
+def discover_workspace_songs(workspace: Path) -> tuple[WorkspaceSong, ...]:
+    """Read only Song headers in a validated imported workspace.
+
+    Broken JSON and unrelated JSON documents are deliberately ignored so one
+    bad file cannot make the navigation menu unusable.
+    """
+    workspace = Path(workspace)
+    load_manifest(workspace)
+    result = []
+    for path in sorted((workspace / SONGS_DIRECTORY).glob("*.json"),
+                       key=_natural_filename_key):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if (not isinstance(document, dict) or
+                not isinstance(document.get("name"), str) or
+                not document["name"].strip() or
+                not isinstance(document.get("flags"), list)):
+            continue
+        result.append(WorkspaceSong(path.resolve(), document["name"].strip()))
+    return tuple(result)
 
 
 def backup_stem(path: Path) -> str:
