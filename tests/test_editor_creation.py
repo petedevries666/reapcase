@@ -120,7 +120,7 @@ class CreationTests(unittest.TestCase):
         video = create_video_command(MusicalPosition(3, 1, 1), 6,
                                      "play_one_shot", DECODER)
         self.assertEqual([badge_text(item) for item in (bass, stadium, marker, video)],
-                         ["BASS SNAP 3", "SNAP 4", "VERSE 1", "VIDEO 6 PLAY ONE SHOT"])
+                         ["BASS SNAP 3", "SNAP 4", "VERSE 1", "VIDEO 6 ONE SHOT"])
         for item in (bass, stadium, marker, video):
             self.assertNotIn(item.position.render(), badge_text(item))
         self.assertEqual(FLAG_CAPABILITIES["PRESETSNAP"],

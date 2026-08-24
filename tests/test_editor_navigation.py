@@ -169,7 +169,8 @@ def test_event_list_is_a_semantic_projection_and_does_not_filter_hidden_lanes():
     assert rows[0].position == "001-01.001"
     assert rows[0].lane == "STRUCTURE"
     assert any(row.kind == "PRESETSNAP" and "SNAP" in row.name for row in rows)
-    assert any(row.lane == "SECOND HELIX" and row.name.startswith("BASS") for row in rows)
+    assert any(row.lane == "SECOND HELIX" and row.name ==
+               model.timeline.events[row.index].data["label"] for row in rows)
     assert all(";" not in row.name for row in rows)
 
 

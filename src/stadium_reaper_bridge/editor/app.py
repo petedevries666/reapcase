@@ -2874,23 +2874,32 @@ class ReapcaseEditor(tk.Tk):
             "cycle": (("repeat_count", "Cycle Count", ("Infinite",)),
                       ("option", "Retrigger Flags", ("Off",))),
             "stadium_looper": (("action", "Action", ("Clear Loop", "Record", "Stop", "Play", "Play Once")),),
-            "helix_snapshot": (("snapshot", "Snapshot", self.model.decoder.second_helix_snapshots()),
+            "helix_snapshot": (("label", "Label", "text"),
+                               ("snapshot", "Snapshot", self.model.decoder.second_helix_snapshots()),
                                ("channel", "MIDI Channel", "int")),
-            "helix_expression": (("expression", "Expression", (1, 2, 3)),
+            "helix_expression": (("label", "Label", "text"),
+                                 ("expression", "Expression", (1, 2, 3)),
                                  ("value", "Value", (0, 127)), ("channel", "MIDI Channel", "int")),
-            "helix_preset": (("bank_msb", "Bank MSB (blank = Off)", "optional_int"),
+            "helix_preset": (("label", "Label", "text"),
+                             ("bank_msb", "Bank MSB (blank = Off)", "optional_int"),
                              ("bank_lsb", "Bank LSB (blank = Off)", "optional_int"),
                              ("program", "Program", "int"), ("channel", "MIDI Channel", "int")),
-            "midi_cc": (("channel", "Channel", "int"), ("cc", "CC", "int"),
+            "midi_program": (("label", "Label", "text"),
+                             ("channel", "Channel", "int"),
+                             ("bank_msb", "Bank MSB (blank = Off)", "optional_int"),
+                             ("bank_lsb", "Bank LSB (blank = Off)", "optional_int"),
+                             ("program", "Program", "int")),
+            "midi_cc": (("label", "Label", "text"), ("channel", "Channel", "int"), ("cc", "CC", "int"),
                         ("value", "Value", "int")),
-            "lighting": (("name", "Name", "text"),),
+            "lighting": (("label", "Label", "text"),),
         }
         if family == "video":
-            schemas[family] = (("video", "Video", "optional_int"),
+            schemas[family] = (("label", "Label", "text"), ("video", "Video", "optional_int"),
                                ("action", "Action", self.model.decoder.video_actions()),
                                ("channel", "MIDI Channel", "int"))
         elif family.startswith("helix_") and family not in schemas:
-            schemas[family] = (("action", "Action", self.model.decoder.second_helix_actions()),
+            schemas[family] = (("label", "Label", "text"),
+                               ("action", "Action", self.model.decoder.second_helix_actions()),
                                ("channel", "MIDI Channel", "int"))
         schema = schemas.get(family)
         if not schema:
