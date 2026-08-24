@@ -50,6 +50,7 @@ from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
                        create_video_command)
 from .audio_engine import AudioEngine, PlaybackError, PlaybackState, PlaybackTrack
 from .audio import full_song_track, waveform_cache_key
+from ..analysis import SongAnalyzer, Severity
 from .waveform import (WaveformPerformance, WaveformRenderCache, analyze_grid_sync,
                        buffered_viewport, cached_ghost_raster,
                        format_grid_sync, ghost_raster_cache_key, raster_ppm,
@@ -456,6 +457,9 @@ class ReapcaseEditor(tk.Tk):
         view.add_command(label="Zoom to Selection", command=self.fit_selection, accelerator="Shift+F")
         view.add_command(label="Exit Lane Focus", command=self.exit_lane_focus)
         bar.add_cascade(label="View", menu=view)
+        tools = tk.Menu(bar, tearoff=False)
+        tools.add_command(label="Analyze Song", command=self.analyze_song)
+        bar.add_cascade(label="Tools", menu=tools)
         show = tk.Menu(bar, tearoff=False)
         for label, command in (("New Show", self.new_show), ("Open Show...", self.open_show),
                                ("Save Show", self.save_show)):
@@ -733,6 +737,70 @@ class ReapcaseEditor(tk.Tk):
         units = self.model._units(self.model.timeline.events[index].position)
         self.jump_to_units(units, select_index=index)
         return "break"
+
+    def analyze_song(self):
+        """Open a non-modal report based on the current in-memory Timeline."""
+        if not self.model:
+            self.status.set("Open a Song before running analysis"); return
+        win = getattr(self, "_analysis_window", None)
+        if win is None or not win.winfo_exists():
+            win = tk.Toplevel(self); win.title("Analyze Song"); win.geometry("920x680")
+            self._analysis_window = win
+            outer = ttk.Frame(win, padding=12); outer.pack(fill="both", expand=True)
+            win.summary = tk.StringVar(); ttk.Label(outer, textvariable=win.summary,
+                justify="left", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+            config = ttk.LabelFrame(outer, text="START / END CHECKLIST", padding=8)
+            config.pack(fill="x", pady=8); win.config_vars = {}
+            cfg = self.model.analysis_config()
+            fields = (("initialization_before_bar","Initialization before bar"),
+                      ("bass_preset","Bass preset"),("bass_snapshot","Bass snapshot"),
+                      ("max_hold_bars","Maximum pedal hold (bars)"),("close_tolerance_ticks","Close tolerance (ticks)"))
+            for col,(name,label) in enumerate(fields):
+                ttk.Label(config,text=label).grid(row=0,column=col,sticky="w",padx=3)
+                var=tk.StringVar(value=str(getattr(cfg,name))); win.config_vars[name]=var
+                ttk.Entry(config,textvariable=var,width=10).grid(row=1,column=col,padx=3)
+            checks=(("require_bass_program_zero","BASS PRG 0"),("require_target_bass_program","Target BASS PRG"),("require_target_bass_snapshot","Target BASS SNAP"),("require_exp_1","EXP 1 = 0"),("require_exp_2","EXP 2 = 0"),("enforce_start_order","Enforce order"),("require_clear_loop","CLEAR LOOP"),("reject_current","Reject CURRENT"),("check_exp_end","Expression rest at END"))
+            for n,(name,label) in enumerate(checks):
+                var=tk.BooleanVar(value=getattr(cfg,name)); win.config_vars[name]=var
+                ttk.Checkbutton(config,text=label,variable=var).grid(row=2+n//5,column=n%5,sticky="w",padx=3)
+            buttons=ttk.Frame(outer); buttons.pack(fill="x")
+            ttk.Button(buttons,text="Analyze / Re-run Analysis",command=self._rerun_analysis).pack(side="left")
+            ttk.Button(buttons,text="Save configuration",command=self._save_analysis_config).pack(side="left",padx=6)
+            columns=("severity","category","position","message")
+            win.results=ttk.Treeview(outer,columns=columns,show="headings")
+            for name,width in zip(columns,(90,120,90,570)): win.results.heading(name,text=name.upper()); win.results.column(name,width=width)
+            win.results.pack(fill="both",expand=True,pady=(8,0)); win.results.bind("<Double-1>",self._analysis_activate)
+        win.lift(); self._rerun_analysis()
+
+    def _analysis_config_from_window(self):
+        cfg=self.model.analysis_config(); vars=self._analysis_window.config_vars
+        for name,var in vars.items():
+            old=getattr(cfg,name); raw=var.get()
+            try: value=bool(raw) if isinstance(old,bool) else type(old)(raw)
+            except ValueError: value=old
+            setattr(cfg,name,value)
+        return cfg
+
+    def _save_analysis_config(self):
+        self.model.set_analysis_config(self._analysis_config_from_window())
+        self.status.set("Analysis configuration staged; Save writes only the Reapcase sidecar")
+
+    def _rerun_analysis(self):
+        win=self._analysis_window; report=SongAnalyzer().analyze(self.model,self._analysis_config_from_window()); win.report=report
+        s=report.summary; counts=Counter(r.severity for r in report.results)
+        loop=[]
+        for device,actions in s.looper_actions.items(): loop.append(f"{device} Looper: " + (" / ".join(f"{k} {v}" for k,v in actions.items()) if actions else "NONE"))
+        bpm = f"{s.bpm:g}" if s.bpm is not None else "—"
+        positions = f"First {s.first_position.render() if s.first_position else '—'}   Last {s.last_position.render() if s.last_position else '—'}   END {s.end_position.render() if s.end_position else '—'}"
+        win.summary.set(f"SONG SUMMARY — {s.name}\nDuration {int(s.duration_seconds//60):02d}:{s.duration_seconds%60:06.3f}   Bars {s.bars}   Regions {s.regions}   BPM {bpm}   Time signature {s.time_signature}\n{positions}\n" + "   ".join(f"{k} {v}" for k,v in s.inventory.items()) + "\n" + "   ".join(loop) + f"\n\nANALYSIS   {counts[Severity.ERROR]} ERRORS   {counts[Severity.WARNING]} WARNINGS   {counts[Severity.INFO]} INFO" + ("\n✓ No critical issue detected" if not counts[Severity.ERROR] else ""))
+        win.results.delete(*win.results.get_children())
+        for n,r in enumerate(report.results): win.results.insert("", "end",iid=str(n),values=(r.severity.value,r.category,r.position.render() if r.position else "—",r.message))
+
+    def _analysis_activate(self, _event=None):
+        win=self._analysis_window; selected=win.results.selection()
+        if selected:
+            result=win.report.results[int(selected[0])]
+            if result.event_index is not None and result.event_index < len(self.model.timeline.events): self._navigate_to_index(result.event_index)
 
     def navigate_event(self, direction):
         if not self.model: return "break"

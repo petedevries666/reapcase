@@ -305,6 +305,19 @@ class EditorModel:
                 bool(item.get("muted", False)), str(item.get("origin", "user")),
                 str(item.get("sample_id", str(item["label"]).casefold()))))
 
+    def analysis_config(self):
+        """Return Song-local diagnostics settings from the Reapcase namespace."""
+        from ..analysis import AnalysisConfig
+        root = self._show_document.get("reapcase", {})
+        return AnalysisConfig.from_dict(root.get("analysis", {}) if isinstance(root, dict) else {})
+
+    def set_analysis_config(self, config) -> None:
+        """Explicitly stage analysis preferences; analysis itself never calls this."""
+        root = self._show_document.setdefault("reapcase", {})
+        if not isinstance(root, dict):
+            raise ValueError("Invalid Reapcase namespace in show sidecar")
+        root["analysis"] = config.to_dict()
+
     @property
     def modified(self) -> bool:
         return (self._created > 0 or self._structural_edits > 0
