@@ -202,9 +202,9 @@ class ReapcaseEditor(tk.Tk):
         self._migration_window = None
         self.audio_grid_overlay = tk.BooleanVar(value=False)
         self._waveform_pending = set()
-        # A single low-duty analyzer avoids concurrent WAV scans competing with
-        # the playback stream for disk and CPU.
-        self._waveform_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="waveform")
+        # Two analyzers overlap decode and I/O without turning a Song open into
+        # an unbounded burst that competes with playback or Tk.
+        self._waveform_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="waveform")
         self._audio_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-resolve")
         self._load_generation = 0
         self._audio_ready = False
@@ -1466,9 +1466,35 @@ class ReapcaseEditor(tk.Tk):
     def _request_initial_waveforms(self, model, generation, cancel):
         if not self._audio_load_current(model, generation, cancel) or not self._audio_ready:
             return
-        for track in model.audio_tracks:
-            if track.resolved_path and track.file_info:
-                self._request_waveform(track.resolved_path, generation)
+        tracks = [track for track in model.audio_tracks
+                  if track.resolved_path and track.file_info]
+        # Submission order is executor priority. Prefer vertically visible
+        # audio lanes; an optional FULL-SONG ghost is next, and offscreen lanes
+        # cannot occupy both workers before visible material is queued.
+        visible = set()
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            try:
+                visibility = self._effective_lane_visibility()
+                top = visible_lane_layout(self.lane_order, visibility).audio_top
+                view_top = canvas.canvasy(0)
+                view_bottom = view_top + canvas.winfo_height()
+                visible = {index for index in range(len(model.audio_tracks))
+                           if top + (index + 1) * LANE_HEIGHT >= view_top and
+                           top + index * LANE_HEIGHT <= view_bottom}
+            except (AttributeError, tk.TclError):
+                pass
+        ghost = (full_song_track(model.audio_tracks)
+                 if all(hasattr(track, "name") for track in model.audio_tracks) else None)
+        ghost_needed = bool(getattr(self, "full_song_ghost_visible", None) and
+                            self.full_song_ghost_visible.get())
+        indexed = list(enumerate(model.audio_tracks))
+        priority = {id(track): (0 if index in visible else
+                                1 if ghost_needed and track is ghost else 2, index)
+                    for index, track in indexed}
+        tracks.sort(key=lambda track: priority[id(track)])
+        for track in tracks:
+            self._request_waveform(track.resolved_path, generation)
 
     def _set_audio_ready(self, model):
         self._audio_ready = True
@@ -2434,6 +2460,19 @@ class ReapcaseEditor(tk.Tk):
         if self.marquee_mode == "add": return self.marquee_base | hits
         return self.marquee_base ^ hits
 
+    def _move_playhead_item(self):
+        """Move the transport overlay without rebuilding static timeline layers."""
+        if not self.model:
+            return
+        items = self.canvas.find_withtag("playhead")
+        if not items:
+            return
+        units = self.model._units(self.model.cursor)
+        x = timeline_x(units, self.model.song.ppqn, self.pixels_per_beat)
+        coordinates = self.canvas.coords(items[0])
+        if len(coordinates) == 4:
+            self.canvas.coords(items[0], x, coordinates[1], x, coordinates[3])
+
     def click(self, event):
         if not self.model: return
         self.canvas.focus_set()
@@ -2477,7 +2516,7 @@ class ReapcaseEditor(tk.Tk):
         if (self.canvas.canvasy(event.y) < RULER_HEIGHT and
                 event.x >= HEADER_WIDTH):
             self.playhead_drag = True
-            self.seek_units(units); self.redraw(); return
+            self.seek_units(units); self._move_playhead_item(); return
         if index is not None:
             sources = self.semantic_sources.get(index, (index,))
             if len(sources) > 1 and not event.state & 0x4:
@@ -2839,7 +2878,7 @@ class ReapcaseEditor(tk.Tk):
             units = snapped_units_at_x(self.canvas.canvasx(event.x), self.model.song.ppqn,
                                        self.pixels_per_beat, self.grid_choice.get(),
                                        self.model.numerator, self.model.timing_map)
-            self.seek_units(units); self.redraw(); return
+            self.seek_units(units); self._move_playhead_item(); return
         if self.sequence_drag:
             start_x, identities = self.sequence_drag
             raw = drag_units(self.canvas.canvasx(event.x) - start_x,
