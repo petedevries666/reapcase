@@ -29,6 +29,11 @@ DEFAULT_BASE_BUCKET_FRAMES = 32
 DEFAULT_READ_FRAMES = 65536
 DEFAULT_TILE_WIDTH = 512
 
+# ``bytes.translate`` performs the only conditional operation needed when
+# widening packed little-endian PCM24: the high byte is either 0x00 or 0xff.
+# Keeping this table at module scope also avoids rebuilding it for every block.
+_PCM24_SIGN_BYTES = bytes([0] * 128 + [255] * 128)
+
 
 @dataclass(frozen=True)
 class DisplayLevel:
@@ -300,12 +305,22 @@ def _pcm_integers(data: bytes, width: int):
         if struct.pack("=h", 1) != struct.pack("<h", 1):
             values.byteswap()
         return values
-    # ``struct`` has no 24-bit format.  Indexing a memoryview avoids allocating
-    # a three-byte slice and an int object conversion for every sample.
-    view = memoryview(data)
-    return array("i", ((view[i] | view[i + 1] << 8 | view[i + 2] << 16) -
-                       ((view[i + 2] & 0x80) << 17)
-                       for i in range(0, len(view), 3)))
+    # ``struct`` has no 24-bit format.  Widen the three byte lanes in bulk and
+    # let ``array.frombytes`` construct native integers in C.  Extended-slice
+    # assignment and translate are C loops; unlike the former generator this
+    # creates no Python integer (or generator iteration) per sample.
+    sample_count = len(data) // 3
+    widened = bytearray(sample_count * 4)
+    source, target = memoryview(data), memoryview(widened)
+    target[0::4] = source[0::3]
+    target[1::4] = source[1::3]
+    target[2::4] = source[2::3]
+    target[3::4] = data[2::3].translate(_PCM24_SIGN_BYTES)
+    values = array("i")
+    values.frombytes(widened)
+    if struct.pack("=i", 1) != struct.pack("<i", 1):
+        values.byteswap()
+    return values
 
 
 def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_BASE_BUCKET_FRAMES,
@@ -324,7 +339,7 @@ def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_B
     perf = os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes")
     timings = Counter()
     processed_frames = processed_bytes = blocks = 0
-    opened = time.perf_counter()
+    opened = extraction_started = time.perf_counter()
     low_values, high_values = array("f"), array("f")
     with wave.open(str(path), "rb") as source:
         frames, rate, channels, width = (source.getnframes(), source.getframerate(),
@@ -389,9 +404,15 @@ def extract_waveform(path: Union[str, Path], base_bucket_frames: int = DEFAULT_B
                              frames, tuple(levels))
     timings["summary finalization"] = time.perf_counter() - phase
     if perf:
+        elapsed = time.perf_counter() - extraction_started
+        decoded_seconds = timings["sample decode/conversion"]
+        megabytes = processed_bytes / 1_000_000
         logging.getLogger(__name__).debug(
-            "waveform extraction %s frames=%d bytes=%d block_size=%d blocks=%d phases_ms=%s",
+            "waveform extraction %s frames=%d bytes=%d block_size=%d blocks=%d "
+            "pcm_bits=%d decode_mb_s=%.3f extraction_mb_s=%.3f phases_ms=%s",
             path, processed_frames, processed_bytes, read_frames, blocks,
+            width * 8, megabytes / decoded_seconds if decoded_seconds else 0.0,
+            megabytes / elapsed if elapsed else 0.0,
             {name: round(seconds * 1000, 3) for name, seconds in timings.items()})
     return result
 
