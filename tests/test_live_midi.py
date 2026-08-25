@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import shutil
 
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.editor.creation import (
@@ -129,3 +130,72 @@ def test_authorable_second_helix_family_live_contract_and_native_looper_exclusio
     ]
     native = create_stadium_looper(position, "Clear Loop")
     assert second_helix_events([native], DECODER, lambda p: p.bar) == ()
+
+
+def test_authored_second_helix_messages_survive_editor_save_and_open(tmp_path):
+    """Exercise the same creation/model/native Song path as the editor UI."""
+    expected_loopers = {
+        "Overdub": (60, 0), "Record": (60, 127),
+        "Stop": (61, 0), "Play": (61, 127), "Play Once": (62, 127),
+        "Undo/Redo": (63, 127), "Forward": (65, 0), "Reverse": (65, 127),
+        "Full Speed": (66, 0), "Half Speed": (66, 127),
+        "Off": (67, 0), "On": (67, 127),
+    }
+    song_path = tmp_path / "round-trip.json"
+    shutil.copyfile(FIXTURE, song_path)
+    editor = EditorModel.open(song_path)
+    first_new_source_index = len(editor.timeline.events)
+    position = MusicalPosition(200, 1, 1)
+    authored = [
+        create_second_helix_preset(position, None, None, 7, editor.decoder),
+        create_second_helix_snapshot(position, 3, editor.decoder),
+        create_second_helix_expression(position, 1, 0, editor.decoder),
+        create_second_helix_expression(position, 2, 127, editor.decoder),
+    ] + [create_second_helix_looper(position, action, editor.decoder)
+         for action in expected_loopers]
+    expected = [
+        {"type": "program_change", "program": 7},
+        {"type": "control_change", "cc": 69, "value": 2},
+        {"type": "control_change", "cc": 1, "value": 0},
+        {"type": "control_change", "cc": 2, "value": 127},
+    ] + [{"type": "control_change", "cc": cc, "value": value}
+         for cc, value in expected_loopers.values()]
+
+    # Fresh UI-created events carry integer MIDI fields and decoder aliases.
+    for event in authored[1:]:
+        assert event.source.type == "MIDI_CC"
+        assert isinstance(event.data["channel"], int)
+        assert isinstance(event.data["cc"], int)
+        assert isinstance(event.data["value"], int)
+        assert event.data["rig_alias"]["system"] == "second_helix"
+    fresh = second_helix_events(authored, editor.decoder, lambda p: p.bar)
+    assert [item.message for item in fresh] == expected
+
+    for event in authored:
+        editor.insert_event(event)
+    editor.save_as(song_path)
+    reopened = EditorModel.open(song_path)
+    reconstructed = [event for event in reopened.timeline.events
+                     if event.source_index is not None and
+                     event.source_index >= first_new_source_index]
+    assert len(reconstructed) == len(authored)
+    for event in reconstructed[1:]:
+        assert event.source.type == "MIDI_CC"
+        assert isinstance(event.data["channel"], int)
+        assert isinstance(event.data["cc"], int)
+        assert isinstance(event.data["value"], int)
+        assert event.data["rig_alias"]["system"] == "second_helix"
+    round_tripped = second_helix_events(reconstructed, reopened.decoder,
+                                       lambda p: p.bar)
+    assert [item.message for item in round_tripped] == expected
+    assert [item.event_class for item in round_tripped[4:]] == [
+        LiveEventClass.ACTION] * len(expected_loopers)
+
+
+def test_live_debug_logs_rejected_second_helix_cc(caplog):
+    event = create_second_helix_snapshot(MusicalPosition(2, 1, 1), 3, DECODER)
+    event.data["value"] = 127  # CC69 is outside the configured snapshot range.
+    with caplog.at_level("DEBUG", logger="stadium_reaper_bridge.live_midi"):
+        assert second_helix_events([event], DECODER, lambda p: p.bar) == ()
+    assert "LIVE MIDI SKIP SECOND HELIX" in caplog.text
+    assert "cc=69" in caplog.text
