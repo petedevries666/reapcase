@@ -179,6 +179,55 @@ def test_seek_invalidates_consumed_pause_boundary_state():
     assert dispatcher.poll(10) == 10
 
 
+def test_latency_clock_rewind_does_not_retrigger_pause_or_duplicate_midi():
+    """Regress the stage log: resume at 958 while audible time starts behind."""
+    sent = []
+    dispatcher = LiveMidiDispatcher(lambda message, *_: sent.append(message))
+    before = ev(900, 0, {"type": "event", "value": "before"}, ("event", 0))
+    after = ev(2640, 2, {"type": "control_change", "cc": 69, "value": 6},
+               ("snapshot", None))
+    dispatcher.load([before, after])
+    dispatcher.set_pause_boundaries([(958, 1)])
+    dispatcher.set_enabled(True)
+
+    dispatcher.start(0)
+    assert dispatcher.poll(958) == 958
+    assert sent == [before.message]
+
+    dispatcher.start(958)
+    assert dispatcher.poll(787) is None
+    assert dispatcher.poll(924) is None
+    assert dispatcher.poll(958) is None
+    assert dispatcher.poll(2640) is None
+    assert sent == [before.message, after.message]
+
+    # An explicit seek is a new traversal and re-arms the consumed marker.
+    dispatcher.seek(0)
+    dispatcher.start(0)
+    assert dispatcher.poll(958) == 958
+
+
+def test_pause_consumption_resets_for_seek_reload_and_transport_restart():
+    dispatcher = LiveMidiDispatcher(lambda *_: None)
+    dispatcher.load([])
+    dispatcher.set_pause_boundaries([(958, 0)])
+    dispatcher.set_enabled(True)
+
+    for reset in (lambda: dispatcher.seek(958),
+                  lambda: dispatcher.seek(1200),
+                  lambda: dispatcher.stop(),
+                  lambda: dispatcher.load([])):
+        dispatcher.start(0)
+        assert dispatcher.poll(958) == 958
+        dispatcher.start(958)
+        assert dispatcher.poll(958) is None
+        reset()
+
+    dispatcher.set_pause_boundaries([(958, 0)])
+    dispatcher.start(0)
+    assert dispatcher.poll(958) == 958
+
+
 def test_small_increments_repeated_clock_and_exact_boundary_lose_nothing():
     events = [
         ev(units, order, {'type': 'event', 'value': order}, ('event', order))
