@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from ..show import ReapcaseShow, SHOW_SUFFIX
 from ..runtime import LiveRuntime, Readiness, ShowPreloader
 from ..midi_output import DESTINATION_LABELS, MidiDestination, MidiRouter
-from ..live_midi import LiveMidiDispatcher, second_helix_events
+from ..live_midi import LiveMidiDispatcher, build_live_event_set
 
 from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_HEIGHT,
                      drag_units, fit_range_scale, fit_song_scale, horizontal_wheel_units,
@@ -1071,6 +1071,12 @@ class ReapcaseEditor(tk.Tk):
         self._refresh_navigation()
         self.redraw()
 
+    def _rebuild_live_event_set(self):
+        """Synchronize LIVE with canonical editor state, independently of redraw/save."""
+        if self.model:
+            self.live_midi.load(build_live_event_set(
+                self.model.timeline.events, self.model.decoder, self.model._units))
+
     def _update_song_header(self):
         """Refresh Song identity only when a newly loaded model is committed."""
         if not self.model:
@@ -1482,8 +1488,8 @@ class ReapcaseEditor(tk.Tk):
                 phase.set("Finalizing UI…")
                 self.audio_engine.close()
                 self.model = candidate
-                self.live_midi.load(second_helix_events(
-                    candidate.timeline.events, candidate.decoder, candidate._units))
+                candidate.set_timeline_change_listener(self._rebuild_live_event_set)
+                self._rebuild_live_event_set()
                 self._activate_workspace_for_song(candidate.path)
                 self.monitor_muted = [False] * len(candidate.audio_tracks)
                 self.monitor_solo = [False] * len(candidate.audio_tracks)

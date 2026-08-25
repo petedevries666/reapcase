@@ -8,7 +8,7 @@ from stadium_reaper_bridge.editor.creation import (
     create_second_helix_looper, create_second_helix_preset,
     create_second_helix_snapshot, create_stadium_looper)
 from stadium_reaper_bridge.live_midi import (LiveEventClass, LiveMidiDispatcher,
-                                              second_helix_events)
+                                              build_live_event_set, second_helix_events)
 from stadium_reaper_bridge.midi import RigMidiDecoder
 from stadium_reaper_bridge.stadium import MusicalPosition
 
@@ -199,3 +199,83 @@ def test_live_debug_logs_rejected_second_helix_cc(caplog):
         assert second_helix_events([event], DECODER, lambda p: p.bar) == ()
     assert "LIVE MIDI SKIP SECOND HELIX" in caplog.text
     assert "cc=69" in caplog.text
+
+
+def bind_live_inventory(editor):
+    """Mirror the application's model -> translated set -> dispatcher lifecycle."""
+    dispatcher = LiveMidiDispatcher(lambda *_: None)
+    rebuilds = []
+    def rebuild():
+        dispatcher.load(build_live_event_set(
+            editor.timeline.events, editor.decoder, editor._units))
+        rebuilds.append(dispatcher.generation)
+    editor.set_timeline_change_listener(rebuild)
+    rebuild()
+    return dispatcher, rebuilds
+
+
+def messages(dispatcher):
+    return [event.message for event in dispatcher.events]
+
+
+def test_loaded_song_real_source_types_and_live_snapshot_inventory(caplog):
+    """Exercise the real Song parser, rather than feeding translator-shaped data."""
+    editor = model()
+    with caplog.at_level("DEBUG", logger="stadium_reaper_bridge.live_midi"):
+        dispatcher, _ = bind_live_inventory(editor)
+    snapshots = [event for event in editor.timeline.events
+                 if event.data.get("rig_alias", {}).get("action") == "snapshot"]
+    assert snapshots
+    assert {event.source.type for event in snapshots} == {"MIDI_CC"}
+    assert {event.data["cc"] for event in snapshots} == {69}
+    assert any(message.get("cc") == 69 for message in messages(dispatcher))
+    assert "LIVE SOURCE" in caplog.text
+    assert "source.type=MIDI_CC" in caplog.text
+    assert "LIVE BUILD" in caplog.text
+    assert "LIVE EVENT" in caplog.text
+
+
+def test_loaded_song_with_expression_builds_correct_live_cc_without_save(tmp_path):
+    song_path = tmp_path / "expression.json"
+    shutil.copyfile(FIXTURE, song_path)
+    author = EditorModel.open(song_path)
+    author.insert_event(create_second_helix_expression(
+        MusicalPosition(100, 1, 1), 2, 127, author.decoder))
+    author.save_as(song_path)
+
+    loaded = EditorModel.open(song_path)
+    dispatcher, _ = bind_live_inventory(loaded)
+    assert {"type": "control_change", "cc": 2, "value": 127} in messages(dispatcher)
+
+
+def test_live_inventory_tracks_create_edit_delete_without_save_or_redraw():
+    editor = model()
+    dispatcher, rebuilds = bind_live_inventory(editor)
+    initial_generation = dispatcher.generation
+    position = MusicalPosition(100, 1, 1)
+
+    snapshot_index = editor.insert_event(
+        create_second_helix_snapshot(position, 6, editor.decoder))
+    assert dispatcher.generation == initial_generation + 1
+    assert {"type": "control_change", "cc": 69, "value": 5} in messages(dispatcher)
+
+    editor.insert_event(create_second_helix_expression(position, 1, 127, editor.decoder))
+    assert {"type": "control_change", "cc": 1, "value": 127} in messages(dispatcher)
+    editor.insert_event(create_second_helix_looper(position, "Record", editor.decoder))
+    assert {"type": "control_change", "cc": 60, "value": 127} in messages(dispatcher)
+
+    # A view repaint has no model operation and therefore cannot control inventory.
+    generation_before_redraw = dispatcher.generation
+    assert rebuilds[-1] == generation_before_redraw
+    assert dispatcher.generation == generation_before_redraw
+
+    capability = editor.edit_capability(snapshot_index)
+    old_message = {"type": "control_change", "cc": 69, "value": 5}
+    new_message = {"type": "control_change", "cc": 69, "value": 6}
+    assert editor.edit_event(snapshot_index, dict(capability.values, snapshot=7))
+    assert old_message not in messages(dispatcher)
+    assert new_message in messages(dispatcher)
+
+    editor.selected = {snapshot_index}
+    assert editor.delete_selected() == 1
+    assert new_message not in messages(dispatcher)

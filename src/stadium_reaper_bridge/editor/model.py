@@ -109,6 +109,7 @@ class EditorModel:
         self._created = 0
         self._structural_edits = 0
         self._audio_edits = 0
+        self._timeline_change_listener = None
         start = next((e for e in self.timeline.events if e.source.type == "START"), None)
         self.tempo = start.data.get("tempo") if start else None
         self.numerator = start.data.get("time_signature_numerator", 4) if start else 4
@@ -622,6 +623,12 @@ class EditorModel:
         if timing:
             self._rebuild_timing_map()
         self._normalize_structure_labels()
+        if self._timeline_change_listener is not None:
+            self._timeline_change_listener()
+
+    def set_timeline_change_listener(self, listener) -> None:
+        """Install the application-level invalidation hook for timeline edits."""
+        self._timeline_change_listener = listener
 
     def shift_selected(self, bars: int = 0, beats: int = 0, ticks: int = 0) -> int:
         indices = sorted(self.selected)
