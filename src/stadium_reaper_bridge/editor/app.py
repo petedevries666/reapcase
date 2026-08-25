@@ -39,7 +39,7 @@ from .style import (AUDIO, LOOPER_STATE_FILLS, REAPCASE_TREEVIEW_STYLE, THEME,
                     structure_region_fill)
 from .sequence import SequenceClickKind
 from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
-                        derive_structure_layout, sticky_label_x,
+                        derive_structure_layout, is_pause_marker, sticky_label_x,
                         structure_sublane)
 from .composite import (COMMANDS_HEIGHT, COMPOSITE_LANES, event_sublane,
                         looper_item_bounds,
@@ -1076,6 +1076,12 @@ class ReapcaseEditor(tk.Tk):
         if self.model:
             self.live_midi.load(build_live_event_set(
                 self.model.timeline.events, self.model.decoder, self.model._units))
+            self.live_midi.set_timing_map(self.model.tempo_map.units_to_seconds)
+            self.live_midi.set_pause_boundaries(
+                (self.model._units(event.position),
+                 event.source_index if event.source_index is not None else order)
+                for order, event in enumerate(self.model.timeline.events)
+                if event.source.type == "MARKER" and is_pause_marker(event))
 
     def _update_song_header(self):
         """Refresh Song identity only when a newly loaded model is committed."""
@@ -3469,8 +3475,35 @@ class ReapcaseEditor(tk.Tk):
             else:
                 units = (self.model.tempo_map.seconds_to_units(self.audio_engine.current_time)
                          if self.model and self.model.tempo_map else 0)
-                if hasattr(self, "live_midi"): self.live_midi.start(units)
-                self.audio_engine.play()
+                LOG.debug("LIVE PLAY REQUEST requested_position=%s", units)
+                LOG.debug("LIVE PREROLL BEGIN")
+                live_midi = getattr(self, "live_midi", None)
+                completions = live_midi.start(units) if live_midi else ()
+                generation = live_midi.generation if live_midi else None
+                def go():
+                    if (live_midi and
+                            (generation != live_midi.generation or not live_midi.playing)):
+                        return
+                    pause_units = live_midi.next_pause_units if live_midi else None
+                    pause_seconds = (self.model.tempo_map.units_to_seconds(pause_units)
+                                     if pause_units is not None else None)
+                    if hasattr(self.audio_engine, "pause_at"):
+                        self.audio_engine.pause_at(pause_seconds)
+                    self.audio_engine.play()
+                    LOG.debug("LIVE AUDIO START audio_position=%s",
+                              getattr(self.audio_engine, "current_time", 0.0))
+                if completions:
+                    # Poll readiness on Tk; never call Tk from the worker and
+                    # never sleep either thread. The serial worker makes the
+                    # final Future a barrier for every preceding recall.
+                    def await_recall():
+                        if completions[-1].done():
+                            go()
+                        else:
+                            self.after(1, await_recall)
+                    await_recall()
+                else:
+                    go()
         except PlaybackError as exc: messagebox.showwarning("Audio unavailable", str(exc))
 
     def _live_mode_changed(self, *_args):
@@ -3519,7 +3552,7 @@ class ReapcaseEditor(tk.Tk):
             LOG.debug("%s  %02d:%06.3f  SECOND HELIX  %s%s", kind,
                       int(position // 60), position % 60, message,
                       "" if sent else " (unavailable)")
-        self._live_midi_pool.submit(send)
+        return self._live_midi_pool.submit(send)
 
     def _update_fixed_headers_for_scroll(self, previous_left):
         """Keep viewport overlays fixed without reconstructing the timeline.
@@ -3541,10 +3574,14 @@ class ReapcaseEditor(tk.Tk):
             minutes, remainder = divmod(seconds, 60)
             position = self.model.tempo_map.seconds_to_musical_position(seconds)
             self.transport_position.set(f"{int(minutes):02d}:{remainder:06.3f}   |   {position.render()}")
-            if self.audio_engine.state is PlaybackState.PLAYING:
+            if (self.audio_engine.state is PlaybackState.PLAYING or
+                    hasattr(self, "live_midi") and self.live_midi.playing):
                 play_units = self.model.tempo_map.seconds_to_units(seconds)
                 if hasattr(self, "live_midi"):
-                    self.live_midi.poll(play_units)
+                    pause_units = self.live_midi.poll(play_units)
+                    if pause_units is not None:
+                        # Audio callback already stopped at this exact frame.
+                        self.model.cursor = self.model._position(pause_units)
                 playhead_x = timeline_x(play_units, self.model.song.ppqn, self.pixels_per_beat)
                 playhead = self.canvas.find_withtag("playhead")
                 if playhead:

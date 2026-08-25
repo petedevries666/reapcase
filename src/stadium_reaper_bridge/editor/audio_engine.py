@@ -93,6 +93,7 @@ class AudioEngine:
         self._readers: list[wave.Wave_read] = []
         self._infos: list[AudioFileInfo] = []
         self._stream = None
+        self._pause_frame: Optional[int] = None
         self._muted: list[bool] = []
         self._solo: list[bool] = []
         self._lock = threading.RLock()
@@ -177,13 +178,19 @@ class AudioEngine:
             self._state = PlaybackState.PLAYING
             self._stream.start()
 
+    def pause_at(self, seconds: Optional[float]) -> None:
+        """Arm an exact audio-frame pause boundary for the callback thread."""
+        with self._lock:
+            self._pause_frame = (None if seconds is None else
+                                 min(self.total_frames, max(0, round(seconds * self.sample_rate))))
+
     def pause(self):
         with self._lock:
             if self._state is PlaybackState.PLAYING: self._state = PlaybackState.PAUSED
 
     def stop(self):
         with self._lock:
-            self._state = PlaybackState.STOPPED; self._frame = 0
+            self._state = PlaybackState.STOPPED; self._frame = 0; self._pause_frame = None
 
     def seek(self, seconds: float):
         with self._lock:
@@ -192,6 +199,7 @@ class AudioEngine:
             elif self._state is PlaybackState.ENDED: self._state = PlaybackState.STOPPED
             for reader, info in zip(self._readers, self._infos):
                 reader.setpos(min(self._frame, info.frames))
+            self._pause_frame = None
 
     return_to_start = stop
 
@@ -209,6 +217,9 @@ class AudioEngine:
 
     def _mix(self, frames: int) -> list[list[float]]:
         start = self._frame
+        requested_frames = frames
+        if self._pause_frame is not None:
+            frames = min(frames, max(0, self._pause_frame - start))
         output = [[0.0, 0.0] for _ in range(frames)]
         active_solo = any(self._solo)
         for index, (reader, info) in enumerate(zip(self._readers, self._infos)):
@@ -229,7 +240,11 @@ class AudioEngine:
             row[0] = max(-1.0, min(1.0, row[0] / contributing))
             row[1] = max(-1.0, min(1.0, row[1] / contributing))
         self._frame = min(self.total_frames, start + frames)
-        if self._frame >= self.total_frames: self._state = PlaybackState.ENDED
+        if self._pause_frame is not None and self._frame >= self._pause_frame:
+            self._state = PlaybackState.PAUSED
+            self._pause_frame = None
+        elif self._frame >= self.total_frames: self._state = PlaybackState.ENDED
+        output.extend([[0.0, 0.0]] * (requested_frames - frames))
         return output
 
     def _callback(self, outdata, frames, time_info=None, status=None):
