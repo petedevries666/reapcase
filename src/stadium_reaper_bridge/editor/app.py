@@ -188,7 +188,7 @@ class ReapcaseEditor(tk.Tk):
         # Optional MIDI failures are contained by MidiRouter and never block editing.
         self.midi_router = MidiRouter()
         self._live_midi_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-midi")
-        self.live_midi = LiveMidiDispatcher(self._queue_live_midi)
+        self.live_midi = LiveMidiDispatcher(self._send_live_midi)
         self.show: Optional[ReapcaseShow] = None
         self.show_preloader = ShowPreloader()
         self.live_runtime: Optional[LiveRuntime] = None
@@ -3481,13 +3481,40 @@ class ReapcaseEditor(tk.Tk):
         if enabled and self.midi_router.status(MidiDestination.SECOND_HELIX) != "Connected":
             self.status.set("LIVE: SECOND HELIX unavailable")
 
-    def _queue_live_midi(self, message, recall, generation):
+    @staticmethod
+    def _live_message_rejection_reason(message):
+        if not isinstance(message, dict):
+            return "message is not a dictionary"
+        message_type = message.get("type")
+        if message_type == "program_change":
+            value = message.get("program")
+            return (None if isinstance(value, int) and not isinstance(value, bool)
+                    and 0 <= value <= 127 else "invalid program_change")
+        if message_type == "control_change":
+            cc, value = message.get("cc"), message.get("value")
+            valid = all(isinstance(item, int) and not isinstance(item, bool)
+                        and 0 <= item <= 127 for item in (cc, value))
+            return None if valid else "invalid control_change"
+        return f"unsupported message type {message_type!r}"
+
+    def _send_live_midi(self, message, recall, generation):
         """Serialize potentially blocking device I/O away from Tk."""
+        LOG.debug("LIVE CALLBACK message=%r", message)
         position = self.audio_engine.current_time
         def send():
-            if generation != self.live_midi.generation or not self.live_midi.enabled:
+            if generation != self.live_midi.generation:
+                LOG.debug("LIVE ROUTER SKIP message=%r reason=stale generation", message)
                 return
+            if not self.live_midi.enabled:
+                LOG.debug("LIVE ROUTER SKIP message=%r reason=LIVE disabled", message)
+                return
+            reason = self._live_message_rejection_reason(message)
+            if reason is not None:
+                LOG.debug("LIVE ROUTER SKIP message=%r reason=%s", message, reason)
+                return
+            LOG.debug("LIVE ROUTER SEND destination=SECOND_HELIX message=%r", message)
             sent = self.midi_router.send(MidiDestination.SECOND_HELIX, message)
+            LOG.debug("LIVE ROUTER RESULT success=%s", str(sent).lower())
             kind = "LIVE RECALL" if recall else "LIVE MIDI"
             LOG.debug("%s  %02d:%06.3f  SECOND HELIX  %s%s", kind,
                       int(position // 60), position % 60, message,

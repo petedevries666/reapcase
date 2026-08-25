@@ -10,6 +10,7 @@ from stadium_reaper_bridge.editor.creation import (
 from stadium_reaper_bridge.live_midi import (LiveEventClass, LiveMidiDispatcher,
                                               build_live_event_set, second_helix_events)
 from stadium_reaper_bridge.midi import RigMidiDecoder
+from stadium_reaper_bridge.midi_output import MidiDestination
 from stadium_reaper_bridge.stadium import MusicalPosition
 
 FIXTURE = Path('tests/fixtures/wanna_be_429.json')
@@ -75,6 +76,58 @@ def test_real_observed_sequence_dispatches_every_message_in_source_order():
 
     assert dispatch_messages(events, clock_positions) == [
         event.message for event in events]
+
+
+def test_real_application_callback_routes_pc_cc_and_looper_and_rejects_safely(caplog):
+    """Regress dispatcher -> editor callback -> MidiRouter, not a list callback."""
+    from types import SimpleNamespace
+    from stadium_reaper_bridge.editor.app import ReapcaseEditor
+
+    class ImmediateExecutor:
+        def submit(self, function):
+            function()
+
+    class MockMidiRouter:
+        def __init__(self):
+            self.calls = []
+
+        def send(self, destination, message):
+            self.calls.append((destination, message))
+            return True
+
+    app = ReapcaseEditor.__new__(ReapcaseEditor)
+    app.audio_engine = SimpleNamespace(current_time=0.0)
+    app.midi_router = MockMidiRouter()
+    app._live_midi_pool = ImmediateExecutor()
+    app.live_midi = LiveMidiDispatcher(app._send_live_midi)
+    messages = [
+        {"type": "program_change", "program": 7},
+        {"type": "control_change", "cc": 69, "value": 6},
+        {"type": "control_change", "cc": 1, "value": 0},
+        {"type": "control_change", "cc": 2, "value": 0},
+        {"type": "control_change", "cc": 60, "value": 127},
+    ]
+    events = [ev(index + 1, index, message,
+                 ("action", 60) if index == 4 else ("cc", index),
+                 LiveEventClass.ACTION if index == 4 else LiveEventClass.RECALLABLE_STATE)
+              for index, message in enumerate(messages)]
+
+    app.live_midi.load(events)
+    app.live_midi.set_enabled(True)
+    app.live_midi.start(0)
+    with caplog.at_level("DEBUG", logger="stadium_reaper_bridge.editor.app"):
+        app.live_midi.poll(len(events))
+        app._send_live_midi({"type": "control_change", "cc": 1}, False,
+                            app.live_midi.generation)
+        app._send_live_midi(messages[0], False, app.live_midi.generation - 1)
+
+    assert app.midi_router.calls == [
+        (MidiDestination.SECOND_HELIX, message) for message in messages]
+    assert "LIVE CALLBACK message=" in caplog.text
+    assert "LIVE ROUTER SEND destination=SECOND_HELIX message=" in caplog.text
+    assert "LIVE ROUTER RESULT success=true" in caplog.text
+    assert "reason=invalid control_change" in caplog.text
+    assert "reason=stale generation" in caplog.text
 
 
 def test_three_same_position_events_are_each_dispatched_once():
