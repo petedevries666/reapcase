@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 import logging
+import math
 import os
 import threading
 import time
@@ -94,6 +95,17 @@ class AudioEngine:
         self._infos: list[AudioFileInfo] = []
         self._stream = None
         self._pause_frame: Optional[int] = None
+        # PortAudio's callback DAC timestamp is the preferred clock.  The
+        # stream latency is retained as a safe, less precise fallback.  A
+        # private calibration term keeps the clock extensible without
+        # exposing an unvalidated user setting.
+        self._stream_output_latency: Optional[float] = None
+        self._dac_frame: Optional[int] = None
+        self._dac_time: Optional[float] = None
+        self._play_start_frame = 0
+        self._paused_audible_frame: Optional[int] = None
+        self._manual_output_offset = 0.0
+        self._last_timing_log = 0.0
         self._muted: list[bool] = []
         self._solo: list[bool] = []
         self._lock = threading.RLock()
@@ -109,6 +121,52 @@ class AudioEngine:
     @property
     def current_time(self):
         return self.current_frame / self.sample_rate if self.sample_rate else 0.0
+
+    @property
+    def rendered_time(self) -> float:
+        """Audio position rendered/submitted to the output stream."""
+        return self.current_time
+
+    def _stream_time(self) -> Optional[float]:
+        try:
+            value = float(self._stream.time)
+            return value if math.isfinite(value) else None
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    @property
+    def audible_time(self) -> float:
+        """Best backend-supported estimate of the position heard at the DAC."""
+        with self._lock:
+            rendered = self.current_time
+            if (self._state is PlaybackState.PAUSED and
+                    self._paused_audible_frame is not None and self.sample_rate):
+                return self._paused_audible_frame / self.sample_rate
+            if not self.sample_rate or self._state is not PlaybackState.PLAYING:
+                return rendered
+            audible: Optional[float] = None
+            stream_time = self._stream_time()
+            if self._dac_time is not None and self._dac_frame is not None and stream_time is not None:
+                audible = (self._dac_frame / self.sample_rate +
+                           max(0.0, stream_time - self._dac_time))
+            elif self._stream_output_latency is not None:
+                audible = rendered - self._stream_output_latency
+            if audible is None:
+                return rendered
+            floor = self._play_start_frame / self.sample_rate
+            return min(rendered, max(floor, audible - self._manual_output_offset))
+
+    @property
+    def output_latency(self) -> Optional[float]:
+        """Effective output latency, or ``None`` when the backend has no clock."""
+        with self._lock:
+            if self._state is not PlaybackState.PLAYING:
+                return self._stream_output_latency
+            audible = self.audible_time
+            if (self._dac_time is not None and self._stream_time() is not None) or \
+                    self._stream_output_latency is not None:
+                return max(0.0, self.current_time - audible)
+            return None
 
     @property
     def at_end(self): return self._state is PlaybackState.ENDED
@@ -160,6 +218,8 @@ class AudioEngine:
         self.sample_rate = infos[0].sample_rate
         self.total_frames = max(i.frames for i in infos)
         self._muted = [False] * len(infos); self._solo = [False] * len(infos)
+        self._stream_output_latency = self._read_output_latency(prepared.stream)
+        self._dac_frame = self._dac_time = None
         self.diagnostic = f"Engine: ready | {self.sample_rate} Hz | Stereo | Buffer: {self.blocksize}"
         if PERF:
             LOG.debug("AudioEngine.commit total %.1f ms",
@@ -175,8 +235,12 @@ class AudioEngine:
         with self._lock:
             if not self._stream: raise PlaybackError(self.diagnostic)
             if self._frame >= self.total_frames: self._frame = 0
+            if self._state is not PlaybackState.PAUSED:
+                self._play_start_frame = self._frame
             self._state = PlaybackState.PLAYING
+            self._paused_audible_frame = None
             self._stream.start()
+            self._log_timing(force=True)
 
     def pause_at(self, seconds: Optional[float]) -> None:
         """Arm an exact audio-frame pause boundary for the callback thread."""
@@ -186,11 +250,15 @@ class AudioEngine:
 
     def pause(self):
         with self._lock:
-            if self._state is PlaybackState.PLAYING: self._state = PlaybackState.PAUSED
+            if self._state is PlaybackState.PLAYING:
+                self._paused_audible_frame = round(self.audible_time * self.sample_rate)
+                self._state = PlaybackState.PAUSED
 
     def stop(self):
         with self._lock:
             self._state = PlaybackState.STOPPED; self._frame = 0; self._pause_frame = None
+            self._dac_frame = self._dac_time = None
+            self._paused_audible_frame = None
 
     def seek(self, seconds: float):
         with self._lock:
@@ -200,6 +268,9 @@ class AudioEngine:
             for reader, info in zip(self._readers, self._infos):
                 reader.setpos(min(self._frame, info.frames))
             self._pause_frame = None
+            self._play_start_frame = self._frame
+            self._dac_frame = self._dac_time = None
+            self._paused_audible_frame = None
 
     return_to_start = stop
 
@@ -249,8 +320,51 @@ class AudioEngine:
 
     def _callback(self, outdata, frames, time_info=None, status=None):
         with self._lock:
+            if self._state is PlaybackState.PLAYING:
+                dac_time = self._callback_time(time_info, "outputBufferDacTime")
+                if dac_time is not None:
+                    self._dac_frame, self._dac_time = self._frame, dac_time
             mixed = self._mix(frames) if self._state is PlaybackState.PLAYING else [[0.0, 0.0]] * frames
         outdata[:] = mixed
+        self._log_timing()
+
+    @staticmethod
+    def _callback_time(time_info, name: str) -> Optional[float]:
+        try:
+            value = getattr(time_info, name)
+        except (AttributeError, TypeError):
+            try:
+                value = time_info[name]
+            except (KeyError, TypeError):
+                return None
+        try:
+            result = float(value)
+            return result if math.isfinite(result) else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _read_output_latency(stream) -> Optional[float]:
+        try:
+            latency = stream.latency
+            if isinstance(latency, (tuple, list)):
+                latency = latency[-1]
+            latency = float(latency)
+            return latency if math.isfinite(latency) and latency >= 0 else None
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def _log_timing(self, force: bool = False) -> None:
+        if not PERF:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_timing_log < 1.0:
+            return
+        self._last_timing_log = now
+        latency = self.output_latency
+        LOG.debug("AUDIO TIMING rendered_time=%.6f output_latency_ms=%s audible_time=%.6f",
+                  self.rendered_time, "unavailable" if latency is None else f"{latency * 1000:.3f}",
+                  self.audible_time)
 
     def close(self):
         with self._lock:
@@ -260,3 +374,6 @@ class AudioEngine:
             for reader in self._readers: reader.close()
             self._readers = []; self._infos = []
             self._state = PlaybackState.STOPPED; self._frame = 0
+            self._stream_output_latency = None
+            self._dac_frame = self._dac_time = None
+            self._paused_audible_frame = None

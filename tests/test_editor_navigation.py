@@ -224,13 +224,22 @@ class FollowCanvas:
 def test_playback_follow_scroll_moves_view_without_redraw_or_rasterization():
     canvas = FollowCanvas()
     redraws = []
+    clock_reads = []
+    live_polls = []
+
+    def units_for(seconds):
+        clock_reads.append(seconds)
+        return 2000
     editor = SimpleNamespace(
         model=SimpleNamespace(
             tempo_map=SimpleNamespace(
                 seconds_to_musical_position=lambda _seconds: SimpleNamespace(render=lambda: "001-01.001"),
-                seconds_to_units=lambda _seconds: 2000),
+                seconds_to_units=units_for),
             song=SimpleNamespace(ppqn=1000)),
-        audio_engine=SimpleNamespace(current_time=1.0, state=PlaybackState.PLAYING),
+        audio_engine=SimpleNamespace(current_time=1.0, audible_time=.96,
+                                     state=PlaybackState.PLAYING),
+        live_midi=SimpleNamespace(playing=True,
+                                  poll=lambda units: live_polls.append(units)),
         transport_position=SimpleNamespace(set=lambda _value: None),
         pixels_per_beat=100.0,
         canvas=canvas,
@@ -248,6 +257,8 @@ def test_playback_follow_scroll_moves_view_without_redraw_or_rasterization():
 
     for _ in range(3):
         ReapcaseEditor._transport_tick(editor)
+    assert clock_reads == [.96, .96, .96]
+    assert live_polls == [2000, 2000, 2000]
 
     expected_left = HEADER_WIDTH + 200.0 - 30.0
     assert canvas.left == pytest.approx(expected_left)
