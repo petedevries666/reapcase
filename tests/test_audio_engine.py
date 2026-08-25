@@ -11,7 +11,9 @@ from stadium_reaper_bridge.editor.waveform import display_peaks, extract_wavefor
 
 
 class FakeStream:
-    def __init__(self, callback): self.callback=callback; self.started=False; self.closed=False
+    def __init__(self, callback, latency=None):
+        self.callback=callback; self.started=False; self.closed=False
+        if latency is not None: self.latency = latency
     def start(self): self.started=True
     def stop(self): self.started=False
     def close(self): self.closed=True
@@ -21,8 +23,9 @@ class FakeStream:
         return output
 
 class FakeBackend:
+    def __init__(self, latency=None): self.latency = latency
     def open_stream(self, callback, **config):
-        self.config=config; self.stream=FakeStream(callback); return self.stream
+        self.config=config; self.stream=FakeStream(callback, self.latency); return self.stream
 
 def make_wav(path, *, rate=100, frames=20, channels=2, value=8192, width=2):
     sample=int(value).to_bytes(width, "little", signed=True)
@@ -79,6 +82,41 @@ class AudioEngineTests(unittest.TestCase):
         self.assertEqual(engine.state, PlaybackState.PAUSED)
         self.assertNotEqual(output[1], [0.0, 0.0])
         self.assertEqual(output[2:], [[0.0, 0.0], [0.0, 0.0]])
+
+    def test_backend_latency_produces_clamped_audible_clock(self):
+        path=self.root/"latency.wav"; make_wav(path, rate=1000, frames=2000)
+        backend=FakeBackend(latency=.040); engine=AudioEngine(backend, blocksize=1000)
+        engine.open([PlaybackTrack(path)]); engine.play()
+        self.assertEqual(engine.audible_time, 0.0)
+        backend.stream.pump(1000)
+        self.assertAlmostEqual(engine.rendered_time, 1.0)
+        self.assertAlmostEqual(engine.output_latency, .040)
+        self.assertAlmostEqual(engine.audible_time, .960)
+
+    def test_backend_without_latency_preserves_rendered_clock(self):
+        engine, backend=self.engine(counts=(20,)); engine.play(); backend.stream.pump(4)
+        self.assertIsNone(engine.output_latency)
+        self.assertEqual(engine.audible_time, engine.current_time)
+
+    def test_pause_resume_seek_and_start_floor_keep_audible_clock_stable(self):
+        path=self.root/"transport.wav"; make_wav(path, rate=100, frames=200)
+        backend=FakeBackend(latency=.04); engine=AudioEngine(backend, blocksize=10)
+        engine.open([PlaybackTrack(path)]); engine.seek(.50); engine.play()
+        backend.stream.pump(2)
+        self.assertEqual(engine.audible_time, .50)  # never before the seek/play origin
+        backend.stream.pump(8)
+        audible = engine.audible_time
+        engine.pause(); self.assertAlmostEqual(engine.audible_time, audible)
+        engine.play(); self.assertAlmostEqual(engine.audible_time, audible)
+        engine.seek(.20); self.assertEqual(engine.audible_time, .20)
+
+    def test_callback_dac_time_is_preferred_to_static_stream_latency(self):
+        path=self.root/"dac.wav"; make_wav(path, rate=1000, frames=2000)
+        backend=FakeBackend(latency=.200); engine=AudioEngine(backend, blocksize=1000)
+        engine.open([PlaybackTrack(path)]); backend.stream.time = 10.960; engine.play()
+        output=[[0.0, 0.0] for _ in range(1000)]
+        engine._callback(output, 1000, SimpleNamespace(outputBufferDacTime=10.0))
+        self.assertAlmostEqual(engine.audible_time, .960)
 
     def test_short_track_silence_after_eof_and_end_state(self):
         engine, backend=self.engine((2,6)); engine.play(); output=backend.stream.pump(4)

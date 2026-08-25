@@ -218,9 +218,10 @@ class LiveMidiDispatcher:
                 delta_ms = (self._seconds_for_units(units) -
                             self._seconds_for_units(event.units)) * 1000
                 self._dispatch_lateness.append(delta_ms)
-                LOG.debug("LIVE DISPATCH event_position=%s audio_position=%s "
+                LOG.debug("LIVE DISPATCH event_time=%.6f audible_time=%.6f "
                           "delta_ms=%.3f index=%s source_order=%s message=%r",
-                          event.units, units, delta_ms, event_index,
+                          self._seconds_for_units(event.units), self._seconds_for_units(units),
+                          delta_ms, event_index,
                           event.source_order, event.message)
                 self._send(event.message, False, self.generation)
             else:

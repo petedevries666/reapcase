@@ -83,6 +83,13 @@ from .background_operations import BackgroundOperations
 
 LOG = logging.getLogger(__name__)
 LOAD_PERF = os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes")
+
+
+def audible_playback_time(engine):
+    """Use the physical-output clock while remaining compatible with old backends."""
+    return getattr(engine, "audible_time", engine.current_time)
+
+
 WAVEFORM_MAX_WORKERS = 2
 
 
@@ -2608,7 +2615,7 @@ class ReapcaseEditor(tk.Tk):
         if self.drag_preview:
             self._draw_drag_preview(self.drag_preview)
         if m.tempo_map:
-            play_units = m.tempo_map.seconds_to_units(self.audio_engine.current_time)
+            play_units = m.tempo_map.seconds_to_units(audible_playback_time(self.audio_engine))
             play_x = timeline_x(play_units, m.song.ppqn, self.pixels_per_beat)
             self.canvas.create_line(play_x, 0, play_x, height, fill=THEME.playhead, width=2,
                                     tags=("playhead",))
@@ -3304,7 +3311,7 @@ class ReapcaseEditor(tk.Tk):
 
     def zoom_step(self, factor):
         if self.model and self.model.tempo_map:
-            play_units = self.model.tempo_map.seconds_to_units(self.audio_engine.current_time)
+            play_units = self.model.tempo_map.seconds_to_units(audible_playback_time(self.audio_engine))
             playhead_x = timeline_x(play_units, self.model.song.ppqn,
                                     self.pixels_per_beat)
             cursor_x = playhead_x - self.canvas.canvasx(0)
@@ -3468,12 +3475,12 @@ class ReapcaseEditor(tk.Tk):
             return
         try:
             if self.audio_engine.state is PlaybackState.PLAYING:
-                units = (self.model.tempo_map.seconds_to_units(self.audio_engine.current_time)
+                units = (self.model.tempo_map.seconds_to_units(audible_playback_time(self.audio_engine))
                          if self.model and self.model.tempo_map else 0)
                 self.audio_engine.pause()
                 if hasattr(self, "live_midi"): self.live_midi.pause(units)
             else:
-                units = (self.model.tempo_map.seconds_to_units(self.audio_engine.current_time)
+                units = (self.model.tempo_map.seconds_to_units(audible_playback_time(self.audio_engine))
                          if self.model and self.model.tempo_map else 0)
                 LOG.debug("LIVE PLAY REQUEST requested_position=%s", units)
                 LOG.debug("LIVE PREROLL BEGIN")
@@ -3533,7 +3540,7 @@ class ReapcaseEditor(tk.Tk):
     def _send_live_midi(self, message, recall, generation):
         """Serialize potentially blocking device I/O away from Tk."""
         LOG.debug("LIVE CALLBACK message=%r", message)
-        position = self.audio_engine.current_time
+        position = audible_playback_time(self.audio_engine)
         def send():
             if generation != self.live_midi.generation:
                 LOG.debug("LIVE ROUTER SKIP message=%r reason=stale generation", message)
@@ -3570,7 +3577,7 @@ class ReapcaseEditor(tk.Tk):
 
     def _transport_tick(self):
         if self.model and self.model.tempo_map:
-            seconds = self.audio_engine.current_time
+            seconds = audible_playback_time(self.audio_engine)
             minutes, remainder = divmod(seconds, 60)
             position = self.model.tempo_map.seconds_to_musical_position(seconds)
             self.transport_position.set(f"{int(minutes):02d}:{remainder:06.3f}   |   {position.render()}")
