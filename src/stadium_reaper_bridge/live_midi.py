@@ -32,11 +32,13 @@ class LiveMidiEvent:
 
 
 def second_helix_events(events: Iterable[TimelineEvent], decoder, units_for) -> tuple[LiveMidiEvent, ...]:
-    """Translate only established Second Helix source representations."""
+    """Translate established Second Helix messages using the rig decoder.
+
+    The semantic decoder is the authority for channel, CC, value ranges, and
+    configured actions.  In particular, do not trust the editor-only
+    ``rig_alias`` projection here: it is reconstructed rather than serialized.
+    """
     result = []
-    expression_ccs = {cc for _, cc in decoder.second_helix_expressions()}
-    snapshot_cc = decoder.config["second_helix"]["snapshot"]["cc"]
-    helix_channel = decoder.second_helix_channel
     for fallback_order, event in enumerate(events):
         data, source = event.data, event.source
         order = event.source_index if event.source_index is not None else fallback_order
@@ -47,23 +49,44 @@ def second_helix_events(events: Iterable[TimelineEvent], decoder, units_for) -> 
             program = decoder.second_helix_program_change(data)
             if program is not None:
                 message, family = {"type": "program_change", "program": program}, ("program", None)
-        elif source.type == "MIDI_CC" and data.get("channel") == helix_channel:
-            cc, value = data.get("cc"), data.get("value")
-            alias = data.get("rig_alias", {})
-            if cc == snapshot_cc and alias.get("action") == "snapshot":
-                message, family = {"type": "control_change", "cc": cc, "value": value}, ("snapshot", None)
-            elif cc in expression_ccs:
-                # Expression is continuous state even where the semantic editor
-                # only gives endpoint aliases.
-                message, family = {"type": "control_change", "cc": cc, "value": value}, ("cc", cc)
-            elif (alias.get("system") == "second_helix" and
-                  alias.get("action") in SECOND_HELIX_LOOPER_ACTIONS):
-                message = {"type": "control_change", "cc": cc, "value": value}
-                classification, family = LiveEventClass.ACTION, ("action", cc)
+        elif source.type == "MIDI_CC":
+            alias = None
+            reason = "not decoded as Second Helix"
+            try:
+                decoded = decoder.decode(data)
+            except (TypeError, ValueError) as error:
+                decoded = None
+                reason = str(error)
+            if decoded and decoded.get("system") == "second_helix":
+                alias = decoded
+                action = decoded.get("action")
+                cc, value = data["cc"], data["value"]
+                if action == "snapshot":
+                    message, family = {"type": "control_change", "cc": cc, "value": value}, ("snapshot", None)
+                elif action == "expression":
+                    # Expression is continuous state even where the semantic
+                    # decoder currently identifies its authorable endpoints.
+                    message, family = {"type": "control_change", "cc": cc, "value": value}, ("cc", cc)
+                elif action in SECOND_HELIX_LOOPER_ACTIONS:
+                    message = {"type": "control_change", "cc": cc, "value": value}
+                    classification, family = LiveEventClass.ACTION, ("action", cc)
+                else:
+                    reason = f"decoded action is not supported by LIVE: {action!r}"
+            if message is None and _looks_like_second_helix(data, decoder):
+                LOG.debug(
+                    "LIVE MIDI SKIP SECOND HELIX: type=%s channel=%r cc=%r value=%r alias=%r reason=%s",
+                    source.type, data.get("channel"), data.get("cc"), data.get("value"),
+                    alias if alias is not None else data.get("rig_alias"), reason)
         if message is not None:
             result.append(LiveMidiEvent(units_for(event.position), order, message,
                                         classification, family))
     return tuple(sorted(result, key=lambda item: (item.units, item.source_order)))
+
+
+def _looks_like_second_helix(data: dict, decoder) -> bool:
+    alias = data.get("rig_alias")
+    return (data.get("channel") == decoder.second_helix_channel or
+            isinstance(alias, dict) and alias.get("system") == "second_helix")
 
 
 class LiveMidiDispatcher:
