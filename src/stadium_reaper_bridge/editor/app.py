@@ -19,8 +19,9 @@ from pathlib import Path
 from queue import Empty, Queue
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from concurrent.futures import ThreadPoolExecutor
-from ..show import MidiRoute, ReapcaseShow, SHOW_SUFFIX
+from ..show import ReapcaseShow, SHOW_SUFFIX
 from ..runtime import LiveRuntime, Readiness, ShowPreloader
+from ..midi_output import DESTINATION_LABELS, MidiDestination, MidiRouter
 
 from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_HEIGHT,
                      drag_units, fit_range_scale, fit_song_scale, horizontal_wheel_units,
@@ -182,6 +183,8 @@ class ReapcaseEditor(tk.Tk):
         self.zoom_label = tk.StringVar()
         self.transport_position = tk.StringVar(value="00:00.000   |   001-01.001")
         self.audio_engine = AudioEngine()
+        # Optional MIDI failures are contained by MidiRouter and never block editing.
+        self.midi_router = MidiRouter()
         self.show: Optional[ReapcaseShow] = None
         self.show_preloader = ShowPreloader()
         self.live_runtime: Optional[LiveRuntime] = None
@@ -468,6 +471,16 @@ class ReapcaseEditor(tk.Tk):
         tools = tk.Menu(bar, tearoff=False)
         tools.add_command(label="Analyze Song", command=self.analyze_song)
         bar.add_cascade(label="Tools", menu=tools)
+        self.midi_menu = tk.Menu(bar, tearoff=False,
+                                 postcommand=self._refresh_midi_menu_labels)
+        for destination in MidiDestination:
+            self.midi_menu.add_command(
+                label=DESTINATION_LABELS[destination],
+                command=lambda value=destination: self.configure_midi_destination(value))
+        self.midi_menu.add_separator()
+        self.midi_menu.add_command(label="Refresh MIDI Devices",
+                                   command=self.refresh_midi_devices)
+        bar.add_cascade(label="MIDI", menu=self.midi_menu)
         show = tk.Menu(bar, tearoff=False)
         for label, command in (("New Show", self.new_show), ("Open Show...", self.open_show),
                                ("Save Show", self.save_show)):
@@ -498,6 +511,7 @@ class ReapcaseEditor(tk.Tk):
         self.bind_all("<bracketright>", lambda e: self._editor_shortcut(e, self.navigate_marker, 1))
         self.bind_all("<bracketleft>", lambda e: self._editor_shortcut(e, self.navigate_marker, -1))
         self.bind_all("<Home>", lambda e: self._editor_shortcut(e, self.go_song_edge, False))
+
         self.bind_all("<End>", lambda e: self._editor_shortcut(e, self.go_song_edge, True))
         # Arrow keys are part of the timeline command layer.  Keeping them on
         # _editor_shortcut means native text caret and Treeview navigation (as
@@ -521,6 +535,58 @@ class ReapcaseEditor(tk.Tk):
         self.bind_all("<Control-s>", lambda e: self._global_editor_shortcut(e, self.save))
         self.bind_all("<Control-Shift-Key-S>",
                       lambda e: self._global_editor_shortcut(e, self.save_as))
+
+    def _refresh_midi_menu_labels(self):
+        for index, destination in enumerate(MidiDestination):
+            label = DESTINATION_LABELS[destination]
+            self.midi_menu.entryconfigure(index,
+                label=f"{label.title()}...     {self.midi_router.status(destination)}")
+
+    def refresh_midi_devices(self):
+        ports = self.midi_router.refresh()
+        self._refresh_midi_menu_labels()
+        self.status.set(f"MIDI devices refreshed ({len(ports)} output port(s))")
+
+    def configure_midi_destination(self, destination):
+        route = self.midi_router.routes[destination]
+        window = tk.Toplevel(self)
+        window.title(f"{DESTINATION_LABELS[destination]} MIDI")
+        window.resizable(False, False)
+        frame = ttk.Frame(window, padding=12)
+        frame.grid(sticky="nsew")
+        ttk.Label(frame, text="Output Port").grid(row=0, column=0, sticky="w")
+        missing = route.port and route.port not in self.midi_router.available_ports
+        configured_label = f"{route.port} (not connected)" if missing else route.port
+        options = ["Not configured"] + list(self.midi_router.available_ports)
+        if missing:
+            options.append(configured_label)
+        port = tk.StringVar(value=configured_label or "Not configured")
+        ttk.Combobox(frame, textvariable=port, values=options, state="readonly", width=38).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(2, 10))
+        ttk.Label(frame, text="Channel").grid(row=2, column=0, sticky="w")
+        channel = tk.IntVar(value=route.channel)
+        ttk.Combobox(frame, textvariable=channel, values=tuple(range(1, 17)),
+                     state="readonly", width=5).grid(row=3, column=0, sticky="w", pady=(2, 10))
+        ttk.Label(frame, text=self.midi_router.status(destination)).grid(
+            row=3, column=1, sticky="e", padx=(20, 0))
+
+        def save():
+            selected = port.get()
+            if missing and selected == configured_label:
+                selected = route.port
+            elif selected == "Not configured":
+                selected = None
+            self.midi_router.configure(destination, selected, channel.get())
+            window.destroy()
+            self._refresh_midi_menu_labels()
+
+        ttk.Button(frame, text="Cancel", command=window.destroy).grid(row=4, column=0, sticky="e")
+        ttk.Button(frame, text="Save", command=save).grid(row=4, column=1, sticky="e", padx=(8, 0))
+        self._prepare_dialog(window, f"midi_{destination.value}", save)
+
+    def midi_settings(self):
+        """Open the app-level Stadium route (legacy API entry point)."""
+        self.configure_midi_destination(MidiDestination.STADIUM)
 
     def invalidate_workspace_song_inventory(self):
         self._workspace_song_inventory = None
@@ -1111,25 +1177,6 @@ class ReapcaseEditor(tk.Tk):
         if prepared is None: self.status.set("PREVIOUS NOT READY"); return
         self.setlist.selection_clear(0, "end"); self.setlist.selection_set(self.live_runtime.current_index)
         self._update_live_header(prepared)
-
-    def midi_settings(self):
-        if not self.show: return
-        window = tk.Toplevel(self); window.title("Show MIDI Routing (configuration only)")
-        values = {}
-        for row, (name, label) in enumerate((("stadium", "Stadium"), ("second_helix", "Second Helix"), ("lights", "Lights"))):
-            route = self.show.midi[name]; enabled = tk.BooleanVar(value=route.enabled)
-            port = tk.StringVar(value=route.port or ""); channel = tk.StringVar(value=str(route.channel)); values[name] = (enabled, port, channel)
-            ttk.Checkbutton(window, text=label, variable=enabled).grid(row=row, column=0, padx=8, pady=5, sticky="w")
-            ttk.Label(window, text="Port:").grid(row=row, column=1); ttk.Entry(window, textvariable=port, width=24).grid(row=row, column=2)
-            ttk.Label(window, text="Channel:").grid(row=row, column=3); ttk.Entry(window, textvariable=channel, width=4).grid(row=row, column=4)
-        def apply():
-            try:
-                self.show.midi = {name: MidiRoute(enabled.get(), port.get().strip() or None, int(channel.get()))
-                                  for name, (enabled, port, channel) in values.items()}
-                self.show.validate(); window.destroy()
-            except Exception as exc: messagebox.showerror("Invalid MIDI routing", str(exc), parent=window)
-        ttk.Button(window, text="Save Settings", command=apply).grid(row=4, column=0, columnspan=5, pady=8)
-        self._prepare_dialog(window, "midi_settings", apply)
 
     def open_json(self):
         if self.loading: return
@@ -3451,6 +3498,7 @@ class ReapcaseEditor(tk.Tk):
         self._audio_pool.shutdown(wait=False, cancel_futures=True)
         self._loading_pool.shutdown(wait=False, cancel_futures=True)
         self.show_preloader.shutdown()
+        self.midi_router.close()
         super().destroy()
 
 
