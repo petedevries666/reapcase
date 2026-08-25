@@ -83,6 +83,26 @@ def second_helix_events(events: Iterable[TimelineEvent], decoder, units_for) -> 
     return tuple(sorted(result, key=lambda item: (item.units, item.source_order)))
 
 
+def build_live_event_set(events: Iterable[TimelineEvent], decoder,
+                         units_for) -> tuple[LiveMidiEvent, ...]:
+    """Build and diagnose the event snapshot installed in the LIVE dispatcher."""
+    source_events = tuple(events)
+    midi_events = [event for event in source_events
+                   if event.source.type.startswith("MIDI") or
+                   {"channel", "cc", "value"} <= event.data.keys()]
+    for event in midi_events:
+        LOG.debug("LIVE SOURCE\nposition=%s\nsource.type=%s\nsource_index=%s\ndata=%r",
+                  event.position.render(), event.source.type, event.source_index, event.data)
+    translated = second_helix_events(source_events, decoder, units_for)
+    LOG.debug("LIVE BUILD\nsource events: %d\nMIDI events: %d\n"
+              "translated Second Helix events: %d",
+              len(source_events), len(midi_events), len(translated))
+    for event in translated:
+        LOG.debug("LIVE EVENT\nposition=%s\nfamily=%s\nclass=%s\nmessage=%r",
+                  event.units, event.family, event.event_class.value, event.message)
+    return translated
+
+
 def _looks_like_second_helix(data: dict, decoder) -> bool:
     alias = data.get("rig_alias")
     return (data.get("channel") == decoder.second_helix_channel or
