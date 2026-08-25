@@ -1,10 +1,12 @@
 from pathlib import Path
 import json
+import types
 
 import pytest
 
 from stadium_reaper_bridge.midi_output import (
-    MidiDestination, MidiOutputRoute, MidiRouter, load_midi_outputs,
+    MidiDestination, MidiOutputRoute, MidiRouter, MidoBackend, load_midi_outputs,
+    system_midi_backend,
 )
 
 
@@ -88,6 +90,48 @@ def test_no_configuration_or_backend_failure_does_not_block_startup(tmp_path):
     router = MidiRouter(backend, tmp_path / "ui.json")
     assert router.available_ports == ()
     assert all(router.status(destination) == "Not configured" for destination in MidiDestination)
+
+
+@pytest.mark.parametrize("error", (ImportError("provider failed"),
+                                   ModuleNotFoundError("No module named 'rtmidi'")))
+def test_mido_enumeration_import_failure_does_not_block_router_startup(tmp_path, monkeypatch,
+                                                                      error):
+    mido = types.SimpleNamespace(get_output_names=lambda: (_ for _ in ()).throw(error))
+    monkeypatch.setattr("stadium_reaper_bridge.midi_output.importlib.import_module",
+                        lambda name: mido)
+
+    router = MidiRouter(preferences_path=tmp_path / "ui.json")
+
+    assert isinstance(router.backend, MidoBackend)
+    assert router.available_ports == ()
+    assert router.send("stadium", object()) is False
+
+
+def test_missing_mido_and_rtmidi_uses_unavailable_backend(tmp_path, monkeypatch):
+    def without_midi(name):
+        raise ModuleNotFoundError(f"No module named '{name}'")
+
+    monkeypatch.setattr("stadium_reaper_bridge.midi_output.importlib.import_module", without_midi)
+    router = MidiRouter(system_midi_backend(), tmp_path / "ui.json")
+
+    assert router.available_ports == ()
+    assert router.send("light", object()) is False
+
+
+@pytest.mark.parametrize("operation", ("open_output", "send"))
+@pytest.mark.parametrize("error", (ImportError("optional provider missing"),
+                                   ModuleNotFoundError("No module named 'rtmidi'"),
+                                   OSError("native MIDI failure"), RuntimeError("backend failure")))
+def test_optional_backend_failures_during_send_are_safe(tmp_path, operation, error):
+    backend = FakeBackend(["Port"])
+    router = MidiRouter(backend, tmp_path / "ui.json")
+    router.configure("stadium", "Port", 1)
+
+    def fail(*args, **kwargs):
+        raise error
+
+    setattr(backend, operation, fail)
+    assert router.send("stadium", object()) is False
 
 
 def test_destinations_may_share_port_and_route_independent_channels(tmp_path):
