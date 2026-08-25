@@ -12,6 +12,7 @@ import logging
 from typing import Callable, Iterable, Optional
 
 from .timeline import TimelineEvent
+from .editor.creation import SECOND_HELIX_LOOPER_ACTIONS
 
 LOG = logging.getLogger(__name__)
 
@@ -55,7 +56,8 @@ def second_helix_events(events: Iterable[TimelineEvent], decoder, units_for) -> 
                 # Expression is continuous state even where the semantic editor
                 # only gives endpoint aliases.
                 message, family = {"type": "control_change", "cc": cc, "value": value}, ("cc", cc)
-            elif alias.get("system") == "second_helix":
+            elif (alias.get("system") == "second_helix" and
+                  alias.get("action") in SECOND_HELIX_LOOPER_ACTIONS):
                 message = {"type": "control_change", "cc": cc, "value": value}
                 classification, family = LiveEventClass.ACTION, ("action", cc)
         if message is not None:

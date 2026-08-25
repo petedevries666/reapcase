@@ -46,6 +46,7 @@ from .composite import (COMMANDS_HEIGHT, COMPOSITE_LANES, event_sublane,
                         lane_height, lane_top as composite_lane_top,
                         sublane_bounds, sublane_content_bounds)
 from .creation import (MarkerOptions, create_cycle_end, create_cycle_start,
+                       SECOND_HELIX_LOOPER_ACTIONS,
                        create_generic_midi_cc, create_second_helix_expression, create_second_helix_looper,
                        create_second_helix_preset, create_second_helix_snapshot,
                        create_stadium_looper, create_stadium_snapshot, create_structure_marker,
@@ -2931,10 +2932,8 @@ class ReapcaseEditor(tk.Tk):
             add.add_command(label="Preset Change...", command=lambda: self._preset_dialog(position))
             looper = tk.Menu(add, tearoff=False)
             labels = {"Undo/Redo": "Undo / Redo", "On": "Block On", "Off": "Block Off"}
-            allowed = {"Record", "Overdub", "Play", "Stop", "Play Once", "Undo/Redo",
-                       "Forward", "Reverse", "Full Speed", "Half Speed", "On", "Off"}
             for action in self.model.decoder.second_helix_actions():
-                if action in allowed:
+                if action in SECOND_HELIX_LOOPER_ACTIONS:
                     looper.add_command(label=labels.get(action, action),
                         command=lambda value=action: self._create(
                             create_second_helix_looper, position, value, self.model.decoder))
