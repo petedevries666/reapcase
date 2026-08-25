@@ -11,6 +11,12 @@ from typing import Any, Optional, Protocol, Union
 from .editor.preferences import load_preferences, update_preferences
 
 
+# Optional MIDI providers can fail while importing their native backend, not
+# merely while importing mido itself.  Keep the expected provider failures at
+# this boundary so they can never take down the editor.
+MIDI_BACKEND_ERRORS = (ImportError, OSError, RuntimeError)
+
+
 class MidiDestination(str, Enum):
     SECOND_HELIX = "second_helix"
     STADIUM = "stadium"
@@ -93,7 +99,10 @@ class MidoBackend:
         self._mido = importlib.import_module("mido")
 
     def output_names(self) -> list[str]:
-        return list(self._mido.get_output_names())
+        try:
+            return list(self._mido.get_output_names())
+        except MIDI_BACKEND_ERRORS:
+            return []
 
     def open_output(self, name: str) -> Any:
         return self._mido.open_output(name)
@@ -110,7 +119,7 @@ class MidoBackend:
 def system_midi_backend() -> MidiBackend:
     try:
         return MidoBackend()
-    except (ImportError, OSError, RuntimeError):
+    except MIDI_BACKEND_ERRORS:
         return UnavailableMidiBackend()
 
 
@@ -160,7 +169,7 @@ class MidiRouter:
         self.close()
         try:
             self.available_ports = tuple(dict.fromkeys(self.backend.output_names()))
-        except (OSError, RuntimeError):
+        except MIDI_BACKEND_ERRORS:
             self.available_ports = ()
         return self.available_ports
 
@@ -175,7 +184,7 @@ class MidiRouter:
                 self._outputs[route.port] = output
             self.backend.send(output, message, route.channel)
             return True
-        except (OSError, RuntimeError):
+        except MIDI_BACKEND_ERRORS:
             self._close_port(route.port)
             return False
 
@@ -184,7 +193,7 @@ class MidiRouter:
         if output is not None:
             try:
                 self.backend.close_output(output)
-            except (OSError, RuntimeError):
+            except MIDI_BACKEND_ERRORS:
                 pass
 
     def close(self) -> None:
