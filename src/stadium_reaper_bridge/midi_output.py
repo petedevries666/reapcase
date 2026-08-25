@@ -108,6 +108,8 @@ class MidoBackend:
         return self._mido.open_output(name)
 
     def send(self, output: Any, message: Any, channel: int) -> None:
+        if isinstance(message, dict):
+            message = self._mido.Message(**message)
         if hasattr(message, "copy"):
             message = message.copy(channel=channel - 1)
         output.send(message)

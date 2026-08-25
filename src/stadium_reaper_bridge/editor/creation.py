@@ -169,8 +169,19 @@ def create_second_helix_expression(position: MusicalPosition, expression: int, v
     return _midi_cc(position, midi, f"EXP{expression} {percentage}%", decoder)
 
 
+# This is the complete set exposed by the SECOND HELIX > Looper authoring menu.
+# Keep it shared with LIVE translation so a newly authorable command cannot be
+# silently treated as recallable controller state.
+SECOND_HELIX_LOOPER_ACTIONS = frozenset({
+    "Record", "Overdub", "Play", "Stop", "Play Once", "Undo/Redo",
+    "Forward", "Reverse", "Full Speed", "Half Speed", "On", "Off",
+})
+
+
 def create_second_helix_looper(position: MusicalPosition, action: str,
                                decoder: RigMidiDecoder) -> TimelineEvent:
+    if action not in SECOND_HELIX_LOOPER_ACTIONS:
+        raise ValueError(f"Second Helix looper action is not authorable: {action!r}")
     midi = decoder.encode({"system": "second_helix", "action": action})
     return _midi_cc(position, midi, f"BASS {action.upper()}", decoder)
 
