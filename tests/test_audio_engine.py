@@ -110,13 +110,59 @@ class AudioEngineTests(unittest.TestCase):
         engine.play(); self.assertAlmostEqual(engine.audible_time, audible)
         engine.seek(.20); self.assertEqual(engine.audible_time, .20)
 
-    def test_callback_dac_time_is_preferred_to_static_stream_latency(self):
+    def test_full_stream_latency_wins_when_dac_clock_only_sees_callback_block(self):
         path=self.root/"dac.wav"; make_wav(path, rate=1000, frames=2000)
         backend=FakeBackend(latency=.200); engine=AudioEngine(backend, blocksize=1000)
         engine.open([PlaybackTrack(path)]); backend.stream.time = 10.960; engine.play()
         output=[[0.0, 0.0] for _ in range(1000)]
         engine._callback(output, 1000, SimpleNamespace(outputBufferDacTime=10.0))
-        self.assertAlmostEqual(engine.audible_time, .960)
+        self.assertAlmostEqual(engine.audible_time, .800)
+        self.assertAlmostEqual(engine.output_latency, .200)
+
+    def test_dac_timestamp_uses_callback_entry_frame_and_can_be_selected(self):
+        path=self.root/"dac-only.wav"; make_wav(path, rate=1000, frames=3000)
+        backend=FakeBackend(); engine=AudioEngine(backend, blocksize=1000)
+        engine.open([PlaybackTrack(path)]); backend.stream.time = 10.250; engine.play()
+        output=[[0.0, 0.0] for _ in range(1000)]
+        engine._callback(output, 1000, SimpleNamespace(outputBufferDacTime=10.0))
+        # The timestamp describes frame zero (captured before _mix), not the
+        # rendered end frame at 1.0 seconds.
+        self.assertEqual(engine._dac_first_frame, 0)
+        self.assertAlmostEqual(engine.audible_time, .250)
+        self.assertAlmostEqual(engine.output_latency, .750)
+
+    def test_hardware_latency_regression_and_diagnostic_are_self_consistent(self):
+        path=self.root/"windows.wav"; make_wav(path, rate=48000, frames=400000)
+        backend=FakeBackend(latency=.213333); engine=AudioEngine(backend, blocksize=1024)
+        engine.open([PlaybackTrack(path)]); engine._frame = 291136  # 6.065333 s
+        engine._state = PlaybackState.PLAYING
+        engine._dac_first_frame = 290112
+        engine._dac_time = 100.0
+        backend.stream.time = 100.0
+
+        self.assertAlmostEqual(engine.rendered_time, 6.065333333)
+        self.assertAlmostEqual(engine.audible_time, 5.852000333)
+        self.assertGreaterEqual(engine.rendered_time, engine.audible_time)
+        self.assertAlmostEqual(
+            engine.output_latency * 1000,
+            (engine.rendered_time - engine.audible_time) * 1000)
+
+        with patch("stadium_reaper_bridge.editor.audio_engine.PERF", True):
+            with self.assertLogs("stadium_reaper_bridge.editor.audio_engine", "DEBUG") as logs:
+                engine._log_timing(force=True)
+        diagnostic = logs.output[-1]
+        for field in ("rendered_time=", "stream_time=", "outputBufferDacTime=",
+                      "stream_reported_latency_ms=", "dac_estimated_audible_time=",
+                      "effective_compensation_ms=", "final_audible_time="):
+            self.assertIn(field, diagnostic)
+        self.assertIn("effective_compensation_ms=213.333", diagnostic)
+
+    def test_startup_latency_is_clamped_to_play_origin(self):
+        path=self.root/"startup.wav"; make_wav(path, rate=1000, frames=2000)
+        backend=FakeBackend(latency=.213333); engine=AudioEngine(backend)
+        engine.open([PlaybackTrack(path)]); engine.seek(.5); engine.play()
+        self.assertEqual(engine.audible_time, .5)
+        self.assertGreaterEqual(engine.rendered_time, engine.audible_time)
 
     def test_short_track_silence_after_eof_and_end_state(self):
         engine, backend=self.engine((2,6)); engine.play(); output=backend.stream.pump(4)
