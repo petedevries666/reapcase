@@ -123,7 +123,10 @@ class LiveMidiDispatcher:
 
     def load(self, events: Iterable[LiveMidiEvent]) -> int:
         self.generation += 1
-        self.events = tuple(events)
+        # The dispatcher owns ordering.  Do not rely on every future inventory
+        # producer to preserve the translator's sort contract.
+        self.events = tuple(sorted(events, key=lambda event: (
+            event.units, event.source_order)))
         self.stop()
         self._last_units = 0
         return self.generation
@@ -156,17 +159,32 @@ class LiveMidiDispatcher:
     def poll(self, units: int) -> None:
         if not self.playing:
             return
+        next_units = (self.events[self._cursor].units
+                      if self._cursor < len(self.events) else None)
+        LOG.debug("LIVE ADVANCE\nprevious_units=%s\ncurrent_units=%s\n"
+                  "next_index=%s\nnext_event_units=%s",
+                  self._last_units, units, self._cursor, next_units)
         if units < self._last_units:  # seek while playing: skip the interval and recall state
+            LOG.debug("LIVE SKIP interval=%s..%s reason=backward clock seek",
+                      self._last_units, units)
             self.playing = False
             self.start(units)
             return
-        if self.enabled:
-            while self._cursor < len(self.events) and self.events[self._cursor].units <= units:
-                self._send(self.events[self._cursor].message, False, self.generation)
-                self._cursor += 1
-        else:
-            while self._cursor < len(self.events) and self.events[self._cursor].units <= units:
-                self._cursor += 1
+        while self._cursor < len(self.events) and self.events[self._cursor].units <= units:
+            event_index = self._cursor
+            event = self.events[event_index]
+            # Claim this exact event before invoking arbitrary callback code.
+            # Advancing by one event (rather than searching for the next
+            # position) is what preserves every same-position sibling.
+            self._cursor += 1
+            if self.enabled:
+                LOG.debug("LIVE DISPATCH index=%s units=%s source_order=%s message=%r",
+                          event_index, event.units, event.source_order, event.message)
+                self._send(event.message, False, self.generation)
+            else:
+                LOG.debug("LIVE SKIP index=%s units=%s source_order=%s message=%r "
+                          "reason=LIVE disabled", event_index, event.units,
+                          event.source_order, event.message)
         self._last_units = units
 
     def pause(self, units: int) -> None:

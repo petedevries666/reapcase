@@ -46,6 +46,82 @@ def test_live_off_crosses_without_sending_and_live_on_uses_boundaries_once():
     assert not any(recall for _, recall in sent)
 
 
+def dispatch_messages(events, clock_positions):
+    sent = []
+    dispatcher = LiveMidiDispatcher(
+        lambda message, recall, generation: sent.append(message))
+    dispatcher.load(events)
+    dispatcher.set_enabled(True)
+    dispatcher.start(0)
+    for units in clock_positions:
+        dispatcher.poll(units)
+    return sent
+
+
+def test_real_observed_sequence_dispatches_every_message_in_source_order():
+    """Regress the exact inventory and audio-clock progression seen on stage."""
+    events = [
+        ev(60, 0, {'type': 'program_change', 'program': 0}, ('program', None)),
+        ev(480, 1, {'type': 'program_change', 'program': 7}, ('program', None)),
+        ev(480, 2, {'type': 'control_change', 'cc': 69, 'value': 6},
+           ('snapshot', None)),
+        ev(660, 3, {'type': 'control_change', 'cc': 1, 'value': 0}, ('cc', 1)),
+        ev(720, 4, {'type': 'control_change', 'cc': 2, 'value': 0}, ('cc', 2)),
+    ]
+    # Approximate the UI's 33 ms audio-clock polling, including polls that do
+    # not cross an event and one repeated clock reading.
+    clock_positions = list(range(16, 737, 16))
+    clock_positions.insert(clock_positions.index(480) + 1, 480)
+
+    assert dispatch_messages(events, clock_positions) == [
+        event.message for event in events]
+
+
+def test_three_same_position_events_are_each_dispatched_once():
+    events = [
+        ev(100, order, {'type': 'future_event', 'value': order}, ('future', order))
+        for order in range(3)
+    ]
+    assert dispatch_messages(events, [99, 100, 100, 101]) == [
+        event.message for event in events]
+
+
+def test_large_polling_jump_dispatches_every_crossed_event_once():
+    events = [
+        ev(units, order, {'type': 'event', 'value': order}, ('event', order))
+        for order, units in enumerate((10, 20, 20, 35, 80))
+    ]
+    assert dispatch_messages(events, [5, 80, 160]) == [
+        event.message for event in events]
+
+
+def test_small_increments_repeated_clock_and_exact_boundary_lose_nothing():
+    events = [
+        ev(units, order, {'type': 'event', 'value': order}, ('event', order))
+        for order, units in enumerate((1, 2, 3, 4, 5))
+    ]
+    # Every event lands exactly on an interval boundary; repeated values must
+    # neither duplicate the boundary event nor prevent the next one.
+    assert dispatch_messages(events, [0, 1, 1, 2, 2, 3, 4, 4, 5, 5]) == [
+        event.message for event in events]
+
+
+def test_dispatcher_debug_logs_each_advance_and_decision(caplog):
+    event = ev(10, 0, {'type': 'event', 'value': 1}, ('event', 1))
+    dispatcher = LiveMidiDispatcher(lambda *_: None)
+    dispatcher.load([event])
+    dispatcher.start(0)
+    with caplog.at_level("DEBUG", logger="stadium_reaper_bridge.live_midi"):
+        dispatcher.poll(10)
+    assert "LIVE ADVANCE" in caplog.text
+    assert "previous_units=0" in caplog.text
+    assert "current_units=10" in caplog.text
+    assert "next_index=0" in caplog.text
+    assert "next_event_units=10" in caplog.text
+    assert "LIVE SKIP" in caplog.text
+    assert "reason=LIVE disabled" in caplog.text
+
+
 def test_smart_recall_latest_per_family_order_and_never_actions():
     sent = []
     d = LiveMidiDispatcher(lambda msg, recall, generation: sent.append((msg, recall)))
