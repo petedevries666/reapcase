@@ -1,0 +1,140 @@
+"""Audio-clock-driven LIVE MIDI scheduling for SECOND HELIX.
+
+Native Stadium Showcase flags are internal Stadium commands.  They deliberately
+do not enter this module; a future StadiumLiveProtocol/StadiumLiveTranslator
+will define the separate, documented external protocol.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+import logging
+from typing import Callable, Iterable, Optional
+
+from .timeline import TimelineEvent
+
+LOG = logging.getLogger(__name__)
+
+
+class LiveEventClass(str, Enum):
+    RECALLABLE_STATE = "recallable_state"
+    ACTION = "action"
+
+
+@dataclass(frozen=True)
+class LiveMidiEvent:
+    units: int
+    source_order: int
+    message: dict[str, int]
+    event_class: LiveEventClass
+    family: tuple[str, Optional[int]]
+
+
+def second_helix_events(events: Iterable[TimelineEvent], decoder, units_for) -> tuple[LiveMidiEvent, ...]:
+    """Translate only established Second Helix source representations."""
+    result = []
+    expression_ccs = {cc for _, cc in decoder.second_helix_expressions()}
+    snapshot_cc = decoder.config["second_helix"]["snapshot"]["cc"]
+    helix_channel = decoder.second_helix_channel
+    for fallback_order, event in enumerate(events):
+        data, source = event.data, event.source
+        order = event.source_index if event.source_index is not None else fallback_order
+        message = None
+        classification = LiveEventClass.RECALLABLE_STATE
+        family: tuple[str, Optional[int]] = ("", None)
+        if source.type == "MIDI_BANK_PROGRAM":
+            program = decoder.second_helix_program_change(data)
+            if program is not None:
+                message, family = {"type": "program_change", "program": program}, ("program", None)
+        elif source.type == "MIDI_CC" and data.get("channel") == helix_channel:
+            cc, value = data.get("cc"), data.get("value")
+            alias = data.get("rig_alias", {})
+            if cc == snapshot_cc and alias.get("action") == "snapshot":
+                message, family = {"type": "control_change", "cc": cc, "value": value}, ("snapshot", None)
+            elif cc in expression_ccs:
+                # Expression is continuous state even where the semantic editor
+                # only gives endpoint aliases.
+                message, family = {"type": "control_change", "cc": cc, "value": value}, ("cc", cc)
+            elif alias.get("system") == "second_helix":
+                message = {"type": "control_change", "cc": cc, "value": value}
+                classification, family = LiveEventClass.ACTION, ("action", cc)
+        if message is not None:
+            result.append(LiveMidiEvent(units_for(event.position), order, message,
+                                        classification, family))
+    return tuple(sorted(result, key=lambda item: (item.units, item.source_order)))
+
+
+class LiveMidiDispatcher:
+    """Deterministic crossing/recall state machine; its clock is supplied by audio."""
+    def __init__(self, send: Callable[[dict[str, int], bool, int], None]):
+        self._send = send
+        self.events: tuple[LiveMidiEvent, ...] = ()
+        self.generation = 0
+        self.enabled = False
+        self.playing = False
+        self._cursor = 0
+        self._last_units = 0
+        self._resume_units: Optional[int] = None
+
+    def load(self, events: Iterable[LiveMidiEvent]) -> int:
+        self.generation += 1
+        self.events = tuple(events)
+        self.stop()
+        self._last_units = 0
+        return self.generation
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+        if not enabled:
+            self.playing = False
+
+    def start(self, units: int) -> None:
+        generation = self.generation
+        unchanged_resume = self._resume_units == units
+        self._cursor = next((i for i, event in enumerate(self.events)
+                             if event.units > units or (event.units == units and not unchanged_resume)),
+                            len(self.events))
+        if self.enabled and units > 0 and not unchanged_resume:
+            latest: dict[tuple[str, Optional[int]], LiveMidiEvent] = {}
+            for event in self.events:
+                if event.units >= units:
+                    break
+                if event.event_class is LiveEventClass.RECALLABLE_STATE:
+                    latest[event.family] = event
+            ordered = sorted(latest.values(), key=lambda event: (
+                {"program": 0, "snapshot": 1, "cc": 2}.get(event.family[0], 3),
+                event.family[1] if event.family[1] is not None else -1))
+            for event in ordered:
+                self._send(event.message, True, generation)
+        self._last_units, self._resume_units, self.playing = units, None, True
+
+    def poll(self, units: int) -> None:
+        if not self.playing:
+            return
+        if units < self._last_units:  # seek while playing: skip the interval and recall state
+            self.playing = False
+            self.start(units)
+            return
+        if self.enabled:
+            while self._cursor < len(self.events) and self.events[self._cursor].units <= units:
+                self._send(self.events[self._cursor].message, False, self.generation)
+                self._cursor += 1
+        else:
+            while self._cursor < len(self.events) and self.events[self._cursor].units <= units:
+                self._cursor += 1
+        self._last_units = units
+
+    def pause(self, units: int) -> None:
+        self.playing = False
+        self._resume_units = units
+
+    def seek(self, units: int) -> None:
+        was_playing = self.playing
+        self.playing = False
+        self._resume_units = None
+        if was_playing:
+            self.start(units)
+
+    def stop(self) -> None:
+        self.playing = False
+        self._resume_units = None

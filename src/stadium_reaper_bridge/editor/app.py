@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from ..show import ReapcaseShow, SHOW_SUFFIX
 from ..runtime import LiveRuntime, Readiness, ShowPreloader
 from ..midi_output import DESTINATION_LABELS, MidiDestination, MidiRouter
+from ..live_midi import LiveMidiDispatcher, second_helix_events
 
 from .layout import (DEFAULT_PIXELS_PER_BEAT, HEADER_WIDTH, LANE_HEIGHT, RULER_HEIGHT,
                      drag_units, fit_range_scale, fit_song_scale, horizontal_wheel_units,
@@ -185,6 +186,8 @@ class ReapcaseEditor(tk.Tk):
         self.audio_engine = AudioEngine()
         # Optional MIDI failures are contained by MidiRouter and never block editing.
         self.midi_router = MidiRouter()
+        self._live_midi_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-midi")
+        self.live_midi = LiveMidiDispatcher(self._queue_live_midi)
         self.show: Optional[ReapcaseShow] = None
         self.show_preloader = ShowPreloader()
         self.live_runtime: Optional[LiveRuntime] = None
@@ -262,6 +265,10 @@ class ReapcaseEditor(tk.Tk):
         ttk.Label(toolbar, textvariable=self.zoom_label, width=8, anchor="e").pack(side="left", padx=5)
         ttk.Combobox(toolbar, textvariable=self.app_mode, values=("EDIT", "LIVE"), state="readonly",
                      width=6).pack(side="right", padx=4)
+        self.live_badge = tk.Label(toolbar, text="LIVE OFF", bg="#3a2020", fg="white",
+                                   font=("TkDefaultFont", 9, "bold"), padx=8, pady=3)
+        self.live_badge.pack(side="right", padx=3)
+        self.app_mode.trace_add("write", self._live_mode_changed)
         song_header = ttk.Frame(self, style="SongHeader.TFrame", padding=(8, 3, 8, 4))
         song_header.pack(fill="x")
         title_label = ttk.Label(song_header, textvariable=self.song_title,
@@ -1222,6 +1229,10 @@ class ReapcaseEditor(tk.Tk):
     def _close_editor(self):
         """Stop UI dispatch before destroying Tk; in-flight atomic work may finish safely."""
         self._migration_operations.close()
+        self.live_midi.stop()
+        self.live_midi.load(())
+        self._live_midi_pool.shutdown(wait=False, cancel_futures=True)
+        self.midi_router.close()
         self.destroy()
 
     def _run_migration(self, name, phase, function, success, error_title):
@@ -1470,6 +1481,8 @@ class ReapcaseEditor(tk.Tk):
                 phase.set("Finalizing UI…")
                 self.audio_engine.close()
                 self.model = candidate
+                self.live_midi.load(second_helix_events(
+                    candidate.timeline.events, candidate.decoder, candidate._units))
                 self._activate_workspace_for_song(candidate.path)
                 self.monitor_muted = [False] * len(candidate.audio_tracks)
                 self.monitor_solo = [False] * len(candidate.audio_tracks)
@@ -3421,23 +3434,60 @@ class ReapcaseEditor(tk.Tk):
     def seek_units(self, units):
         if self.model and self.model.tempo_map:
             self.audio_engine.seek(self.model.tempo_map.units_to_seconds(units))
+            if hasattr(self, "live_midi"):
+                self.live_midi.seek(units)
             self.model.cursor = self.model._position(units)
             seconds = self.model.tempo_map.units_to_seconds(units)
             minutes, remainder = divmod(seconds, 60)
             self.transport_position.set(
                 f"{int(minutes):02d}:{remainder:06.3f}   |   {self.model.cursor.render()}")
 
-    def return_to_start(self): self.audio_engine.return_to_start(); self.redraw()
-    def stop_playback(self): self.audio_engine.stop(); self.redraw()
+    def return_to_start(self):
+        self.audio_engine.return_to_start()
+        if hasattr(self, "live_midi"): self.live_midi.stop()
+        self.redraw()
+    def stop_playback(self):
+        self.audio_engine.stop()
+        if hasattr(self, "live_midi"): self.live_midi.stop()
+        self.redraw()
     def play_pause(self):
         if self.loading or not self._audio_ready:
             self.status.set("Audio is still loading…" if not self._audio_error
                             else self._audio_error)
             return
         try:
-            if self.audio_engine.state is PlaybackState.PLAYING: self.audio_engine.pause()
-            else: self.audio_engine.play()
+            if self.audio_engine.state is PlaybackState.PLAYING:
+                units = (self.model.tempo_map.seconds_to_units(self.audio_engine.current_time)
+                         if self.model and self.model.tempo_map else 0)
+                self.audio_engine.pause()
+                if hasattr(self, "live_midi"): self.live_midi.pause(units)
+            else:
+                units = (self.model.tempo_map.seconds_to_units(self.audio_engine.current_time)
+                         if self.model and self.model.tempo_map else 0)
+                if hasattr(self, "live_midi"): self.live_midi.start(units)
+                self.audio_engine.play()
         except PlaybackError as exc: messagebox.showwarning("Audio unavailable", str(exc))
+
+    def _live_mode_changed(self, *_args):
+        enabled = self.app_mode.get() == "LIVE"
+        self.live_midi.set_enabled(enabled)
+        self.live_badge.configure(text="● LIVE ON" if enabled else "LIVE OFF",
+                                  bg="#b51f2e" if enabled else "#3a2020")
+        if enabled and self.midi_router.status(MidiDestination.SECOND_HELIX) != "Connected":
+            self.status.set("LIVE: SECOND HELIX unavailable")
+
+    def _queue_live_midi(self, message, recall, generation):
+        """Serialize potentially blocking device I/O away from Tk."""
+        position = self.audio_engine.current_time
+        def send():
+            if generation != self.live_midi.generation or not self.live_midi.enabled:
+                return
+            sent = self.midi_router.send(MidiDestination.SECOND_HELIX, message)
+            kind = "LIVE RECALL" if recall else "LIVE MIDI"
+            LOG.debug("%s  %02d:%06.3f  SECOND HELIX  %s%s", kind,
+                      int(position // 60), position % 60, message,
+                      "" if sent else " (unavailable)")
+        self._live_midi_pool.submit(send)
 
     def _update_fixed_headers_for_scroll(self, previous_left):
         """Keep viewport overlays fixed without reconstructing the timeline.
@@ -3461,6 +3511,8 @@ class ReapcaseEditor(tk.Tk):
             self.transport_position.set(f"{int(minutes):02d}:{remainder:06.3f}   |   {position.render()}")
             if self.audio_engine.state is PlaybackState.PLAYING:
                 play_units = self.model.tempo_map.seconds_to_units(seconds)
+                if hasattr(self, "live_midi"):
+                    self.live_midi.poll(play_units)
                 playhead_x = timeline_x(play_units, self.model.song.ppqn, self.pixels_per_beat)
                 playhead = self.canvas.find_withtag("playhead")
                 if playhead:
