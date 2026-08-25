@@ -124,6 +124,7 @@ class LiveMidiDispatcher:
         self._resume_units: Optional[int] = None
         self._pauses: tuple[tuple[int, int], ...] = ()
         self._pause_cursor = 0
+        self._consumed_pause: Optional[tuple[int, int]] = None
         self._dispatch_lateness: list[float] = []
         self._seconds_for_units: Callable[[int], float] = lambda units: float(units)
 
@@ -138,6 +139,7 @@ class LiveMidiDispatcher:
         """
         self._pauses = tuple(sorted(boundaries))
         self._pause_cursor = 0
+        self._consumed_pause = None
 
     @property
     def next_pause_units(self) -> Optional[int]:
@@ -153,6 +155,7 @@ class LiveMidiDispatcher:
             event.units, event.source_order)))
         self.playing = False
         self._resume_units = None
+        self._consumed_pause = None
         self._last_units = 0
         return self.generation
 
@@ -165,6 +168,9 @@ class LiveMidiDispatcher:
         generation = self.generation
         unchanged_resume = self._resume_units == units
         if not unchanged_resume:
+            # Any start other than the exact pause-produced resume begins a
+            # new traversal, so a previously consumed marker is eligible.
+            self._consumed_pause = None
             self._cursor = next((i for i, event in enumerate(self.events)
                                  if event.units >= units), len(self.events))
         if not unchanged_resume:
@@ -197,6 +203,17 @@ class LiveMidiDispatcher:
                   "next_index=%s\nnext_event_units=%s",
                   self._last_units, units, self._cursor, next_units)
         if units < self._last_units:  # seek while playing: skip the interval and recall state
+            # Immediately after resuming at a pause, the latency-compensated
+            # audible clock can begin behind the requested transport position.
+            # This is clock catch-up, not a new traversal: keep both cursors so
+            # the pause and already-dispatched MIDI remain consumed.
+            if (self._consumed_pause is not None and
+                    units <= self._consumed_pause[0]):
+                LOG.debug("LIVE SKIP interval=%s..%s "
+                          "reason=audible clock latency catch-up",
+                          self._last_units, units)
+                self._last_units = units
+                return None
             LOG.debug("LIVE SKIP interval=%s..%s reason=backward clock seek",
                       self._last_units, units)
             self.playing = False
@@ -231,10 +248,14 @@ class LiveMidiDispatcher:
         if pause and pause[0] <= units:
             self._pause_cursor += 1
             self.playing = False
+            self._consumed_pause = pause
             self._resume_units = pause[0]
             self._last_units = pause[0]
             LOG.debug("LIVE PAUSE boundary_units=%s source_order=%s", *pause)
             return pause[0]
+        if (self._consumed_pause is not None and
+                units > self._consumed_pause[0]):
+            self._consumed_pause = None
         self._last_units = units
         return None
 
@@ -246,6 +267,7 @@ class LiveMidiDispatcher:
         was_playing = self.playing
         self.playing = False
         self._resume_units = None
+        self._consumed_pause = None
         if was_playing:
             self.start(units)
 
@@ -259,3 +281,4 @@ class LiveMidiDispatcher:
         self.generation += 1
         self.playing = False
         self._resume_units = None
+        self._consumed_pause = None
