@@ -69,6 +69,17 @@ class AudioEngineTests(unittest.TestCase):
         engine.stop(); self.assertEqual(engine.current_frame,0)
         engine.seek(.1); engine.return_to_start(); self.assertEqual(engine.current_frame,0)
 
+    def test_callback_pause_boundary_is_exact_and_pads_remaining_block(self):
+        engine, backend=self.engine(rate=100)
+        engine.pause_at(.06)
+        engine.play()
+        backend.stream.pump(4)
+        output = backend.stream.pump(4)
+        self.assertEqual(engine.current_frame, 6)
+        self.assertEqual(engine.state, PlaybackState.PAUSED)
+        self.assertNotEqual(output[1], [0.0, 0.0])
+        self.assertEqual(output[2:], [[0.0, 0.0], [0.0, 0.0]])
+
     def test_short_track_silence_after_eof_and_end_state(self):
         engine, backend=self.engine((2,6)); engine.play(); output=backend.stream.pump(4)
         self.assertGreater(output[0][0], output[3][0])

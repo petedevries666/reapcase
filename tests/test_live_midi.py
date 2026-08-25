@@ -148,6 +148,37 @@ def test_large_polling_jump_dispatches_every_crossed_event_once():
         event.message for event in events]
 
 
+def test_pause_is_hard_ordered_boundary_and_resume_consumes_it():
+    sent = []
+    dispatcher = LiveMidiDispatcher(lambda message, *_: sent.append(message))
+    before = ev(10, 1, {"type": "event", "value": "before"}, ("event", 1))
+    after = ev(10, 3, {"type": "event", "value": "after"}, ("event", 3))
+    future = ev(11, 4, {"type": "event", "value": "future"}, ("event", 4))
+    dispatcher.load([before, after, future])
+    dispatcher.set_pause_boundaries([(10, 2)])
+    dispatcher.set_enabled(True)
+    dispatcher.start(0)
+    assert dispatcher.poll(20) == 10
+    assert sent == [before.message]
+    dispatcher.start(10)
+    assert dispatcher.poll(10) is None
+    assert sent == [before.message, after.message]
+    dispatcher.poll(11)
+    assert sent == [before.message, after.message, future.message]
+
+
+def test_seek_invalidates_consumed_pause_boundary_state():
+    dispatcher = LiveMidiDispatcher(lambda *_: None)
+    dispatcher.load([])
+    dispatcher.set_pause_boundaries([(10, 0)])
+    dispatcher.set_enabled(True)
+    dispatcher.start(0)
+    assert dispatcher.poll(10) == 10
+    dispatcher.seek(0)
+    dispatcher.start(0)
+    assert dispatcher.poll(10) == 10
+
+
 def test_small_increments_repeated_clock_and_exact_boundary_lose_nothing():
     events = [
         ev(units, order, {'type': 'event', 'value': order}, ('event', order))

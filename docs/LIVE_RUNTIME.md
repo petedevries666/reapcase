@@ -66,3 +66,34 @@ The next live MIDI milestone can use `LiveRuntime.current_time_seconds`,
 scheduler driven by the existing audio master clock can select due semantic
 commands, pass them to destination protocol translators, then apply the
 separate show port/channel route. This foundation performs none of those sends.
+
+## Editor LIVE clock and dispatch
+
+Editor LIVE playback uses `AudioEngine.current_frame` as its authoritative
+position. The output callback advances that locked frame counter; the Tk
+transport callback only samples it. Both the Second Helix crossing dispatcher
+and the canvas playhead consume that same sample, so neither wall time nor
+waveform rendering advances playback. MIDI is intentionally not timestamped or
+sent early because the current `mido` backend has no portable future-timestamp
+contract. Instead, every crossed event is claimed in source order at the
+lightweight 33 ms clock sample, including all events crossed by a delayed UI
+sample.
+
+PLAY has a readiness barrier rather than a sleep. Smart Recall messages are
+queued on the serial MIDI worker first, and the audio stream starts only after
+the final recall completion is reported back to Tk. A zero-position start and
+an ordinary pause/resume have no recall work and cross the barrier immediately.
+This ordering also leaves a clean location for a future device-specific
+Program Change settling policy without ever blocking Tk.
+
+`PAUSE AT MARKER` is armed in the audio engine as an exact sample-frame
+boundary. The callback renders only through that frame and pads the rest of
+the hardware block with silence. The LIVE dispatcher independently consumes
+the same boundary with source ordering, preventing later MIDI from entering
+the worker queue. Its explicit boundary cursor permits resume at the exact
+position without an epsilon seek or duplicate event. Stop and Song reload
+advance the dispatch generation, so stale queued worker jobs are rejected.
+
+Normal DEBUG logs report PLAY request, preroll, recall, audio start, dispatch
+position and lateness. Setting `REAPCASE_LOAD_PERF=1` additionally reports
+aggregate MIDI average/max lateness when the dispatcher is stopped or reloaded.

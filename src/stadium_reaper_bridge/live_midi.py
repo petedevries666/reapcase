@@ -9,12 +9,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import logging
+import os
 from typing import Callable, Iterable, Optional
 
 from .timeline import TimelineEvent
 from .editor.creation import SECOND_HELIX_LOOPER_ACTIONS
 
 LOG = logging.getLogger(__name__)
+PERF = os.environ.get("REAPCASE_LOAD_PERF", "").lower() in ("1", "true", "yes")
 
 
 class LiveEventClass(str, Enum):
@@ -120,6 +122,28 @@ class LiveMidiDispatcher:
         self._cursor = 0
         self._last_units = 0
         self._resume_units: Optional[int] = None
+        self._pauses: tuple[tuple[int, int], ...] = ()
+        self._pause_cursor = 0
+        self._dispatch_lateness: list[float] = []
+        self._seconds_for_units: Callable[[int], float] = lambda units: float(units)
+
+    def set_timing_map(self, seconds_for_units: Callable[[int], float]) -> None:
+        self._seconds_for_units = seconds_for_units
+
+    def set_pause_boundaries(self, boundaries: Iterable[tuple[int, int]]) -> None:
+        """Install ``(units, source_order)`` pause commands.
+
+        Pause commands share the MIDI source-order domain.  The cursor is
+        explicit so resuming consumes a boundary without moving the clock.
+        """
+        self._pauses = tuple(sorted(boundaries))
+        self._pause_cursor = 0
+
+    @property
+    def next_pause_units(self) -> Optional[int]:
+        if self.enabled and self._pause_cursor < len(self._pauses):
+            return self._pauses[self._pause_cursor][0]
+        return None
 
     def load(self, events: Iterable[LiveMidiEvent]) -> int:
         self.generation += 1
@@ -127,7 +151,8 @@ class LiveMidiDispatcher:
         # producer to preserve the translator's sort contract.
         self.events = tuple(sorted(events, key=lambda event: (
             event.units, event.source_order)))
-        self.stop()
+        self.playing = False
+        self._resume_units = None
         self._last_units = 0
         return self.generation
 
@@ -136,12 +161,16 @@ class LiveMidiDispatcher:
         if not enabled:
             self.playing = False
 
-    def start(self, units: int) -> None:
+    def start(self, units: int) -> tuple[object, ...]:
         generation = self.generation
         unchanged_resume = self._resume_units == units
-        self._cursor = next((i for i, event in enumerate(self.events)
-                             if event.units > units or (event.units == units and not unchanged_resume)),
-                            len(self.events))
+        if not unchanged_resume:
+            self._cursor = next((i for i, event in enumerate(self.events)
+                                 if event.units >= units), len(self.events))
+        if not unchanged_resume:
+            self._pause_cursor = next((i for i, boundary in enumerate(self._pauses)
+                                       if boundary[0] >= units), len(self._pauses))
+        completions = []
         if self.enabled and units > 0 and not unchanged_resume:
             latest: dict[tuple[str, Optional[int]], LiveMidiEvent] = {}
             for event in self.events:
@@ -153,12 +182,15 @@ class LiveMidiDispatcher:
                 {"program": 0, "snapshot": 1, "cc": 2}.get(event.family[0], 3),
                 event.family[1] if event.family[1] is not None else -1))
             for event in ordered:
-                self._send(event.message, True, generation)
+                completion = self._send(event.message, True, generation)
+                if completion is not None:
+                    completions.append(completion)
         self._last_units, self._resume_units, self.playing = units, None, True
+        return tuple(completions)
 
-    def poll(self, units: int) -> None:
+    def poll(self, units: int) -> Optional[int]:
         if not self.playing:
-            return
+            return None
         next_units = (self.events[self._cursor].units
                       if self._cursor < len(self.events) else None)
         LOG.debug("LIVE ADVANCE\nprevious_units=%s\ncurrent_units=%s\n"
@@ -169,23 +201,41 @@ class LiveMidiDispatcher:
                       self._last_units, units)
             self.playing = False
             self.start(units)
-            return
-        while self._cursor < len(self.events) and self.events[self._cursor].units <= units:
+            return None
+        pause = (self._pauses[self._pause_cursor]
+                 if self.enabled and self._pause_cursor < len(self._pauses) else None)
+        limit = pause[0] if pause and pause[0] <= units else units
+        while self._cursor < len(self.events) and self.events[self._cursor].units <= limit:
             event_index = self._cursor
             event = self.events[event_index]
+            if pause and event.units == pause[0] and event.source_order > pause[1]:
+                break
             # Claim this exact event before invoking arbitrary callback code.
             # Advancing by one event (rather than searching for the next
             # position) is what preserves every same-position sibling.
             self._cursor += 1
             if self.enabled:
-                LOG.debug("LIVE DISPATCH index=%s units=%s source_order=%s message=%r",
-                          event_index, event.units, event.source_order, event.message)
+                delta_ms = (self._seconds_for_units(units) -
+                            self._seconds_for_units(event.units)) * 1000
+                self._dispatch_lateness.append(delta_ms)
+                LOG.debug("LIVE DISPATCH event_position=%s audio_position=%s "
+                          "delta_ms=%.3f index=%s source_order=%s message=%r",
+                          event.units, units, delta_ms, event_index,
+                          event.source_order, event.message)
                 self._send(event.message, False, self.generation)
             else:
                 LOG.debug("LIVE SKIP index=%s units=%s source_order=%s message=%r "
                           "reason=LIVE disabled", event_index, event.units,
                           event.source_order, event.message)
+        if pause and pause[0] <= units:
+            self._pause_cursor += 1
+            self.playing = False
+            self._resume_units = pause[0]
+            self._last_units = pause[0]
+            LOG.debug("LIVE PAUSE boundary_units=%s source_order=%s", *pause)
+            return pause[0]
         self._last_units = units
+        return None
 
     def pause(self, units: int) -> None:
         self.playing = False
@@ -199,5 +249,12 @@ class LiveMidiDispatcher:
             self.start(units)
 
     def stop(self) -> None:
+        if PERF and self._dispatch_lateness:
+            LOG.debug("LIVE TIMING MIDI dispatch average lateness=%.3f ms "
+                      "max lateness=%.3f ms samples=%d",
+                      sum(self._dispatch_lateness) / len(self._dispatch_lateness),
+                      max(self._dispatch_lateness), len(self._dispatch_lateness))
+        self._dispatch_lateness.clear()
+        self.generation += 1
         self.playing = False
         self._resume_units = None
