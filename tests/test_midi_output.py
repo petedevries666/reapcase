@@ -147,6 +147,39 @@ def test_destinations_may_share_port_and_route_independent_channels(tmp_path):
     assert len(backend.opened) == 1
 
 
+def test_mido_backend_maps_canonical_cc_field_and_applies_configured_channel():
+    built = []
+    sent = []
+
+    class Message:
+        def __init__(self, **fields):
+            self.fields = fields
+            built.append(fields)
+
+        def copy(self, **fields):
+            clone = Message(**self.fields)
+            clone.fields.update(fields)
+            return clone
+
+    backend = MidoBackend.__new__(MidoBackend)
+    backend._mido = types.SimpleNamespace(Message=Message)
+    backend.send(types.SimpleNamespace(send=sent.append),
+                 {"type": "control_change", "cc": 69, "value": 6}, 7)
+
+    assert built[0] == {"type": "control_change", "control": 69, "value": 6}
+    assert sent[0].fields["channel"] == 6
+
+
+def test_malformed_midi_message_is_safely_rejected(tmp_path):
+    class RejectingBackend(FakeBackend):
+        def send(self, output, message, channel):
+            raise ValueError("invalid MIDI message")
+
+    router = MidiRouter(RejectingBackend(["Port"]), tmp_path / "ui.json")
+    router.configure("second_helix", "Port", 1)
+    assert router.send("second_helix", {"type": "control_change"}) is False
+
+
 def test_refresh_and_close_release_resources(tmp_path):
     backend = FakeBackend(["Port"])
     router = MidiRouter(backend, tmp_path / "ui.json")

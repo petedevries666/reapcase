@@ -15,6 +15,7 @@ from .editor.preferences import load_preferences, update_preferences
 # merely while importing mido itself.  Keep the expected provider failures at
 # this boundary so they can never take down the editor.
 MIDI_BACKEND_ERRORS = (ImportError, OSError, RuntimeError)
+MIDI_MESSAGE_ERRORS = (TypeError, ValueError)
 
 
 class MidiDestination(str, Enum):
@@ -109,7 +110,13 @@ class MidoBackend:
 
     def send(self, output: Any, message: Any, channel: int) -> None:
         if isinstance(message, dict):
-            message = self._mido.Message(**message)
+            # The application's canonical CC representation uses ``cc`` while
+            # mido calls the same MIDI data byte ``control``.  Keep that
+            # provider-specific spelling at this backend boundary.
+            fields = dict(message)
+            if fields.get("type") == "control_change" and "cc" in fields:
+                fields["control"] = fields.pop("cc")
+            message = self._mido.Message(**fields)
         if hasattr(message, "copy"):
             message = message.copy(channel=channel - 1)
         output.send(message)
@@ -186,7 +193,7 @@ class MidiRouter:
                 self._outputs[route.port] = output
             self.backend.send(output, message, route.channel)
             return True
-        except MIDI_BACKEND_ERRORS:
+        except MIDI_BACKEND_ERRORS + MIDI_MESSAGE_ERRORS:
             self._close_port(route.port)
             return False
 
