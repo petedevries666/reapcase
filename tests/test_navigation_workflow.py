@@ -13,7 +13,9 @@ from stadium_reaper_bridge.editor.stadium_workspace import (
 from stadium_reaper_bridge.editor.song_browser import (
     SongDirectory, SongMetadataCache, initial_song_folder, workspace_for_song)
 from stadium_reaper_bridge.editor.structure import is_pause_marker
-from stadium_reaper_bridge.editor.style import LANE_PALETTE, lane_colors
+from stadium_reaper_bridge.editor.style import (LANE_PALETTE, REAPCASE_COMBOBOX_STYLE,
+                                                 REAPCASE_ENTRY_STYLE,
+                                                 REAPCASE_TREEVIEW_STYLE, lane_colors)
 
 
 def make_workspace(root, songs):
@@ -25,6 +27,16 @@ def make_workspace(root, songs):
         (directory / filename).write_text(
             document if isinstance(document, str) else json.dumps(document))
     return root
+
+
+def test_song_browser_uses_explicit_dark_widget_styles():
+    source = Path("src/stadium_reaper_bridge/editor/song_browser.py").read_text(encoding="utf-8")
+    assert "apply_ttk_theme(self)" in source
+    assert "style=REAPCASE_TREEVIEW_STYLE" in source
+    assert source.count("style=REAPCASE_ENTRY_STYLE") == 2
+    assert "style=REAPCASE_COMBOBOX_STYLE" in source
+    assert 'tags=("folder",)' in source
+    assert 'tags=("song",)' in source
 
 
 def test_workspace_inventory_uses_metadata_natural_order_and_skips_bad_json(tmp_path):
@@ -439,9 +451,10 @@ def test_event_list_navigation_preserves_complete_multi_selection():
     navigations = []
     editor = SimpleNamespace(
         model=SimpleNamespace(selected=set()), event_tree=Tree(),
-        _event_rows={"2": SimpleNamespace(units=240), "5": SimpleNamespace(units=960)},
+        _event_rows={"2": SimpleNamespace(units=240, lane="SECOND HELIX"),
+                     "5": SimpleNamespace(units=960, lane="STADIUM")},
         jump_to_units=lambda units, **kwargs: navigations.append((units, kwargs)),
         _refresh_inspector=lambda: None)
     ReapcaseEditor._event_list_selected(editor)
     assert editor.model.selected == {2, 5}
-    assert navigations == [(240, {"reveal": False})]
+    assert navigations == [(240, {"reveal": True, "reveal_lane": "SECOND HELIX"})]

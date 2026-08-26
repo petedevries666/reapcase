@@ -93,6 +93,10 @@ class ManagerListStyle:
     heading_background: str = "#192838"
     heading_foreground: str = "#d9e3ec"
     heading_active: str = "#203448"
+    border: str = "#344b60"
+    disabled_background: str = "#101923"
+    disabled_foreground: str = "#64788a"
+    focus_background: str = "#416b8d"
 
 
 @dataclass(frozen=True)
@@ -128,6 +132,8 @@ LANE_GRADIENT_OPACITY = 0.60
 # These deliberately remain quieter than selection and label colours.
 STRUCTURE_REGION_FILLS = ("#285f8a", "#1c466b")
 REAPCASE_TREEVIEW_STYLE = "Reapcase.Treeview"
+REAPCASE_ENTRY_STYLE = "Reapcase.TEntry"
+REAPCASE_COMBOBOX_STYLE = "Reapcase.TCombobox"
 
 
 def structure_region_fill(region_number: int) -> str:
@@ -163,10 +169,42 @@ def lane_colors(lane: str) -> LaneColors:
 
 def manager_row_palette(role: str) -> tuple[str, str]:
     """Return contextual manager colours from the canonical semantic roles."""
+    role = role.upper()
     if role == "PAUSE":
         return SEMANTIC.pause_background, SEMANTIC.pause_foreground
+    # Structure rows have a deliberate hierarchy without competing with PAUSE.
+    if role in {"REGION", "STRUCTURE REGION"}:
+        return "#234f72", "#eef7ff"
+    if role in {"MARKER", "STRUCTURE MARKER"}:
+        return "#1b3c58", "#d9eaf7"
+    if role in {"START", "END", "CYCLE_START", "CYCLE_END", "STRUCTURE BOUNDARY"}:
+        return "#182d40", "#a9bfd0"
+    if role == "LIGHT":
+        role = "LIGHTS"
+    if role == "AUDIO":
+        return AUDIO.background_highlight, AUDIO.text
     palette = lane_colors(role)
     return palette.background_highlight, palette.text
+
+
+def event_list_role(lane: str, kind: str, *, pause: bool = False) -> str:
+    """Resolve a row to the same semantic role used by managers/timeline."""
+    if pause or (lane == "STRUCTURE" and kind == "PAUSE"):
+        return "PAUSE"
+    return lane if lane in LANE_PALETTE or lane == "AUDIO" else "MIDI / OTHER"
+
+
+def _hex_luminance(color: str) -> float:
+    channels = [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+    linear = [value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
+              for value in channels]
+    return .2126 * linear[0] + .7152 * linear[1] + .0722 * linear[2]
+
+
+def contrast_ratio(first: str, second: str) -> float:
+    """Small programmatic guard against accidental light-on-light palettes."""
+    light, dark = sorted((_hex_luminance(first), _hex_luminance(second)), reverse=True)
+    return (light + .05) / (dark + .05)
 
 
 def lane_gradient_asset_path() -> Path:
@@ -317,6 +355,25 @@ def apply_ttk_theme(root) -> None:
     style.map("TCombobox", fieldbackground=[("readonly", THEME.surface)],
               foreground=[("readonly", THEME.text)],
               selectbackground=[("readonly", THEME.surface)])
+    style.configure(REAPCASE_ENTRY_STYLE, fieldbackground=THEME.surface,
+                    background=THEME.surface, foreground=THEME.text,
+                    insertcolor=THEME.text, bordercolor=THEME.border)
+    style.map(REAPCASE_ENTRY_STYLE,
+              fieldbackground=[("disabled", MANAGER_LIST.disabled_background),
+                               ("focus", THEME.surface_raised), ("!disabled", THEME.surface)],
+              foreground=[("disabled", MANAGER_LIST.disabled_foreground),
+                          ("!disabled", THEME.text)],
+              bordercolor=[("focus", THEME.border_strong), ("!focus", THEME.border)])
+    style.configure(REAPCASE_COMBOBOX_STYLE, fieldbackground=THEME.surface,
+                    background=THEME.surface, foreground=THEME.text,
+                    arrowcolor=THEME.text_muted, bordercolor=THEME.border)
+    style.map(REAPCASE_COMBOBOX_STYLE,
+              fieldbackground=[("disabled", MANAGER_LIST.disabled_background),
+                               ("readonly", THEME.surface), ("focus", THEME.surface_raised)],
+              foreground=[("disabled", MANAGER_LIST.disabled_foreground),
+                          ("readonly", THEME.text)],
+              selectbackground=[("readonly", THEME.surface)],
+              selectforeground=[("readonly", THEME.text)])
     style.configure("TLabelframe", background=THEME.chrome,
                     bordercolor=THEME.border, borderwidth=1, relief="solid")
     style.configure("TLabelframe.Label", background=THEME.chrome,
@@ -328,17 +385,19 @@ def apply_ttk_theme(root) -> None:
                     background=MANAGER_LIST.background,
                     foreground=MANAGER_LIST.foreground,
                     fieldbackground=MANAGER_LIST.background,
-                    bordercolor=THEME.border,
+                    bordercolor=MANAGER_LIST.border,
                     rowheight=24)
     # State maps are essential on Windows, where the platform theme can
     # otherwise restore a light selected or inactive row.
     style.map(REAPCASE_TREEVIEW_STYLE,
-              background=[("selected", MANAGER_LIST.selected_background),
-                          ("!selected", MANAGER_LIST.background)],
-              foreground=[("selected", MANAGER_LIST.selected_foreground),
-                          ("!selected", MANAGER_LIST.foreground)],
+              background=[("disabled", MANAGER_LIST.disabled_background),
+                          ("selected", MANAGER_LIST.selected_background)],
+              foreground=[("disabled", MANAGER_LIST.disabled_foreground),
+                          ("selected", MANAGER_LIST.selected_foreground)],
               fieldbackground=[("selected", MANAGER_LIST.selected_background),
-                               ("!selected", MANAGER_LIST.background)])
+                               ("!selected", MANAGER_LIST.background)],
+              bordercolor=[("focus", MANAGER_LIST.focus_background),
+                           ("!focus", MANAGER_LIST.border)])
     heading_style = f"{REAPCASE_TREEVIEW_STYLE}.Heading"
     style.configure(heading_style, background=MANAGER_LIST.heading_background,
                     foreground=MANAGER_LIST.heading_foreground,

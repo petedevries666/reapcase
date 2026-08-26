@@ -15,6 +15,8 @@ from tkinter import ttk
 from typing import Callable, Optional
 
 from .stadium_workspace import SONGS_DIRECTORY, load_manifest
+from .style import (MANAGER_LIST, REAPCASE_COMBOBOX_STYLE, REAPCASE_ENTRY_STYLE,
+                    REAPCASE_TREEVIEW_STYLE, THEME, apply_ttk_theme)
 
 
 def natural_key(value: str):
@@ -143,6 +145,10 @@ class SongBrowser(tk.Toplevel):
     def __init__(self, parent, initial: Path, on_open: Callable[[Path], object],
                  workspace: Optional[Path] = None, on_folder: Optional[Callable[[Path], None]] = None):
         super().__init__(parent)
+        # Toplevels do not reliably inherit a native Windows theme's body
+        # colour.  Reapply the deterministic named styles and paint the shell.
+        apply_ttk_theme(self)
+        self.configure(background=THEME.app)
         self.title("Open Song")
         self.geometry("720x480")
         self.minsize(560, 360)
@@ -166,17 +172,24 @@ class SongBrowser(tk.Toplevel):
         nav = ttk.Frame(self, padding=(8, 8, 8, 4)); nav.pack(fill="x")
         ttk.Button(nav, text="Back", command=self._back).pack(side="left")
         ttk.Button(nav, text="Up", command=self._up).pack(side="left", padx=(4, 8))
-        ttk.Entry(nav, textvariable=self.path_text).pack(side="left", fill="x", expand=True)
+        ttk.Entry(nav, textvariable=self.path_text, style=REAPCASE_ENTRY_STYLE).pack(
+            side="left", fill="x", expand=True)
         ttk.Button(nav, text="Go", command=lambda: self._navigate(Path(self.path_text.get()))).pack(side="left", padx=(4, 0))
         if self._workspace:
             ttk.Button(nav, text="Current Workspace Songs", command=self._workspace_songs).pack(side="left", padx=(8, 0))
         search = ttk.Frame(self, padding=(8, 4)); search.pack(fill="x")
         ttk.Label(search, text="Search Songs:").pack(side="left")
-        ttk.Entry(search, textvariable=self.search).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Entry(search, textvariable=self.search, style=REAPCASE_ENTRY_STYLE).pack(
+            side="left", fill="x", expand=True, padx=6)
         ttk.Label(search, text="Sort:").pack(side="left")
         combo = ttk.Combobox(search, textvariable=self.sort_by, state="readonly", width=10,
+                             style=REAPCASE_COMBOBOX_STYLE,
                              values=("file", "title")); combo.pack(side="left")
-        self.tree = ttk.Treeview(self, columns=("file", "song"), show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(self, columns=("file", "song"), show="headings",
+                                 selectmode="browse", style=REAPCASE_TREEVIEW_STYLE)
+        self.tree.tag_configure("folder", background="#192d40", foreground="#b8d1e4")
+        self.tree.tag_configure("song", background=MANAGER_LIST.background,
+                                foreground=MANAGER_LIST.foreground)
         self.tree.heading("file", text="File / ID", command=lambda: self._set_sort("file"))
         self.tree.heading("song", text="Song", command=lambda: self._set_sort("title"))
         self.tree.column("file", width=180, stretch=False); self.tree.column("song", width=440)
@@ -205,10 +218,11 @@ class SongBrowser(tk.Toplevel):
     def _render(self):
         self.tree.delete(*self.tree.get_children()); self._rows.clear()
         for folder in self._directory.folders:
-            row = self.tree.insert("", "end", values=("📁 " + folder.name, "Folder"))
+            row = self.tree.insert("", "end", values=("📁 " + folder.name, "Folder"),
+                                   tags=("folder",))
             self._rows[row] = ("folder", folder)
         for song in self._directory.filtered_songs(self.search.get(), self.sort_by.get()):
-            row = self.tree.insert("", "end", values=(song.file_id, song.title))
+            row = self.tree.insert("", "end", values=(song.file_id, song.title), tags=("song",))
             self._rows[row] = ("song", song.path)
 
     def _selected(self):

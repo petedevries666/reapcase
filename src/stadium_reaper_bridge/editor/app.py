@@ -36,7 +36,7 @@ from .lighting import (HIT_PRESETS, STATE_PRESETS, LightingKind,
 from .model import AudioProgress, AudioProgressPhase, EditorModel, LANES, MovePreview
 from .style import (AUDIO, LOOPER_STATE_FILLS, REAPCASE_TREEVIEW_STYLE, THEME,
                     TIMELINE, LaneBackgroundCache, apply_ttk_theme, lane_colors,
-                    manager_row_palette,
+                    event_list_role, manager_row_palette,
                     structure_region_fill)
 from .sequence import SequenceClickKind
 from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
@@ -363,7 +363,7 @@ class ReapcaseEditor(tk.Tk):
         self.event_tree.configure(yscrollcommand=event_scroll.set)
         self.event_tree.pack(side="left", fill="both", expand=True); event_scroll.pack(side="right", fill="y")
         self.event_tree.bind("<<TreeviewSelect>>", self._event_list_selected)
-        self.event_tree.bind("<Double-Button-1>", self._event_list_edit)
+        self.event_tree.bind("<Double-Button-1>", self._event_list_go_to)
         self.event_tree.bind("<Return>", self._event_list_go_to)
         self.right_sidebar = ttk.Frame(self.main_content)
         self.right_sidebar.columnconfigure(0, weight=1)
@@ -747,7 +747,7 @@ class ReapcaseEditor(tk.Tk):
             return
         configured = set()
         for number, row in enumerate(structure_manager_rows(self.model)):
-            role = "PAUSE" if row.kind == "PAUSE" else row.lane
+            role = row.kind
             tag = "role_" + role.casefold().replace(" ", "_").replace("/", "_")
             if tag not in configured:
                 background, foreground = manager_row_palette(role)
@@ -963,8 +963,15 @@ class ReapcaseEditor(tk.Tk):
         self.event_tree.delete(*self.event_tree.get_children()); self._event_rows = {}
         if not self.model: return
         for row in event_list_rows(self.model):
+            role = event_list_role(row.lane, row.kind, pause=row.role == "PAUSE")
+            tag = "role_" + role.casefold().replace(" ", "_").replace("/", "_")
+            background, foreground = manager_row_palette(role)
+            options = {"background": background, "foreground": foreground}
+            if role == "PAUSE":
+                options["font"] = ("TkDefaultFont", 9, "bold")
+            self.event_tree.tag_configure(tag, **options)
             item = self.event_tree.insert("", "end", iid=str(row.index),
-                values=(row.position, row.lane, row.kind, row.name, row.details))
+                values=(row.position, row.lane, row.kind, row.name, row.details), tags=(tag,))
             self._event_rows[item] = row
         self.event_tree.selection_set([str(i) for i in self.model.selected if str(i) in self._event_rows])
 
@@ -978,7 +985,8 @@ class ReapcaseEditor(tk.Tk):
             selected = self.event_tree.selection()
             self.model.selected = {int(item) for item in selected}
             if selected:
-                self.jump_to_units(self._event_rows[selected[0]].units, reveal=False)
+                row = self._event_rows[selected[0]]
+                self.jump_to_units(row.units, reveal=True, reveal_lane=row.lane)
             self._refresh_inspector()
 
     def _event_list_edit(self, _event=None):
@@ -987,10 +995,12 @@ class ReapcaseEditor(tk.Tk):
 
     def _event_list_go_to(self, _event=None):
         selected = self.event_tree.selection()
-        if selected and self.model: self.jump_to_units(self._event_rows[selected[0]].units)
+        if selected and self.model:
+            row = self._event_rows[selected[0]]
+            self.jump_to_units(row.units, select_index=row.index, reveal_lane=row.lane)
         return "break"
 
-    def jump_to_units(self, units, *, select_index=None, reveal=True):
+    def jump_to_units(self, units, *, select_index=None, reveal=True, reveal_lane=None):
         """Shared cursor/audio/playhead navigation used by every editor surface."""
         if not self.model: return
         if select_index is not None:
@@ -1006,6 +1016,12 @@ class ReapcaseEditor(tk.Tk):
                                   self.canvas.winfo_width())
         previous = self.canvas.canvasx(0)
         self.canvas.xview_moveto(left / max(1.0, total))
+        if reveal_lane:
+            layout = visible_lane_layout(self.lane_order, {
+                lane: variable.get() for lane, variable in self.lane_visibility.items()})
+            if reveal_lane in layout.tops:
+                height = max(1.0, float(region[3]) if len(region) == 4 else 1.0)
+                self.canvas.yview_moveto(max(0.0, layout.tops[reveal_lane] - RULER_HEIGHT) / height)
         self._update_fixed_headers_for_scroll(previous)
         self._refresh_inspector()
 

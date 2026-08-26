@@ -13,6 +13,9 @@ from stadium_reaper_bridge.editor.style import (
     REAPCASE_TREEVIEW_STYLE,
     STRUCTURE_REGION_FILLS,
     structure_region_fill,
+    contrast_ratio,
+    event_list_role,
+    manager_row_palette,
 )
 
 
@@ -91,3 +94,26 @@ def test_shared_treeview_palette_has_explicit_dark_and_selected_states():
     assert MANAGER_LIST.background.startswith("#")
     assert MANAGER_LIST.background != MANAGER_LIST.selected_background
     assert MANAGER_LIST.foreground != MANAGER_LIST.background
+    assert contrast_ratio(MANAGER_LIST.foreground, MANAGER_LIST.background) >= 4.5
+    assert contrast_ratio(MANAGER_LIST.selected_foreground,
+                          MANAGER_LIST.selected_background) >= 4.5
+    assert contrast_ratio(MANAGER_LIST.disabled_foreground,
+                          MANAGER_LIST.disabled_background) >= 3
+
+
+def test_manager_semantic_rows_are_visibly_distinct_and_pause_is_special():
+    assert manager_row_palette("SECOND HELIX") != manager_row_palette("STADIUM")
+    assert manager_row_palette("VIDEO") != manager_row_palette("SECOND HELIX")
+    assert manager_row_palette("PAUSE") != manager_row_palette("STRUCTURE")
+    assert manager_row_palette("REGION") != manager_row_palette("MARKER")
+    for role in ("PAUSE", "STRUCTURE", "STADIUM", "SECOND HELIX", "VIDEO",
+                 "LIGHT", "MIDI / OTHER", "AUDIO"):
+        background, foreground = manager_row_palette(role)
+        assert contrast_ratio(foreground, background) >= 3
+
+
+def test_event_list_resolves_lane_roles_and_pause_override():
+    assert event_list_role("SECOND HELIX", "MIDI_CC") == "SECOND HELIX"
+    assert event_list_role("STADIUM", "PRESETSNAP") == "STADIUM"
+    assert event_list_role("STRUCTURE", "MARKER", pause=True) == "PAUSE"
+    assert event_list_role("UNRECOGNIZED", "MIDI_CC") == "MIDI / OTHER"
