@@ -47,7 +47,7 @@ def sublane_bounds(lanes: tuple[str, ...], lane: str, sublane: str) -> tuple[int
 
 
 def sublane_content_bounds(lanes: tuple[str, ...], lane: str, sublane: str,
-                           padding: int = 4) -> tuple[int, int]:
+                           padding: int = 1) -> tuple[int, int]:
     """Return padded drawing/hit bounds wholly contained in one sub-lane."""
     top, bottom = sublane_bounds(lanes, lane, sublane)
     if padding < 0 or top + padding >= bottom - padding:

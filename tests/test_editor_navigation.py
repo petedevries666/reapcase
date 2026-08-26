@@ -184,6 +184,37 @@ def test_marker_manager_only_extracts_marker_and_canonical_region_rows():
     assert all(row.position.count("-") == 1 for row in rows)
 
 
+def test_structure_manager_replaces_region_marker_but_keeps_pause_and_end_marker():
+    model = perfect_picture()
+    rows = marker_region_rows(model)
+    region_indices = {row.indices[0] for row in rows if row.kind == "REGION"}
+
+    assert region_indices
+    assert not any(row.kind == "MARKER" and row.indices[0] in region_indices
+                   for row in rows)
+    pause_indices = {index for index, event in enumerate(model.timeline.events)
+                     if event.source.type == "MARKER"
+                     and str(event.data.get("pause_at_marker", "")).casefold() == "on"}
+    assert pause_indices <= {row.indices[0] for row in rows if row.kind == "PAUSE"}
+
+
+def test_repeated_redraw_requests_coalesce_at_idle():
+    callbacks = []
+    redraws = []
+    editor = SimpleNamespace(
+        _redraw_idle_id=None,
+        after_idle=lambda callback: callbacks.append(callback) or "idle-1",
+        winfo_exists=lambda: True,
+        redraw=lambda reason=None: redraws.append(reason))
+
+    ReapcaseEditor.request_redraw(editor, "first change")
+    ReapcaseEditor.request_redraw(editor, "second change")
+    assert len(callbacks) == 1
+    callbacks.pop()()
+    assert redraws == ["first change"]
+    assert editor._redraw_idle_id is None
+
+
 def test_jump_scroll_uses_units_and_first_third_lookahead():
     units, ppqn, scale, viewport = 16_000, 960, 90.0, 1_000
     left = jump_viewport_left(units, ppqn, scale, viewport)

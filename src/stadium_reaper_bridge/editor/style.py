@@ -62,13 +62,14 @@ class TimelineStyle:
 
 @dataclass(frozen=True)
 class AudioStyle:
-    background: str = "#151d25"
-    background_highlight: str = "#1b2630"
-    clip: str = "#2b4558"
-    clip_outline: str = "#6590b3"
+    background: str = "#14191f"
+    background_alternate: str = "#181e24"
+    background_highlight: str = "#1d242b"
+    clip: str = "#29343d"
+    clip_outline: str = "#667987"
     missing_clip: str = "#3a303d"
     missing_outline: str = "#a76e7c"
-    waveform: str = "#5f809e"
+    waveform: str = "#7892a3"
     text: str = "#d6e2ec"
     grid_bar: str = "#a9c3d8"
     grid_beat: str = "#708ba5"
@@ -105,10 +106,22 @@ class LaneColors:
     header: str
 
 
+@dataclass(frozen=True)
+class SemanticPalette:
+    """Roles shared by timeline primitives and manager projections."""
+
+    pause_background: str = "#4a3d20"
+    pause_foreground: str = "#ffe4a0"
+    pause_outline: str = "#c7a34d"
+    major_border: str = "#496176"
+    selection: str = "#4c789b"
+
+
 THEME = ThemeColors()
 TIMELINE = TimelineStyle()
 AUDIO = AudioStyle()
 MANAGER_LIST = ManagerListStyle()
+SEMANTIC = SemanticPalette()
 LANE_GRADIENT_OPACITY = 0.60
 
 # Normal marker-derived STRUCTURE spans alternate in chronological order.
@@ -146,6 +159,14 @@ LOOPER_STATE_FILLS = {
 def lane_colors(lane: str) -> LaneColors:
     """Return the stable visual identity for a top-level or audio lane."""
     return LANE_PALETTE.get(lane, LANE_PALETTE["MIDI / OTHER"])
+
+
+def manager_row_palette(role: str) -> tuple[str, str]:
+    """Return contextual manager colours from the canonical semantic roles."""
+    if role == "PAUSE":
+        return SEMANTIC.pause_background, SEMANTIC.pause_foreground
+    palette = lane_colors(role)
+    return palette.background_highlight, palette.text
 
 
 def lane_gradient_asset_path() -> Path:
