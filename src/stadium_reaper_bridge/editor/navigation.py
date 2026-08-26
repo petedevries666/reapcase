@@ -60,7 +60,7 @@ class ViewState:
     current_view: str = "timeline"
 
     def switch(self, view: str) -> None:
-        if view not in {"timeline", "event_list"}:
+        if view not in {"timeline", "event_list", "roadmap"}:
             raise ValueError(f"Unknown view: {view}")
         self.current_view = view
 
