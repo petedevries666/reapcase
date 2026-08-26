@@ -790,7 +790,7 @@ class ReapcaseEditor(tk.Tk):
             row = self._marker_rows[selected[0]]
             self.navigate_to_event(
                 row.units, select_index=row.indices[0] if len(row.indices) == 1 else None,
-                reveal_lane=row.lane)
+                vertical=False, reveal_lane=row.lane)
         return "break"
 
     def _refresh_marker_flag_manager(self):
@@ -815,7 +815,7 @@ class ReapcaseEditor(tk.Tk):
         if selected and selected[0] in self._marker_flag_rows:
             row = self._marker_flag_rows[selected[0]]
             self.navigate_to_event(row.units, select_index=row.indices[0],
-                                   reveal_lane=row.lane)
+                                   vertical=False, reveal_lane=row.lane)
         return "break"
 
     def _refresh_inspector(self):
@@ -1014,7 +1014,7 @@ class ReapcaseEditor(tk.Tk):
             if selected:
                 row = self._event_rows[selected[0]]
                 self.navigate_to_event(row.units, select_index=row.index,
-                                       reveal_lane=row.lane)
+                                       vertical=False, reveal_lane=row.lane)
             else:
                 self._refresh_inspector()
 
@@ -1026,24 +1026,27 @@ class ReapcaseEditor(tk.Tk):
         selected = self.event_tree.selection()
         if selected and self.model:
             row = self._event_rows[selected[0]]
-            self.navigate_to_event(row.units, select_index=row.index, reveal_lane=row.lane)
+            self.navigate_to_event(row.units, select_index=row.index,
+                                   vertical=False, reveal_lane=row.lane)
         return "break"
 
-    def navigate_to_event(self, units, *, select_index=None, reveal=True, reveal_lane=None):
-        """Complete, ordered navigation transaction used by every editor surface."""
+    def navigate_to_event(self, units, *, select_index=None, horizontal=True,
+                          vertical=False, reveal_lane=None):
+        """Navigate to an event, with independent horizontal and lane reveal."""
         if not self.model: return
         if select_index is not None:
             self.model.selected = {select_index}
         self.seek_units(units)
         self._follow_suspended_until = time.monotonic() + .8
-        if reveal:
+        if horizontal or vertical:
             region = self.canvas.cget("scrollregion").split()
             total = float(region[2]) if len(region) == 4 else 1.0
-            left = jump_viewport_left(units, self.model.song.ppqn, self.pixels_per_beat,
-                                      self.canvas.winfo_width())
             previous = self.canvas.canvasx(0)
-            self.canvas.xview_moveto(left / max(1.0, total))
-            if reveal_lane:
+            if horizontal:
+                left = jump_viewport_left(units, self.model.song.ppqn, self.pixels_per_beat,
+                                          self.canvas.winfo_width())
+                self.canvas.xview_moveto(left / max(1.0, total))
+            if vertical and reveal_lane:
                 layout = visible_lane_layout(self.lane_order, {
                     lane: variable.get() for lane, variable in self.lane_visibility.items()})
                 if reveal_lane in layout.tops:
@@ -1056,9 +1059,11 @@ class ReapcaseEditor(tk.Tk):
         # both paints the final viewport and coalesces rapid Treeview selections.
         self.request_redraw("event navigation")
 
-    def jump_to_units(self, units, *, select_index=None, reveal=True, reveal_lane=None):
+    def jump_to_units(self, units, *, select_index=None, horizontal=True,
+                      vertical=False, reveal_lane=None):
         """Compatibility entry point for callers migrating to navigate_to_event."""
-        return self.navigate_to_event(units, select_index=select_index, reveal=reveal,
+        return self.navigate_to_event(units, select_index=select_index,
+                                      horizontal=horizontal, vertical=vertical,
                                       reveal_lane=reveal_lane)
 
     def _manager(self, family, title, build):
