@@ -36,6 +36,7 @@ from .lighting import (HIT_PRESETS, STATE_PRESETS, LightingKind,
 from .model import AudioProgress, AudioProgressPhase, EditorModel, LANES, MovePreview
 from .style import (AUDIO, LOOPER_STATE_FILLS, REAPCASE_TREEVIEW_STYLE, THEME,
                     TIMELINE, LaneBackgroundCache, apply_ttk_theme, lane_colors,
+                    manager_row_palette,
                     structure_region_fill)
 from .sequence import SequenceClickKind
 from .structure import (CYCLES_HEIGHT, MARKERS_HEIGHT, PAUSES_HEIGHT,
@@ -219,6 +220,7 @@ class ReapcaseEditor(tk.Tk):
         self._ghost_raster_coverage = None
         self._ghost_refresh_pending = False
         self._ghost_waveform_image = None
+        self._redraw_idle_id = None
         self._lane_backgrounds = LaneBackgroundCache(self)
         self.manual_audio_root = None
         self.stadium_workspace = None
@@ -345,6 +347,7 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.bind("<Button-2>", lambda event: self.canvas.scan_mark(event.x, event.y))
         self.canvas.bind("<B2-Motion>", lambda event: self.canvas.scan_dragto(event.x, event.y, gain=1))
         self.canvas.bind("<Motion>", self.timeline_hover)
+        self.canvas.bind("<Configure>", self._timeline_resized)
         self.canvas.bind("<Control-c>", self.copy_events)
         self.canvas.bind("<Control-v>", self.paste_events)
         self.event_list_frame = ttk.Frame(self.main_content)
@@ -744,11 +747,14 @@ class ReapcaseEditor(tk.Tk):
             return
         configured = set()
         for number, row in enumerate(structure_manager_rows(self.model)):
-            tag = "lane_" + row.lane.casefold().replace(" ", "_").replace("/", "_")
+            role = "PAUSE" if row.kind == "PAUSE" else row.lane
+            tag = "role_" + role.casefold().replace(" ", "_").replace("/", "_")
             if tag not in configured:
-                palette = lane_colors(row.lane)
-                self.marker_tree.tag_configure(tag, background=palette.background_highlight,
-                                               foreground=palette.text)
+                background, foreground = manager_row_palette(role)
+                options = {"background": background, "foreground": foreground}
+                if role == "PAUSE":
+                    options["font"] = ("TkDefaultFont", 9, "bold")
+                self.marker_tree.tag_configure(tag, **options)
                 configured.add(tag)
             item = self.marker_tree.insert("", "end", iid=str(number),
                                            values=(row.kind, row.name), tags=(tag,))
@@ -772,9 +778,9 @@ class ReapcaseEditor(tk.Tk):
         enabled = {lane for lane, variable in self.marker_flag_filters.items() if variable.get()}
         for number, row in enumerate(marker_flag_manager_rows(self.model, enabled)):
             tag = "lane_" + row.lane.casefold().replace(" ", "_").replace("/", "_")
-            palette = lane_colors(row.lane)
-            self.marker_flag_tree.tag_configure(tag, background=palette.background_highlight,
-                                                foreground=palette.text)
+            background, foreground = manager_row_palette(row.lane)
+            self.marker_flag_tree.tag_configure(tag, background=background,
+                                                foreground=foreground)
             item = self.marker_flag_tree.insert("", "end", iid=str(number),
                                                 values=(row.kind, row.name), tags=(tag,))
             self._marker_flag_rows[item] = row
@@ -2174,7 +2180,28 @@ class ReapcaseEditor(tk.Tk):
         self._draw_ghost_waveform(layout, layout.lanes)
         self.canvas.tag_lower("ghost-waveform", "ghost-foreground-anchor")
 
+    def request_redraw(self, reason=None):
+        """Coalesce invalidations into one deterministic idle repaint."""
+        if self._redraw_idle_id is not None:
+            return
+
+        def paint():
+            self._redraw_idle_id = None
+            if self.winfo_exists():
+                self.redraw(reason)
+
+        self._redraw_idle_id = self.after_idle(paint)
+
+    def _timeline_resized(self, _event=None):
+        # Configure can fire several times while panes settle.  Repainting once
+        # at idle also regenerates viewport-sized cached lane backgrounds.
+        self.request_redraw("timeline resize")
+
     def redraw(self, reason=None):
+        pending = getattr(self, "_redraw_idle_id", None)
+        if pending is not None:
+            self.after_cancel(pending)
+            self._redraw_idle_id = None
         if LOAD_PERF:
             caller = inspect.currentframe().f_back
             LOG.debug("timeline full redraw reason=%s caller=%s:%d (%s)",
@@ -2214,11 +2241,18 @@ class ReapcaseEditor(tk.Tk):
                 lane_style = lane_colors(lane)
                 background = lane_style.background
             else:
-                background = AUDIO.background
+                audio_index = lane_index - len(visible_lanes)
+                background = (AUDIO.background_alternate if audio_index % 2
+                              else AUDIO.background)
             lane_image = self._lane_backgrounds.image(background, int(width), current_height)
             self.canvas.create_image(0, y, image=lane_image, anchor="nw")
             self.canvas.create_line(0, y + current_height, width, y + current_height,
                                     fill=TIMELINE.separator)
+            if lane in {"STRUCTURE", "STADIUM", "SECOND HELIX"}:
+                self.canvas.create_rectangle(1, y + 1, width - 1,
+                                             y + current_height - 1,
+                                             outline=lane_colors(lane).outline,
+                                             width=1)
             if lane == "STRUCTURE":
                 for boundary in (y + MARKERS_HEIGHT, y + MARKERS_HEIGHT + PAUSES_HEIGHT):
                     self.canvas.create_line(0, boundary, width, boundary, fill=TIMELINE.sublane_separator)
@@ -2444,7 +2478,7 @@ class ReapcaseEditor(tk.Tk):
             elif m.lane(event) in COMPOSITE_LANES:
                 row_top, _ = sublane_bounds(visible_lanes, m.lane(event),
                                              event_sublane(event, m.lane(event)))
-                y = row_top + 3
+                y = row_top + 1
             selected = i in m.selected
             previewed = preview_selection is not None and i in preview_selection
             event_lane = m.lane(event)
@@ -2452,10 +2486,10 @@ class ReapcaseEditor(tk.Tk):
                                 event_sublane(event, event_lane) == "looper")
             text = (looper_display_label(event, event_lane) if is_looper_point
                     else m.label(event))
-            if is_looper_point:
-                looper_y1, looper_y2 = sublane_content_bounds(
-                    visible_lanes, event_lane, "looper")
-                text_y = (looper_y1 + looper_y2) / 2
+            if event_lane in COMPOSITE_LANES:
+                event_y1, event_y2 = sublane_content_bounds(
+                    visible_lanes, event_lane, event_sublane(event, event_lane))
+                text_y = (event_y1 + event_y2) / 2
             else:
                 text_y = y + 10
             item = self.canvas.create_text(x + 5, text_y, text=text, anchor="w",
@@ -2463,8 +2497,8 @@ class ReapcaseEditor(tk.Tk):
                                            tags=(f"event:{i}",))
             box = self.canvas.bbox(item)
             palette = lane_colors(m.lane(event))
-            bounds = (looper_item_bounds(visible_lanes, event_lane, x, box[2] + 4)
-                      if is_looper_point else
+            bounds = ((x, event_y1, max(x + 1, box[2] + 4), event_y2)
+                      if event_lane in COMPOSITE_LANES else
                       (box[0]-4, box[1]-3, box[2]+4, box[3]+3))
             rect = self.canvas.create_rectangle(*bounds,
                                                 fill=palette.selected if selected or previewed else palette.normal,

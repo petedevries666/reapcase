@@ -67,7 +67,8 @@ def test_semantic_lane_color_associations_are_unchanged():
 
     assert {lane: lane_colors(lane).background for lane in expected} == expected
     assert set(LANE_PALETTE) == set(expected)
-    assert AUDIO.background == "#151d25"
+    assert AUDIO.background == "#14191f"
+    assert AUDIO.background_alternate != AUDIO.background
 
 
 def test_audio_palette_is_darker_and_distinct_from_structure():

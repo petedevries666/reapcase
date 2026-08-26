@@ -135,6 +135,12 @@ class MarkerRegionRow:
 def structure_manager_rows(model) -> tuple[MarkerRegionRow, ...]:
     """Project the STRUCTURE lane as boundaries plus derived chapter spans."""
     events = model.timeline.events
+    layout = derive_structure_layout(events, model._units, model.song_end_units)
+    # Ordinary marker regions are represented by their derived REGION row.  Use
+    # the canonical source indices from layout derivation rather than labels or
+    # positions, which can legitimately be shared by unrelated markers.
+    region_markers = {region.source_event_indices[0] for region in layout.regions
+                      if region.kind == "marker"}
     rows = []
     for index, event in sorted(enumerate(events), key=lambda pair: model._units(pair[1].position)):
         if model.lane(event) != "STRUCTURE":
@@ -144,9 +150,10 @@ def structure_manager_rows(model) -> tuple[MarkerRegionRow, ...]:
             continue
         units, position = model._units(event.position), event.position.render()
         display_kind = "PAUSE" if kind == "MARKER" and is_pause_marker(event) else kind
+        if index in region_markers and display_kind == "MARKER":
+            continue
         rows.append(MarkerRegionRow((index,), units, position, display_kind, badge_text(event),
                                     lane="STRUCTURE"))
-    layout = derive_structure_layout(events, model._units, model.song_end_units)
     for region in layout.regions:
         if region.kind != "marker":
             continue
