@@ -3,7 +3,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from stadium_reaper_bridge.editor.app import MARKER_MANAGER_COLUMNS, ReapcaseEditor
+from stadium_reaper_bridge.editor.app import (GLOBAL_MANAGER_SHORTCUTS,
+                                               MARKER_MANAGER_COLUMNS, ReapcaseEditor)
 from stadium_reaper_bridge.editor.model import EditorModel
 from stadium_reaper_bridge.editor.navigation import (
     adjacent_structure_region_index, marker_flag_manager_rows, marker_region_rows,
@@ -268,35 +269,80 @@ def test_marker_flag_manager_excludes_non_editable_technical_event(tmp_path):
     assert {model.timeline.events[row.indices[0]].source.type for row in rows} == {"MIDI_CC"}
 
 
-def test_both_manager_selections_delegate_to_canonical_jump():
+def test_both_manager_selections_delegate_to_canonical_navigation():
     class Tree:
         def selection(self): return ("row",)
 
-    row = SimpleNamespace(units=960, indices=(7,))
+    row = SimpleNamespace(units=960, indices=(7,), lane="STRUCTURE")
     calls = []
     editor = SimpleNamespace(
         marker_tree=Tree(), _marker_rows={"row": row},
         marker_flag_tree=Tree(), _marker_flag_rows={"row": row},
-        jump_to_units=lambda *args, **kwargs: calls.append((args, kwargs)))
+        navigate_to_event=lambda *args, **kwargs: calls.append((args, kwargs)))
 
     ReapcaseEditor._marker_manager_selected(editor)
     ReapcaseEditor._marker_flag_manager_selected(editor)
-    assert calls == [((960,), {"select_index": 7}), ((960,), {"select_index": 7})]
+    assert calls == [
+        ((960,), {"select_index": 7, "reveal_lane": "STRUCTURE"}),
+        ((960,), {"select_index": 7, "reveal_lane": "STRUCTURE"}),
+    ]
 
 
-def test_shared_jump_updates_cursor_seeks_selects_and_can_defer_reveal(monkeypatch):
+def test_shared_navigation_updates_cursor_seeks_selects_and_can_defer_reveal(monkeypatch):
     model = EditorModel.open(Path("tests/fixtures/perfect_picture_336.json"))
     seeks, redraws = [], []
     editor = SimpleNamespace(
         model=model, audio_engine=SimpleNamespace(seek=seeks.append),
         transport_position=SimpleNamespace(set=lambda _value: None),
-        _follow_suspended_until=0, redraw=lambda: redraws.append(True))
+        _follow_suspended_until=0, _refresh_inspector=lambda: None,
+        request_redraw=lambda reason: redraws.append(reason))
     editor.seek_units = lambda units: ReapcaseEditor.seek_units(editor, units)
-    ReapcaseEditor.jump_to_units(editor, 960, select_index=1, reveal=False)
+    ReapcaseEditor.navigate_to_event(editor, 960, select_index=1, reveal=False)
     assert model._units(model.cursor) == 960
     assert model.selected == {1}
     assert seeks == [model.tempo_map.units_to_seconds(960)]
-    assert redraws == [True]
+    assert redraws == ["event navigation"]
+
+
+def test_rapid_navigation_mutates_final_viewport_before_one_coalesced_redraw():
+    model = EditorModel.open(Path("tests/fixtures/perfect_picture_336.json"))
+    order, idle, painted = [], [], []
+
+    class Canvas:
+        left = 0.0
+        def cget(self, _name): return "0 0 100000 2000"
+        def winfo_width(self): return 1000
+        def canvasx(self, _x): return self.left
+        def xview_moveto(self, fraction):
+            self.left = fraction * 100000
+            order.append(("viewport", self.left))
+
+    editor = SimpleNamespace(
+        model=model, canvas=Canvas(), pixels_per_beat=80.0,
+        audio_engine=SimpleNamespace(seek=lambda _seconds: None),
+        transport_position=SimpleNamespace(set=lambda _value: None),
+        _follow_suspended_until=0, _redraw_idle_id=None,
+        after_idle=lambda callback: idle.append(callback) or "navigation-redraw",
+        winfo_exists=lambda: True,
+        redraw=lambda reason=None: (order.append(("redraw", editor.canvas.left)),
+                                    painted.append(reason)),
+        _update_fixed_headers_for_scroll=lambda _previous: None,
+        _refresh_inspector=lambda: None)
+    editor.seek_units = lambda units: ReapcaseEditor.seek_units(editor, units)
+    editor.request_redraw = lambda reason: ReapcaseEditor.request_redraw(editor, reason)
+
+    targets = [0, 240, 960, 4_000, 8_000, 16_000, 24_000, 32_000, 40_000,
+               model.song_end_units]
+    for units in targets:
+        ReapcaseEditor.navigate_to_event(editor, units)
+
+    assert model._units(model.cursor) == model.song_end_units
+    assert len(idle) == 1
+    assert all(item[0] == "viewport" for item in order)
+    final_left = editor.canvas.left
+    idle.pop()()
+    assert painted == ["event navigation"]
+    assert order[-1] == ("redraw", final_left)
 
 
 class ShortcutWidget:
@@ -332,6 +378,43 @@ def test_global_workflow_shortcuts_ignore_text_inputs_and_dialogs():
     assert ReapcaseEditor._global_editor_shortcut(
         editor, dialog_event, lambda: calls.append("dialog")) is None
     assert calls == []
+
+
+def test_manager_shortcuts_are_centralized_and_work_from_text_and_tree_widgets():
+    assert GLOBAL_MANAGER_SHORTCUTS == (
+        ("<Control-m>", "open_marker_manager"),
+        ("<Control-f>", "open_marker_flag_manager"),
+    )
+    editor = SimpleNamespace()
+    calls = []
+    for widget_class in ("Treeview", "Entry", "Text"):
+        event = SimpleNamespace(widget=ShortcutWidget(widget_class, editor))
+        result = ReapcaseEditor._global_editor_shortcut(
+            editor, event, lambda: calls.append(widget_class), allow_text_input=True)
+        assert result == "break"
+    assert calls == ["Treeview", "Entry", "Text"]
+
+
+def test_manager_openers_expose_and_focus_their_existing_docked_tree():
+    class Variable:
+        def __init__(self): self.value = False
+        def set(self, value): self.value = value
+        def get(self): return self.value
+    class Tree:
+        def __init__(self): self.focuses = 0
+        def focus_set(self): self.focuses += 1
+    structure_tree, flag_tree = Tree(), Tree()
+    layouts = []
+    editor = SimpleNamespace(
+        marker_manager_visible=Variable(), marker_flag_manager_visible=Variable(),
+        marker_tree=structure_tree, marker_flag_tree=flag_tree,
+        marker_manager=object(), marker_flag_manager=object(),
+        apply_sidebar_visibility=lambda: layouts.append(True))
+    assert ReapcaseEditor.open_marker_manager(editor) is editor.marker_manager
+    assert ReapcaseEditor.open_marker_flag_manager(editor) is editor.marker_flag_manager
+    assert editor.marker_manager_visible.get() and editor.marker_flag_manager_visible.get()
+    assert structure_tree.focuses == flag_tree.focuses == 1
+    assert len(layouts) == 2
 
 
 def test_timeline_arrow_shortcuts_delegate_only_from_canvas():
@@ -444,17 +527,16 @@ def test_sidebar_visibility_states_and_stacking():
             assert sidebar.rows[1]["weight"] == 1
 
 
-def test_event_list_navigation_preserves_complete_multi_selection():
+def test_event_list_navigation_makes_activated_event_the_current_selection():
     class Tree:
         def selection(self): return ("2", "5")
 
     navigations = []
     editor = SimpleNamespace(
         model=SimpleNamespace(selected=set()), event_tree=Tree(),
-        _event_rows={"2": SimpleNamespace(units=240, lane="SECOND HELIX"),
-                     "5": SimpleNamespace(units=960, lane="STADIUM")},
-        jump_to_units=lambda units, **kwargs: navigations.append((units, kwargs)),
+            _event_rows={"2": SimpleNamespace(index=2, units=240, lane="SECOND HELIX"),
+                         "5": SimpleNamespace(index=5, units=960, lane="STADIUM")},
+            navigate_to_event=lambda units, **kwargs: navigations.append((units, kwargs)),
         _refresh_inspector=lambda: None)
     ReapcaseEditor._event_list_selected(editor)
-    assert editor.model.selected == {2, 5}
-    assert navigations == [(240, {"reveal": True, "reveal_lane": "SECOND HELIX"})]
+    assert navigations == [(240, {"select_index": 2, "reveal_lane": "SECOND HELIX"})]

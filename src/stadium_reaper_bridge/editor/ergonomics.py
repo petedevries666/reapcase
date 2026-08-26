@@ -39,7 +39,8 @@ def editor_shortcuts_allowed(widget, timeline_widget=None) -> bool:
 
 
 def global_editor_shortcuts_allowed(widget, application,
-                                    *, allow_native_navigation: bool = True) -> bool:
+                                    *, allow_native_navigation: bool = True,
+                                    allow_text_input: bool = False) -> bool:
     """Allow workflow commands throughout the main editor, never in dialogs.
 
     Ctrl-based workflow toggles may run from a Treeview without interfering
@@ -54,7 +55,7 @@ def global_editor_shortcuts_allowed(widget, application,
             return False
     except (AttributeError, TypeError):
         return False
-    if widget_class in _TEXT_INPUT_CLASSES:
+    if widget_class in _TEXT_INPUT_CLASSES and not allow_text_input:
         return False
     if not allow_native_navigation and widget_class in _NATIVE_NAVIGATION_CLASSES:
         return False
