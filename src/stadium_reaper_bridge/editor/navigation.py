@@ -102,6 +102,7 @@ class EventListRow:
     kind: str
     name: str
     details: str
+    role: str
 
 
 def event_list_rows(model) -> tuple[EventListRow, ...]:
@@ -116,8 +117,10 @@ def event_list_rows(model) -> tuple[EventListRow, ...]:
                        f"{event.data.get('time_signature_denominator', '?')}")
         elif kind == "LOOPER":
             details = str(event.data.get("action", "")).upper()
+        lane = model.lane(event)
+        role = "PAUSE" if lane == "STRUCTURE" and is_pause_marker(event) else lane
         rows.append(EventListRow(index, model._units(event.position), event.position.render(),
-                                 model.lane(event), kind, label, details))
+                                 lane, kind, label, details, role))
     return tuple(sorted(rows, key=lambda row: (row.units, row.index)))
 
 
