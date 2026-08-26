@@ -83,14 +83,14 @@ def bind_ghost_methods(editor):
     editor._clear_ghost_waveform = lambda: ReapcaseEditor._clear_ghost_waveform(editor)
 
 
-def test_full_song_ghost_defaults_off_and_resets_for_each_song():
+def test_full_song_ghost_defaults_on_and_reset_preserves_preference():
     source = Path("src/stadium_reaper_bridge/editor/app.py").read_text(encoding="utf-8")
-    assert 'self.full_song_ghost_visible = tk.BooleanVar(value=False)' in source
-    editor = ghost_editor(True)
+    assert 'load_preferences().get("full_song_ghost_visible", True)' in source
+    editor = ghost_editor(False)
     bind_ghost_methods(editor)
     editor._ghost_raster_cache["old"] = object()
     ReapcaseEditor._reset_full_song_ghost(editor)
-    assert not editor.full_song_ghost_visible.get()
+    assert editor.full_song_ghost_visible.get() is False
     assert editor._ghost_raster_cache == {}
 
 
@@ -132,11 +132,15 @@ def test_view_toggle_enables_rendering_and_disabling_clears_artifacts(monkeypatc
     editor.full_song_ghost_visible.set(False)
     redraws = []
     editor.redraw = lambda: redraws.append(True)
+    persisted = []
+    monkeypatch.setattr(editor_app, "update_preferences",
+                        lambda update: (update(data := {}), persisted.append(data)))
     ReapcaseEditor.toggle_full_song_ghost(editor)
     assert editor.canvas.deleted[-1] == "ghost-waveform"
     assert editor._ghost_raster_cache == {}
     assert editor._ghost_waveform_image is None
     assert redraws == [True]
+    assert persisted == [{"full_song_ghost_visible": False}]
 
 
 def test_lane_reorder_swaps_adjacent_visible_lanes_deterministically():

@@ -72,7 +72,7 @@ from .navigation import (ViewState, event_list_rows, jump_viewport_left,
                          normalized_lane_order, visible_lane_layout)
 from .inspector import inspector_projection
 from .display import song_header_metadata
-from .preferences import application_config_path
+from .preferences import application_config_path, load_preferences, update_preferences
 from .song_browser import SongBrowser, initial_song_folder, workspace_for_song
 from .stadium_workspace import (discover_workspace_songs, import_backup, inspect_import,
                                 load_manifest, unique_workspace)
@@ -101,6 +101,10 @@ def _new_waveform_executor():
 UI_AUDIO_POLL_BUDGET_SECONDS = 0.012
 MARKER_MANAGER_COLUMNS = ("kind", "name")
 MARKER_FLAG_FILTER_LANES = ("STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER")
+GLOBAL_MANAGER_SHORTCUTS = (
+    ("<Control-m>", "open_marker_manager"),
+    ("<Control-f>", "open_marker_flag_manager"),
+)
 
 
 class Tooltip:
@@ -162,7 +166,11 @@ class ReapcaseEditor(tk.Tk):
         self.marker_flag_manager_visible = tk.BooleanVar(value=False)
         self.marker_flag_filters = {lane: tk.BooleanVar(value=True)
                                     for lane in MARKER_FLAG_FILTER_LANES}
-        self.full_song_ghost_visible = tk.BooleanVar(value=False)
+        # This is an application presentation preference, not Song data.  A
+        # missing key gets the new visible default; an explicit False remains
+        # authoritative on every subsequent launch and Song load.
+        self.full_song_ghost_visible = tk.BooleanVar(
+            value=bool(load_preferences().get("full_song_ghost_visible", True)))
         self._lane_focus: Optional[str] = None
         self._focus_visibility: Optional[dict[str, bool]] = None
         defaults = default_lane_visibility(LANES + ("AUDIO",))
@@ -474,13 +482,17 @@ class ReapcaseEditor(tk.Tk):
                              variable=self.full_song_ghost_visible,
                              command=self.toggle_full_song_ghost, accelerator="Ctrl+G")
         view.add_command(label="Lane Manager...", command=self.toggle_lane_manager, accelerator="Ctrl+L")
-        view.add_command(label="Track Manager...", command=self.toggle_track_manager, accelerator="Ctrl+M")
+        # Ctrl+M used to be advertised for Track Manager, while the established
+        # Structure Manager command was Ctrl+R.  Structure navigation owns
+        # Ctrl+M now; Track Manager remains available here without a conflicting
+        # accelerator.
+        view.add_command(label="Track Manager...", command=self.toggle_track_manager)
         view.add_checkbutton(label="Structure Manager",
                              variable=self.marker_manager_visible,
-                             command=self.apply_sidebar_visibility, accelerator="Ctrl+R")
+                             command=self.apply_sidebar_visibility, accelerator="Ctrl+M")
         view.add_checkbutton(label="Marker & Flag Manager",
                              variable=self.marker_flag_manager_visible,
-                             command=self.apply_sidebar_visibility)
+                             command=self.apply_sidebar_visibility, accelerator="Ctrl+F")
         view.add_separator()
         view.add_command(label="Zoom Entire Song", command=self.fit_song, accelerator="F")
         view.add_command(label="Zoom to Selection", command=self.fit_selection, accelerator="Shift+F")
@@ -543,7 +555,10 @@ class ReapcaseEditor(tk.Tk):
         self.bind_all("<Control-e>", lambda e: self._global_editor_shortcut(e, self.toggle_inspector))
         self.bind_all("<Control-r>", lambda e: self._global_editor_shortcut(e, self.toggle_marker_manager))
         self.bind_all("<Control-l>", lambda e: self._global_editor_shortcut(e, self.toggle_lane_manager))
-        self.bind_all("<Control-m>", lambda e: self._global_editor_shortcut(e, self.toggle_track_manager))
+        for sequence, method_name in GLOBAL_MANAGER_SHORTCUTS:
+            self.bind_all(sequence, lambda e, name=method_name:
+                          self._global_editor_shortcut(e, getattr(self, name),
+                                                       allow_text_input=True))
         self.bind_all("<Control-g>", lambda e: self._global_editor_shortcut(e, self.toggle_ghost_preference))
         # File commands use the application workflow layer: they are available
         # throughout the main editor, but never consume keys in text inputs or
@@ -670,11 +685,12 @@ class ReapcaseEditor(tk.Tk):
         return "break"
 
     def _global_editor_shortcut(self, event, command, *args,
-                                allow_native_navigation=True):
+                                allow_native_navigation=True, allow_text_input=False):
         """Run workflow commands in the main window, excluding editor inputs."""
         if not global_editor_shortcuts_allowed(
                 getattr(event, "widget", None), self,
-                allow_native_navigation=allow_native_navigation):
+                allow_native_navigation=allow_native_navigation,
+                allow_text_input=allow_text_input):
             return None
         command(*args)
         return "break"
@@ -736,7 +752,15 @@ class ReapcaseEditor(tk.Tk):
         """Show the canonical docked manager (legacy menu/API entry point)."""
         self.marker_manager_visible.set(True)
         self.apply_sidebar_visibility()
+        self.marker_tree.focus_set()
         return self.marker_manager
+
+    def open_marker_flag_manager(self):
+        """Expose and focus the canonical docked Marker & Flag Manager."""
+        self.marker_flag_manager_visible.set(True)
+        self.apply_sidebar_visibility()
+        self.marker_flag_tree.focus_set()
+        return self.marker_flag_manager
 
     def _refresh_marker_manager(self):
         if not hasattr(self, "marker_tree"):
@@ -764,8 +788,9 @@ class ReapcaseEditor(tk.Tk):
         selected = self.marker_tree.selection()
         if selected and selected[0] in self._marker_rows:
             row = self._marker_rows[selected[0]]
-            self.jump_to_units(row.units,
-                               select_index=row.indices[0] if len(row.indices) == 1 else None)
+            self.navigate_to_event(
+                row.units, select_index=row.indices[0] if len(row.indices) == 1 else None,
+                reveal_lane=row.lane)
         return "break"
 
     def _refresh_marker_flag_manager(self):
@@ -789,7 +814,8 @@ class ReapcaseEditor(tk.Tk):
         selected = self.marker_flag_tree.selection()
         if selected and selected[0] in self._marker_flag_rows:
             row = self._marker_flag_rows[selected[0]]
-            self.jump_to_units(row.units, select_index=row.indices[0])
+            self.navigate_to_event(row.units, select_index=row.indices[0],
+                                   reveal_lane=row.lane)
         return "break"
 
     def _refresh_inspector(self):
@@ -833,13 +859,14 @@ class ReapcaseEditor(tk.Tk):
         self._ghost_waveform_image = None
 
     def _reset_full_song_ghost(self):
-        """Restore the lightweight presentation default for a newly loaded Song."""
-        self.full_song_ghost_visible.set(False)
+        """Clear Song-specific rendering while retaining the user preference."""
         self._clear_ghost_waveform()
 
     def toggle_full_song_ghost(self):
-        """Apply the View preference without persisting it in Song data."""
-        if not self.full_song_ghost_visible.get():
+        """Apply and persist the user-local View preference outside Song data."""
+        visible = bool(self.full_song_ghost_visible.get())
+        update_preferences(lambda data: data.update(full_song_ghost_visible=visible))
+        if not visible:
             self._clear_ghost_waveform()
         self.redraw()
 
@@ -986,8 +1013,10 @@ class ReapcaseEditor(tk.Tk):
             self.model.selected = {int(item) for item in selected}
             if selected:
                 row = self._event_rows[selected[0]]
-                self.jump_to_units(row.units, reveal=True, reveal_lane=row.lane)
-            self._refresh_inspector()
+                self.navigate_to_event(row.units, select_index=row.index,
+                                       reveal_lane=row.lane)
+            else:
+                self._refresh_inspector()
 
     def _event_list_edit(self, _event=None):
         selected = self.event_tree.selection()
@@ -997,33 +1026,40 @@ class ReapcaseEditor(tk.Tk):
         selected = self.event_tree.selection()
         if selected and self.model:
             row = self._event_rows[selected[0]]
-            self.jump_to_units(row.units, select_index=row.index, reveal_lane=row.lane)
+            self.navigate_to_event(row.units, select_index=row.index, reveal_lane=row.lane)
         return "break"
 
-    def jump_to_units(self, units, *, select_index=None, reveal=True, reveal_lane=None):
-        """Shared cursor/audio/playhead navigation used by every editor surface."""
+    def navigate_to_event(self, units, *, select_index=None, reveal=True, reveal_lane=None):
+        """Complete, ordered navigation transaction used by every editor surface."""
         if not self.model: return
         if select_index is not None:
             self.model.selected = {select_index}
         self.seek_units(units)
         self._follow_suspended_until = time.monotonic() + .8
-        self.redraw()
-        if not reveal:
-            return
-        region = self.canvas.cget("scrollregion").split()
-        total = float(region[2]) if len(region) == 4 else 1.0
-        left = jump_viewport_left(units, self.model.song.ppqn, self.pixels_per_beat,
-                                  self.canvas.winfo_width())
-        previous = self.canvas.canvasx(0)
-        self.canvas.xview_moveto(left / max(1.0, total))
-        if reveal_lane:
-            layout = visible_lane_layout(self.lane_order, {
-                lane: variable.get() for lane, variable in self.lane_visibility.items()})
-            if reveal_lane in layout.tops:
-                height = max(1.0, float(region[3]) if len(region) == 4 else 1.0)
-                self.canvas.yview_moveto(max(0.0, layout.tops[reveal_lane] - RULER_HEIGHT) / height)
-        self._update_fixed_headers_for_scroll(previous)
+        if reveal:
+            region = self.canvas.cget("scrollregion").split()
+            total = float(region[2]) if len(region) == 4 else 1.0
+            left = jump_viewport_left(units, self.model.song.ppqn, self.pixels_per_beat,
+                                      self.canvas.winfo_width())
+            previous = self.canvas.canvasx(0)
+            self.canvas.xview_moveto(left / max(1.0, total))
+            if reveal_lane:
+                layout = visible_lane_layout(self.lane_order, {
+                    lane: variable.get() for lane, variable in self.lane_visibility.items()})
+                if reveal_lane in layout.tops:
+                    height = max(1.0, float(region[3]) if len(region) == 4 else 1.0)
+                    self.canvas.yview_moveto(
+                        max(0.0, layout.tops[reveal_lane] - RULER_HEIGHT) / height)
+            self._update_fixed_headers_for_scroll(previous)
         self._refresh_inspector()
+        # Tk scroll mutations above are queued before this idle callback.  This
+        # both paints the final viewport and coalesces rapid Treeview selections.
+        self.request_redraw("event navigation")
+
+    def jump_to_units(self, units, *, select_index=None, reveal=True, reveal_lane=None):
+        """Compatibility entry point for callers migrating to navigate_to_event."""
+        return self.navigate_to_event(units, select_index=select_index, reveal=reveal,
+                                      reveal_lane=reveal_lane)
 
     def _manager(self, family, title, build):
         existing = self._manager_windows.get(family)
