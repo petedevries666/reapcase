@@ -127,6 +127,7 @@ class EditorModel:
         self.sequence_selected: set[str] = set()
         self._sequence_edits = 0
         self._load_sequence_layer()
+        self._roadmap_edits = 0
         if resolve_audio_on_init:
             self.resolve_audio()
         if self._normalize_structure_labels():
@@ -319,10 +320,44 @@ class EditorModel:
             raise ValueError("Invalid Reapcase namespace in show sidecar")
         root["analysis"] = config.to_dict()
 
+    def roadmap_metadata(self) -> dict:
+        """Return validated, independent Roadmap settings from the sidecar."""
+        from .roadmap import normalize_roadmap_metadata
+        root = self._show_document.get("reapcase", {})
+        return normalize_roadmap_metadata(root.get("roadmap") if isinstance(root, dict) else None)
+
+    def _set_roadmap_metadata(self, metadata) -> None:
+        from .roadmap import normalize_roadmap_metadata
+        root = self._show_document.setdefault("reapcase", {})
+        if not isinstance(root, dict):
+            raise ValueError("Invalid Reapcase namespace in show sidecar")
+        root["roadmap"] = normalize_roadmap_metadata(metadata)
+
+    def set_roadmap_note(self, measure: int, text: str) -> bool:
+        metadata = self.roadmap_metadata(); notes = dict(metadata["notes"])
+        text = text.strip(); previous = notes.get(str(measure), "")
+        if text == previous:
+            return False
+        if text:
+            notes[str(measure)] = text
+        else:
+            notes.pop(str(measure), None)
+        metadata["notes"] = notes; self._set_roadmap_metadata(metadata)
+        self._roadmap_edits += 1
+        return True
+
+    def set_roadmap_measures_per_row(self, value: int) -> bool:
+        metadata = self.roadmap_metadata()
+        if metadata["measures_per_row"] == value:
+            return False
+        metadata["measures_per_row"] = value; self._set_roadmap_metadata(metadata)
+        self._roadmap_edits += 1
+        return True
+
     @property
     def modified(self) -> bool:
         return (self._created > 0 or self._structural_edits > 0
-                or self._sequence_edits > 0
+                or self._sequence_edits > 0 or self._roadmap_edits > 0
                 or len(self.timeline.events) != len(self._original_positions)
                 or any(e.position != p for e, p in zip(self.timeline.events, self._original_positions)))
 

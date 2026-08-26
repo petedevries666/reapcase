@@ -80,6 +80,8 @@ from .stadium_export import analyze_build, build_package
 from .stadium_implant import (analyze_audio_update, apply_audio_update,
                               implant_package, validate_sd_root)
 from .background_operations import BackgroundOperations
+from .roadmap import build_roadmap_document
+from .roadmap_view import RoadmapView
 
 
 LOG = logging.getLogger(__name__)
@@ -373,6 +375,9 @@ class ReapcaseEditor(tk.Tk):
         self.event_tree.bind("<<TreeviewSelect>>", self._event_list_selected)
         self.event_tree.bind("<Double-Button-1>", self._event_list_go_to)
         self.event_tree.bind("<Return>", self._event_list_go_to)
+        self.roadmap_view = RoadmapView(
+            self.main_content, on_navigate=self._roadmap_navigate,
+            on_edit_note=self._roadmap_edit_note, on_layout=self._roadmap_layout)
         self.right_sidebar = ttk.Frame(self.main_content)
         self.right_sidebar.columnconfigure(0, weight=1)
         self.inspector = ttk.LabelFrame(self.right_sidebar, text="INSPECTOR", padding=10)
@@ -475,6 +480,8 @@ class ReapcaseEditor(tk.Tk):
                              command=lambda: self.switch_view("timeline"), accelerator="Ctrl+1")
         view.add_radiobutton(label="Event List", variable=self.current_view, value="event_list",
                              command=lambda: self.switch_view("event_list"), accelerator="Ctrl+2")
+        view.add_radiobutton(label="Roadmap", variable=self.current_view, value="roadmap",
+                             command=lambda: self.switch_view("roadmap"), accelerator="Ctrl+3")
         view.add_separator()
         view.add_checkbutton(label="Inspector", variable=self.inspector_visible,
                              command=self.apply_inspector_visibility, accelerator="Ctrl+E")
@@ -531,6 +538,7 @@ class ReapcaseEditor(tk.Tk):
         self.configure(menu=bar)
         self.bind_all("<Control-Key-1>", lambda _e: self.switch_view("timeline"))
         self.bind_all("<Control-Key-2>", lambda _e: self.switch_view("event_list"))
+        self.bind_all("<Control-Key-3>", lambda _e: self.switch_view("roadmap"))
         # Timeline navigation remains canvas-only; workflow toggles use the
         # separate main-window policy below.
         self.bind_all("<Control-d>", lambda e: self._editor_shortcut(e, self.duplicate_selected))
@@ -697,15 +705,47 @@ class ReapcaseEditor(tk.Tk):
 
     def switch_view(self, view):
         self.view_state.switch(view); self.current_view.set(view)
+        self.timeline_frame.grid_forget(); self.event_list_frame.grid_forget()
+        self.roadmap_view.grid_forget()
         if view == "timeline":
-            self.event_list_frame.grid_forget(); self.timeline_frame.grid(row=0, column=0, sticky="nsew")
+            self.timeline_frame.grid(row=0, column=0, sticky="nsew")
             if self.model:
                 self.jump_to_units(self.model._units(self.model.cursor))
             else:
                 self.redraw()
-        else:
-            self.timeline_frame.grid_forget(); self.event_list_frame.grid(row=0, column=0, sticky="nsew")
+        elif view == "event_list":
+            self.event_list_frame.grid(row=0, column=0, sticky="nsew")
             self._refresh_event_list()
+        else:
+            self.roadmap_view.grid(row=0, column=0, sticky="nsew")
+            self._refresh_roadmap()
+
+    def _refresh_roadmap(self):
+        if self.model:
+            self.roadmap_view.render(build_roadmap_document(
+                self.model, self.model.roadmap_metadata()))
+
+    def _roadmap_navigate(self, block):
+        if not self.model:
+            return
+        self.model.cursor = block.source_position
+        self.transport_position.set(
+            f"{self.model.timing_map.position_to_seconds(block.source_position):07.3f}   |   "
+            f"{block.source_position.render()}")
+
+    def _roadmap_edit_note(self, block):
+        if not self.model:
+            return
+        measure = block.start_measure
+        current = self.model.roadmap_metadata()["notes"].get(str(measure), "")
+        text = simpledialog.askstring("Roadmap Note", f"Note for measure {measure}:",
+                                      initialvalue=current, parent=self)
+        if text is not None and self.model.set_roadmap_note(measure, text):
+            self._refresh_roadmap()
+
+    def _roadmap_layout(self, value):
+        if self.model and self.model.set_roadmap_measures_per_row(value):
+            self._refresh_roadmap()
 
     def apply_inspector_visibility(self):
         self.apply_sidebar_visibility()
