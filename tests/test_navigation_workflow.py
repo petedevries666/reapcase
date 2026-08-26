@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from stadium_reaper_bridge.editor.app import (GLOBAL_MANAGER_SHORTCUTS,
                                                MARKER_MANAGER_COLUMNS, ReapcaseEditor)
 from stadium_reaper_bridge.editor.model import EditorModel
@@ -283,9 +285,57 @@ def test_both_manager_selections_delegate_to_canonical_navigation():
     ReapcaseEditor._marker_manager_selected(editor)
     ReapcaseEditor._marker_flag_manager_selected(editor)
     assert calls == [
-        ((960,), {"select_index": 7, "reveal_lane": "STRUCTURE"}),
-        ((960,), {"select_index": 7, "reveal_lane": "STRUCTURE"}),
+        ((960,), {"select_index": 7, "vertical": False, "reveal_lane": "STRUCTURE"}),
+        ((960,), {"select_index": 7, "vertical": False, "reveal_lane": "STRUCTURE"}),
     ]
+
+
+@pytest.mark.parametrize("source", ("structure", "marker_flag", "event_list"))
+def test_manager_and_event_list_navigation_preserve_vertical_viewport(source):
+    model = EditorModel.open(Path("tests/fixtures/perfect_picture_336.json"))
+    redraws = []
+
+    class Tree:
+        def selection(self): return ("3",)
+
+    class Canvas:
+        left = 0.0
+        vertical = (0.375, 0.625)
+
+        def cget(self, _name): return "0 0 100000 2000"
+        def winfo_width(self): return 1000
+        def canvasx(self, _x): return self.left
+        def xview_moveto(self, fraction): self.left = fraction * 100000
+        def yview(self): return self.vertical
+        def yview_moveto(self, fraction): self.vertical = (fraction, fraction + .25)
+
+    row = SimpleNamespace(units=8_000, indices=(3,), index=3, lane="SECOND HELIX")
+    editor = SimpleNamespace(
+        model=model, canvas=Canvas(), pixels_per_beat=80.0,
+        audio_engine=SimpleNamespace(seek=lambda _seconds: None),
+        transport_position=SimpleNamespace(set=lambda _value: None),
+        _follow_suspended_until=0, _refresh_inspector=lambda: None,
+        _update_fixed_headers_for_scroll=lambda _previous: None,
+        request_redraw=redraws.append, marker_tree=Tree(), marker_flag_tree=Tree(),
+        event_tree=Tree(), _marker_rows={"3": row},
+        _marker_flag_rows={"3": row}, _event_rows={"3": row})
+    editor.seek_units = lambda units: ReapcaseEditor.seek_units(editor, units)
+    editor.navigate_to_event = lambda units, **kwargs: ReapcaseEditor.navigate_to_event(
+        editor, units, **kwargs)
+
+    vertical_before = editor.canvas.yview()
+    if source == "structure":
+        ReapcaseEditor._marker_manager_selected(editor)
+    elif source == "marker_flag":
+        ReapcaseEditor._marker_flag_manager_selected(editor)
+    else:
+        ReapcaseEditor._event_list_selected(editor)
+
+    assert editor.canvas.left > 0
+    assert editor.canvas.yview() == vertical_before
+    assert model.selected == {3}
+    assert model._units(model.cursor) == 8_000
+    assert redraws == ["event navigation"]
 
 
 def test_shared_navigation_updates_cursor_seeks_selects_and_can_defer_reveal(monkeypatch):
@@ -297,7 +347,7 @@ def test_shared_navigation_updates_cursor_seeks_selects_and_can_defer_reveal(mon
         _follow_suspended_until=0, _refresh_inspector=lambda: None,
         request_redraw=lambda reason: redraws.append(reason))
     editor.seek_units = lambda units: ReapcaseEditor.seek_units(editor, units)
-    ReapcaseEditor.navigate_to_event(editor, 960, select_index=1, reveal=False)
+    ReapcaseEditor.navigate_to_event(editor, 960, select_index=1, horizontal=False)
     assert model._units(model.cursor) == 960
     assert model.selected == {1}
     assert seeks == [model.tempo_map.units_to_seconds(960)]
@@ -539,4 +589,5 @@ def test_event_list_navigation_makes_activated_event_the_current_selection():
             navigate_to_event=lambda units, **kwargs: navigations.append((units, kwargs)),
         _refresh_inspector=lambda: None)
     ReapcaseEditor._event_list_selected(editor)
-    assert navigations == [(240, {"select_index": 2, "reveal_lane": "SECOND HELIX"})]
+    assert navigations == [(240, {"select_index": 2, "vertical": False,
+                                  "reveal_lane": "SECOND HELIX"})]
