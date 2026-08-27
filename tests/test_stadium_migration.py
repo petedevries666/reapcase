@@ -71,6 +71,41 @@ def test_import_build_implant_audio_round_trip(tmp_path):
     assert (sd / "songs/unrelated.txt").read_text() == "keep"
 
 
+@pytest.mark.parametrize("sidecar", (None, {}, {"reapcase": {"analysis": "legacy"}}))
+def test_build_analysis_accepts_native_params_and_optional_sidecars(tmp_path, sidecar):
+    """Exercise the UI's build analyzer with a realistic native Stadium Song."""
+    source = tmp_path / "source.tar.gz"
+    fixture = Path(__file__).parent / "fixtures" / "clocksick_453.json"
+    song_bytes = fixture.read_bytes()
+    make_backup(source, {"showcase/songs/workspace/453.json": song_bytes})
+    workspace = import_backup(source, tmp_path / "work")
+    song = workspace / "showcase/songs/workspace/453.json"
+    document = json.loads(song.read_text(encoding="utf-8"))
+    document["name"] = "CLOCKSICK EDITED"
+    song.write_text(json.dumps(document), encoding="utf-8")
+    if sidecar is not None:
+        song.with_name(song.name + ".reapcase.json").write_text(json.dumps(sidecar))
+
+    plan = analyze_build(workspace)
+
+    change = next(item for item in plan.songs if item.path == "453.json")
+    assert change.status == "CHANGED"
+    assert change.details == ("~ Song metadata changed",)
+
+
+def test_build_analysis_validates_malformed_song_params(tmp_path):
+    source = tmp_path / "source.tar.gz"
+    make_backup(source)
+    workspace = import_backup(source, tmp_path / "work")
+    song = workspace / "showcase/songs/workspace/1.json"
+    document = json.loads(song.read_text())
+    document["params"] = ["not", "a", "supported", "representation"]
+    song.write_text(json.dumps(document))
+
+    with pytest.raises(ValueError, match="Invalid Stadium Song params.*string, object, or null"):
+        analyze_build(workspace)
+
+
 @pytest.mark.parametrize("name", ("../escape", "/absolute"))
 def test_unsafe_archive_paths_rejected(tmp_path, name):
     path = tmp_path / "bad.tar.gz"
