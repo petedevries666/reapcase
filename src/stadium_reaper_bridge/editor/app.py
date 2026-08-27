@@ -73,6 +73,7 @@ from .navigation import (ViewState, event_list_rows, jump_viewport_left,
 from .inspector import inspector_projection
 from .display import song_header_metadata
 from .preferences import application_config_path, load_preferences, update_preferences
+from .transport import resolve_play_start
 from .song_browser import SongBrowser, initial_song_folder, workspace_for_song
 from .stadium_workspace import (discover_workspace_songs, import_backup, inspect_import,
                                 load_manifest, unique_workspace)
@@ -171,8 +172,15 @@ class ReapcaseEditor(tk.Tk):
         # This is an application presentation preference, not Song data.  A
         # missing key gets the new visible default; an explicit False remains
         # authoritative on every subsequent launch and Song load.
+        preferences = load_preferences()
         self.full_song_ghost_visible = tk.BooleanVar(
-            value=bool(load_preferences().get("full_song_ghost_visible", True)))
+            value=bool(preferences.get("full_song_ghost_visible", True)))
+        self.pre_roll_enabled = tk.BooleanVar(
+            value=bool(preferences.get("pre_roll_enabled", False)))
+        measures = preferences.get("pre_roll_measures", 2)
+        self.pre_roll_measures = tk.IntVar(
+            value=measures if measures in (1, 2, 4, 8) else 2)
+        self.pre_roll_target_units: Optional[int] = None
         self._lane_focus: Optional[str] = None
         self._focus_visibility: Optional[dict[str, bool]] = None
         defaults = default_lane_visibility(LANES + ("AUDIO",))
@@ -330,6 +338,14 @@ class ReapcaseEditor(tk.Tk):
         self.stop_button.pack(side="left")
         ttk.Button(transport, text="<○", width=3, command=lambda: self.navigate_region(-1)).pack(side="left", padx=(5, 1))
         ttk.Button(transport, text="○>", width=3, command=lambda: self.navigate_region(1)).pack(side="left")
+        self.pre_roll_toggle = ttk.Checkbutton(
+            transport, text="PRE-ROLL", variable=self.pre_roll_enabled,
+            command=self._persist_pre_roll)
+        self.pre_roll_toggle.pack(side="left", padx=(12, 2))
+        ttk.Combobox(transport, textvariable=self.pre_roll_measures, state="readonly",
+                     width=2, values=(1, 2, 4, 8)).pack(side="left")
+        ttk.Label(transport, text="BARS").pack(side="left", padx=(3, 0))
+        self.pre_roll_measures.trace_add("write", self._persist_pre_roll)
         ttk.Label(transport, textvariable=self.transport_position, font=("TkFixedFont", 10)).pack(side="left", padx=14)
         self.main_content = ttk.Frame(self); self.main_content.pack(fill="both", expand=True)
         frame = ttk.Frame(self.main_content); frame.grid(row=0, column=0, sticky="nsew")
@@ -3599,6 +3615,17 @@ class ReapcaseEditor(tk.Tk):
         self.audio_engine.stop()
         if hasattr(self, "live_midi"): self.live_midi.stop()
         self.redraw()
+
+    def _persist_pre_roll(self, *_args):
+        """Persist rehearsal controls as user-local state, never Song data."""
+        enabled = bool(self.pre_roll_enabled.get())
+        try:
+            measures = int(self.pre_roll_measures.get())
+        except (TypeError, ValueError, tk.TclError):
+            return
+        update_preferences(lambda data: data.update(
+            pre_roll_enabled=enabled, pre_roll_measures=measures))
+
     def play_pause(self):
         if self.loading or not self._audio_ready:
             self.status.set("Audio is still loading…" if not self._audio_error
@@ -3611,10 +3638,37 @@ class ReapcaseEditor(tk.Tk):
                 self.audio_engine.pause()
                 if hasattr(self, "live_midi"): self.live_midi.pause(units)
             else:
-                units = (self.model.tempo_map.seconds_to_units(audible_playback_time(self.audio_engine))
+                requested_units = (self.model.tempo_map.seconds_to_units(audible_playback_time(self.audio_engine))
                          if self.model and self.model.tempo_map else 0)
-                LOG.debug("LIVE PLAY REQUEST requested_position=%s", units)
-                LOG.debug("LIVE PREROLL BEGIN")
+                resuming = self.audio_engine.state is PlaybackState.PAUSED
+                enabled = bool(getattr(self, "pre_roll_enabled", None) and
+                               self.pre_roll_enabled.get())
+                measures_var = getattr(self, "pre_roll_measures", None)
+                measures = int(measures_var.get()) if measures_var else 2
+                timing_map = self.model.tempo_map if self.model else None
+                units = (requested_units if resuming or not timing_map else resolve_play_start(
+                    timing_map, requested_units, pre_roll_enabled=enabled,
+                    pre_roll_measures=measures))
+                self.pre_roll_target_units = requested_units if units != requested_units else None
+                target_position = (timing_map.units_to_position(requested_units).render()
+                                   if timing_map else str(requested_units))
+                effective_position = (timing_map.units_to_position(units).render()
+                                      if timing_map else str(units))
+                LOG.debug("LIVE PLAY REQUEST requested_position=%s pre_roll_enabled=%s "
+                          "pre_roll_measures=%s effective_position=%s resume=%s",
+                          target_position, str(enabled).lower(), measures,
+                          effective_position, str(resuming).lower())
+                if timing_map:
+                    LOG.debug("PRE-ROLL RESOLVE target_units=%s effective_units=%s "
+                              "target_time=%.6f effective_time=%.6f",
+                              requested_units, units,
+                              timing_map.units_to_seconds(requested_units),
+                              timing_map.units_to_seconds(units))
+                if units != requested_units:
+                    # Feed the transformed position into the existing seek/start
+                    # path so audio, MIDI recall, graphics and pause boundaries
+                    # continue to share one canonical clock.
+                    self.seek_units(units)
                 live_midi = getattr(self, "live_midi", None)
                 completions = live_midi.start(units) if live_midi else ()
                 generation = live_midi.generation if live_midi else None

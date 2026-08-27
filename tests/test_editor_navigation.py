@@ -85,7 +85,7 @@ def bind_ghost_methods(editor):
 
 def test_full_song_ghost_defaults_on_and_reset_preserves_preference():
     source = Path("src/stadium_reaper_bridge/editor/app.py").read_text(encoding="utf-8")
-    assert 'load_preferences().get("full_song_ghost_visible", True)' in source
+    assert 'preferences.get("full_song_ghost_visible", True)' in source
     editor = ghost_editor(False)
     bind_ghost_methods(editor)
     editor._ghost_raster_cache["old"] = object()
