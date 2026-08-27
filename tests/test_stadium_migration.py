@@ -151,3 +151,33 @@ def test_missing_wip_file_does_not_delete_source_and_existing_sd_copy_refused(tm
     with pytest.raises(FileExistsError): implant_package(package, sd, workspace)
     assert target.read_bytes() == b"existing"
     with pytest.raises(ValueError): validate_sd_root(tmp_path)
+
+
+def test_cached_audio_analysis_and_streaming_progress(tmp_path):
+    source = tmp_path / "source.tar.gz"; make_backup(source)
+    workspace = import_backup(source, tmp_path / "work")
+    plan = analyze_build(workspace)
+    assert [(item.path, item.status) for item in plan.audio] == [("shared/FULL.wav", "UNCHANGED")]
+    updates = []
+    output = build_package(plan, tmp_path / "built.tar.gz", progress=updates.append)
+    assert output.is_file()
+    assert updates[-1].phase == "Complete" and updates[-1].percent == 100
+    assert [item.processed_bytes for item in updates] == sorted(item.processed_bytes for item in updates)
+    assert not list(tmp_path.glob(".reapcase-build-*"))
+
+
+def test_failed_streaming_build_removes_temporary_output(tmp_path, monkeypatch):
+    source = tmp_path / "source.tar.gz"; make_backup(source)
+    workspace = import_backup(source, tmp_path / "work")
+    plan = analyze_build(workspace)
+    import stadium_reaper_bridge.editor.stadium_export as export
+    original = export.inspect_archive
+    def reject_generated(path, **kwargs):
+        if str(path).endswith(".tmp"):
+            raise StadiumArchiveError("synthetic verification failure")
+        return original(path, **kwargs)
+    monkeypatch.setattr(export, "inspect_archive", reject_generated)
+    output = tmp_path / "failed.tar.gz"
+    with pytest.raises(StadiumArchiveError, match="synthetic"):
+        build_package(plan, output)
+    assert not output.exists() and not output.with_name(".failed.tar.gz.tmp").exists()
