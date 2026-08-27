@@ -92,11 +92,19 @@ def semantic_song_diff(before: Dict[str, Any], after: Dict[str, Any]) -> Tuple[s
         details.append("+ %d flags added" % len(added))
     if removed:
         details.append("- %d flags removed" % len(removed))
-    old_params, new_params = before.get("params", {}), after.get("params", {})
-    for key in sorted(set(old_params) | set(new_params)):
-        if old_params.get(key) != new_params.get(key):
-            label = "tempo" if "tempo" in key.casefold() or "bpm" in key.casefold() else key
-            details.append("~ %s: %s → %s" % (label, old_params.get(key), new_params.get(key)))
+    old_params, new_params = before.get("params"), after.get("params")
+    valid_params = (str, dict, type(None))
+    if not isinstance(old_params, valid_params) or not isinstance(new_params, valid_params):
+        raise ValueError("Invalid Stadium Song params: expected a string, object, or null")
+    if isinstance(old_params, dict) and isinstance(new_params, dict):
+        for key in sorted(set(old_params) | set(new_params)):
+            if old_params.get(key) != new_params.get(key):
+                label = "tempo" if "tempo" in key.casefold() or "bpm" in key.casefold() else key
+                details.append("~ %s: %s → %s" % (label, old_params.get(key), new_params.get(key)))
+    elif old_params != new_params:
+        # Stadium's native/older representation is an opaque semicolon-delimited
+        # string.  Compare it without projecting mapping methods onto it.
+        details.append("~ Song parameters changed")
     if before.get("tracks") != after.get("tracks"):
         details.append("~ audio references changed")
     known = {"flags", "params", "tracks"}
@@ -150,6 +158,8 @@ def analyze_build(workspace: Path) -> BuildPlan:
         if not relative.endswith(".json") or is_reapcase_only(relative):
             continue
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("Invalid Stadium Song %s: expected a JSON object" % relative)
         key = (SONG_ROOT / relative).as_posix()
         old = baseline.get(key)
         songs.append(SongChange(relative, str(data.get("name") or Path(relative).stem),

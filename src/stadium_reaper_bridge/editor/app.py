@@ -97,6 +97,13 @@ def audible_playback_time(engine):
 WAVEFORM_MAX_WORKERS = 2
 
 
+def _present_migration_error(error, error_title, parent=None):
+    """Log a worker's retained traceback before rendering its friendly error."""
+    LOG.exception("Stadium %s", error_title.lower(),
+                  exc_info=(type(error), error, error.__traceback__))
+    messagebox.showerror(error_title, str(error), parent=parent)
+
+
 def _new_waveform_executor():
     """Create the deliberately small analyzer pool."""
     return ThreadPoolExecutor(max_workers=WAVEFORM_MAX_WORKERS,
@@ -1466,7 +1473,7 @@ class ReapcaseEditor(tk.Tk):
                 window.destroy()
             self._migration_window = None
             if result.error is not None:
-                messagebox.showerror(error_title, str(result.error), parent=self)
+                _present_migration_error(result.error, error_title, self)
             else:
                 success(result.value)
         self.after(50, poll)
