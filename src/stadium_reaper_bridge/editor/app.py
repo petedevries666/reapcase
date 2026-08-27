@@ -181,6 +181,11 @@ class ReapcaseEditor(tk.Tk):
         self.pre_roll_measures = tk.IntVar(
             value=measures if measures in (1, 2, 4, 8) else 2)
         self.pre_roll_target_units: Optional[int] = None
+        # Editor-session rehearsal range.  These are canonical musical units,
+        # deliberately independent of the Song, cursor, and canvas geometry.
+        self.time_selection_start_units: Optional[int] = None
+        self.time_selection_end_units: Optional[int] = None
+        self._time_selection_drag: Optional[tuple[str, int]] = None
         self._lane_focus: Optional[str] = None
         self._focus_visibility: Optional[dict[str, bool]] = None
         defaults = default_lane_visibility(LANES + ("AUDIO",))
@@ -422,6 +427,7 @@ class ReapcaseEditor(tk.Tk):
         self.marker_manager.columnconfigure(0, weight=1)
         self._marker_rows = {}
         self.marker_tree.bind("<<TreeviewSelect>>", self._marker_manager_selected)
+        self.marker_tree.bind("<Control-Button-1>", self._marker_manager_ctrl_click)
         ttk.Button(self.marker_manager, text="Jump", command=self._marker_manager_selected).grid(
             row=1, column=0, columnspan=2, pady=(6, 0))
         self.marker_flag_manager = ttk.LabelFrame(
@@ -576,6 +582,8 @@ class ReapcaseEditor(tk.Tk):
         self.bind_all("<Down>", lambda e: self._editor_shortcut(e, self.zoom_step, 1 / 1.25))
         self.bind_all("<space>", lambda e: self._global_editor_shortcut(
             e, self.play_pause, allow_native_navigation=False))
+        self.bind_all("<Escape>", lambda e: self._global_editor_shortcut(
+            e, self.clear_time_selection, allow_native_navigation=False))
         self.bind_all("<Control-e>", lambda e: self._global_editor_shortcut(e, self.toggle_inspector))
         self.bind_all("<Control-r>", lambda e: self._global_editor_shortcut(e, self.toggle_marker_manager))
         self.bind_all("<Control-l>", lambda e: self._global_editor_shortcut(e, self.toggle_lane_manager))
@@ -848,6 +856,56 @@ class ReapcaseEditor(tk.Tk):
                 row.units, select_index=row.indices[0] if len(row.indices) == 1 else None,
                 vertical=False, reveal_lane=row.lane)
         return "break"
+
+    def _marker_manager_ctrl_click(self, event):
+        """Turn actual REGION rows into a continuous rehearsal range."""
+        item = self.marker_tree.identify_row(event.y)
+        row = self._marker_rows.get(item)
+        if not row or row.kind != "REGION" or row.end_units is None:
+            return "break"
+        if self.has_time_selection():
+            self.extend_time_selection(row.units, row.end_units)
+        else:
+            self.set_time_selection(row.units, row.end_units)
+        # Reveal horizontally without the vertical scrolling performed by
+        # ordinary manager navigation.
+        self.jump_to_units(row.units, vertical=False)
+        self.redraw("structure manager time selection")
+        return "break"
+
+    def set_time_selection(self, start_units, end_units):
+        """Set an ordered, non-empty editor-session range in musical units."""
+        start, end = sorted((max(0, int(start_units)), max(0, int(end_units))))
+        if start == end:
+            return False
+        self.time_selection_start_units = start
+        self.time_selection_end_units = end
+        return True
+
+    def extend_time_selection(self, start_units, end_units):
+        if not ReapcaseEditor.has_time_selection(self):
+            return ReapcaseEditor.set_time_selection(self, start_units, end_units)
+        return ReapcaseEditor.set_time_selection(self,
+            min(self.time_selection_start_units, int(start_units)),
+            max(self.time_selection_end_units, int(end_units)))
+
+    def clear_time_selection(self):
+        if not ReapcaseEditor.has_time_selection(self):
+            return False
+        self.time_selection_start_units = None
+        self.time_selection_end_units = None
+        self._time_selection_drag = None
+        self.redraw("clear time selection")
+        return True
+
+    def has_time_selection(self):
+        start = getattr(self, "time_selection_start_units", None)
+        end = getattr(self, "time_selection_end_units", None)
+        return start is not None and end is not None and start < end
+
+    def time_selection_range(self):
+        return ((self.time_selection_start_units, self.time_selection_end_units)
+                if ReapcaseEditor.has_time_selection(self) else None)
 
     def _refresh_marker_flag_manager(self):
         if not hasattr(self, "marker_flag_tree"):
@@ -2761,6 +2819,7 @@ class ReapcaseEditor(tk.Tk):
                                          outline=TIMELINE.marquee_outline, width=2, tags=("marquee",))
         if self.drag_preview:
             self._draw_drag_preview(self.drag_preview)
+        self._draw_time_selection(height)
         if m.tempo_map:
             play_units = m.tempo_map.seconds_to_units(audible_playback_time(self.audio_engine))
             play_x = timeline_x(play_units, m.song.ppqn, self.pixels_per_beat)
@@ -2901,6 +2960,24 @@ class ReapcaseEditor(tk.Tk):
         tags = self.canvas.gettags("current")
         return next((int(t.split(':')[1]) for t in tags if t.startswith("event:")), None)
 
+    def _draw_time_selection(self, height):
+        """Rebuild the complete range layer from canonical units each paint."""
+        if not self.model or not self.has_time_selection():
+            return
+        start, end = self.time_selection_range()
+        x1 = timeline_x(start, self.model.song.ppqn, self.pixels_per_beat)
+        x2 = timeline_x(end, self.model.song.ppqn, self.pixels_per_beat)
+        # Tk stipple provides a transparent-looking wash without hiding events
+        # or waveforms.  Strong edges and ruler handles carry the precision.
+        self.canvas.create_rectangle(x1, RULER_HEIGHT, x2, height,
+            fill="#52708a", stipple="gray50", outline="", tags=("time-selection",))
+        for x, side in ((x1, "start"), (x2, "end")):
+            self.canvas.create_line(x, 0, x, height, fill="#74c7ec", width=3,
+                                    tags=("time-selection", f"time-{side}"))
+            self.canvas.create_polygon(x - 7, 1, x + 7, 1, x, 12,
+                fill="#74c7ec", outline="#d7f3ff",
+                tags=("time-selection", f"time-{side}"))
+
     def _marquee_hits(self):
         if not self.marquee_anchor or not self.marquee_point:
             return set()
@@ -2969,8 +3046,16 @@ class ReapcaseEditor(tk.Tk):
             self.redraw(); return
         if (self.canvas.canvasy(event.y) < RULER_HEIGHT and
                 event.x >= HEADER_WIDTH):
-            self.playhead_drag = True
-            self.seek_units(units); self._move_playhead_item(); return
+            side = "anchor"
+            if self.has_time_selection():
+                sx = timeline_x(self.time_selection_start_units, self.model.song.ppqn,
+                                self.pixels_per_beat)
+                ex = timeline_x(self.time_selection_end_units, self.model.song.ppqn,
+                                self.pixels_per_beat)
+                if abs(x - sx) <= 9: side = "start"
+                elif abs(x - ex) <= 9: side = "end"
+            self._time_selection_drag = (side, units)
+            return
         if index is not None:
             sources = self.semantic_sources.get(index, (index,))
             if len(sources) > 1 and not event.state & 0x4:
@@ -2994,7 +3079,13 @@ class ReapcaseEditor(tk.Tk):
             return
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         over_ruler = y < RULER_HEIGHT and event.x >= HEADER_WIDTH
-        self.canvas.configure(cursor="crosshair" if over_ruler else "")
+        cursor = "crosshair" if over_ruler else ""
+        if over_ruler and self.has_time_selection():
+            for boundary in self.time_selection_range():
+                if abs(x - timeline_x(boundary, self.model.song.ppqn,
+                                      self.pixels_per_beat)) <= 9:
+                    cursor = "sb_h_double_arrow"
+        self.canvas.configure(cursor=cursor)
         if over_ruler:
             units_at_x(x, self.model.song.ppqn, self.pixels_per_beat)
 
@@ -3005,6 +3096,17 @@ class ReapcaseEditor(tk.Tk):
             return
         if not self.model:
             return
+        if (self.canvas.canvasy(event.y) < RULER_HEIGHT and
+                event.x >= HEADER_WIDTH and self.has_time_selection()):
+            units = units_at_x(self.canvas.canvasx(event.x), self.model.song.ppqn,
+                               self.pixels_per_beat)
+            if self.time_selection_start_units <= units <= self.time_selection_end_units:
+                menu = tk.Menu(self, tearoff=False)
+                menu.add_command(label="Remove Time Selection",
+                                 command=self.clear_time_selection)
+                try: menu.tk_popup(event.x_root, event.y_root)
+                finally: menu.grab_release()
+                return
         tags = self.canvas.gettags("current")
         instruction = next((tag.split(":", 1)[1] for tag in tags
                             if tag.startswith("seqinstruction:")), None)
@@ -3360,6 +3462,19 @@ class ReapcaseEditor(tk.Tk):
         if self.app_mode.get() == "LIVE": return
         if not self.model:
             return
+        if self._time_selection_drag:
+            side, anchor = self._time_selection_drag
+            units = snapped_units_at_x(self.canvas.canvasx(event.x), self.model.song.ppqn,
+                self.pixels_per_beat, self.grid_choice.get(), self.model.numerator,
+                self.model.timing_map)
+            if side == "start":
+                self.set_time_selection(units, self.time_selection_end_units)
+            elif side == "end":
+                self.set_time_selection(self.time_selection_start_units, units)
+            else:
+                self.set_time_selection(anchor, units)
+            self.redraw("time selection drag")
+            return
         if self.playhead_drag:
             units = snapped_units_at_x(self.canvas.canvasx(event.x), self.model.song.ppqn,
                                        self.pixels_per_beat, self.grid_choice.get(),
@@ -3406,6 +3521,23 @@ class ReapcaseEditor(tk.Tk):
     def drop(self, event):
         if self.app_mode.get() == "LIVE": return
         if not self.model: return
+        if self._time_selection_drag:
+            side, anchor = self._time_selection_drag
+            self._time_selection_drag = None
+            units = snapped_units_at_x(self.canvas.canvasx(event.x), self.model.song.ppqn,
+                self.pixels_per_beat, self.grid_choice.get(), self.model.numerator,
+                self.model.timing_map)
+            if side == "anchor" and units == anchor:
+                # Preserve the old ruler click-to-seek behavior.
+                self.seek_units(units)
+            elif side == "start":
+                self.set_time_selection(units, self.time_selection_end_units)
+            elif side == "end":
+                self.set_time_selection(self.time_selection_start_units, units)
+            else:
+                self.set_time_selection(anchor, units)
+            self.redraw("commit time selection")
+            return
         if self.playhead_drag:
             self.playhead_drag = False
             return
@@ -3640,7 +3772,11 @@ class ReapcaseEditor(tk.Tk):
             else:
                 requested_units = (self.model.tempo_map.seconds_to_units(audible_playback_time(self.audio_engine))
                          if self.model and self.model.tempo_map else 0)
+                current_units = requested_units
                 resuming = self.audio_engine.state is PlaybackState.PAUSED
+                selection = ReapcaseEditor.time_selection_range(self)
+                if selection and not resuming:
+                    requested_units = selection[0]
                 enabled = bool(getattr(self, "pre_roll_enabled", None) and
                                self.pre_roll_enabled.get())
                 measures_var = getattr(self, "pre_roll_measures", None)
@@ -3664,7 +3800,7 @@ class ReapcaseEditor(tk.Tk):
                               requested_units, units,
                               timing_map.units_to_seconds(requested_units),
                               timing_map.units_to_seconds(units))
-                if units != requested_units:
+                if units != current_units:
                     # Feed the transformed position into the existing seek/start
                     # path so audio, MIDI recall, graphics and pause boundaries
                     # continue to share one canonical clock.
@@ -3677,6 +3813,9 @@ class ReapcaseEditor(tk.Tk):
                             (generation != live_midi.generation or not live_midi.playing)):
                         return
                     pause_units = live_midi.next_pause_units if live_midi else None
+                    if selection:
+                        pause_units = (selection[1] if pause_units is None else
+                                       min(pause_units, selection[1]))
                     pause_seconds = (self.model.tempo_map.units_to_seconds(pause_units)
                                      if pause_units is not None else None)
                     if hasattr(self.audio_engine, "pause_at"):

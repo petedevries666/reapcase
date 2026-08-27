@@ -47,13 +47,14 @@ class Engine:
         self.current_time = timing_map().units_to_seconds(position)
         self.seeks = []
         self.plays = 0
+        self.pause_boundary = None
 
     def seek(self, seconds):
         self.current_time = seconds
         self.seeks.append(seconds)
 
     def play(self): self.plays += 1
-    def pause_at(self, _seconds): pass
+    def pause_at(self, seconds): self.pause_boundary = seconds
 
 
 class Midi:
@@ -82,6 +83,7 @@ def editor(state=PlaybackState.STOPPED):
         transport_position=Variable(""),
         live_midi=Midi(), pre_roll_enabled=Variable(True),
         pre_roll_measures=Variable(2), pre_roll_target_units=None,
+        time_selection_start_units=None, time_selection_end_units=None,
         seek_units=lambda start: ReapcaseEditor.seek_units(app, start))
 
 
@@ -102,6 +104,19 @@ def test_pause_resume_does_not_apply_pre_roll_again():
     ReapcaseEditor.play_pause(app)
     assert app.audio_engine.seeks == []
     assert app.live_midi.starts == [units(65)]
+
+
+def test_time_selection_is_requested_target_and_end_is_pause_boundary():
+    global app
+    app = editor()
+    app.time_selection_start_units = units(40)
+    app.time_selection_end_units = units(48)
+    original = (app.time_selection_start_units, app.time_selection_end_units)
+    ReapcaseEditor.play_pause(app)
+    assert app.live_midi.starts == [units(38)]
+    assert app.audio_engine.seeks == [timing_map().units_to_seconds(units(38))]
+    assert app.audio_engine.pause_boundary == timing_map().units_to_seconds(units(48))
+    assert (app.time_selection_start_units, app.time_selection_end_units) == original
 
 
 def test_effective_start_reuses_midi_recall_and_does_not_recall_actions():

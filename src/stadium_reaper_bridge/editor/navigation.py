@@ -133,6 +133,7 @@ class MarkerRegionRow:
     name: str
     end: str = ""
     lane: str = "STRUCTURE"
+    end_units: Optional[int] = None
 
 
 def structure_manager_rows(model) -> tuple[MarkerRegionRow, ...]:
@@ -164,7 +165,8 @@ def structure_manager_rows(model) -> tuple[MarkerRegionRow, ...]:
         rows.append(MarkerRegionRow(
             region.source_event_indices, region.start_units, event.position.render(),
             "REGION", region.label,
-            f"→ {model._position(region.end_units).render()}", "STRUCTURE"))
+            f"→ {model._position(region.end_units).render()}", "STRUCTURE",
+            region.end_units))
     return tuple(sorted(rows, key=lambda row: (row.units, row.kind == "REGION")))
 
 
