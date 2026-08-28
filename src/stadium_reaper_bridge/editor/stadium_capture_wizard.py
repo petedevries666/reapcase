@@ -2,22 +2,37 @@
 
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
 from pathlib import Path
+from threading import Event
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from ..stadium_network.experiment import inspect_research_wav
+from .background_operations import BackgroundOperations
+
+
+def start_research_wav_inspection(operations, path: Path, cancel: Event) -> bool:
+    """Queue research-only WAV hashing without performing work on the Tk thread."""
+    return operations.start(
+        "research-wav", lambda: inspect_research_wav(Path(path), cancel))
 
 
 class StadiumCaptureWizard(tk.Toplevel):
     """One-action-at-a-time wizard that records externally observed events."""
 
-    def __init__(self, parent, session, selected_address="", on_marker=None):
+    def __init__(self, parent, session, selected_address="", on_marker=None,
+                 research_root=None, operations=None):
         super().__init__(parent)
         self.session = session
         self.selected_address = selected_address.strip()
         self.on_marker = on_marker or (lambda marker: None)
         self.experiment = None
+        self.research_root = Path(research_root or Path.home() / "Reapcase")
+        self._operations = operations or BackgroundOperations("stadium-wav-inspection")
+        self._inspection_cancel = Event()
+        self._poll_job = None
+        self._abort_step = "SESSION START"
         self._countdown_job = None
         self.title("Helix Stadium Network Research Session")
         self.geometry("600x480")
@@ -35,6 +50,7 @@ class StadiumCaptureWizard(tk.Toplevel):
             child.destroy()
 
     def _page(self, heading, body, buttons, accent=False):
+        self._abort_step = heading
         self._clear()
         ttk.Label(self._frame, text=heading, font=("TkDefaultFont", 16, "bold"),
                   foreground="#b42318" if accent else "").pack(anchor="w", pady=(0, 18))
@@ -57,11 +73,12 @@ class StadiumCaptureWizard(tk.Toplevel):
                    "• Helix Stadium connected to Wi-Fi/LAN\n• official Stadium application\n"
                    "• computer on the same network\n• Wireshark or another packet capture tool\n"
                    "• one small WAV test file",
-                   [("Start Session", self._parameters), ("Cancel", self.destroy)])
+                   [("Start Session", self._parameters), ("Cancel", self._cancel)])
 
     def _parameters(self):
         self.experiment = self.session.start_official_create_song_experiment()
         self._mark("SESSION_STARTED")
+        self._abort_step = "EXPERIMENT PARAMETERS"
         self._clear()
         ttk.Label(self._frame, text="EXPERIMENT PARAMETERS", font=("TkDefaultFont", 16, "bold")).pack(anchor="w")
         form = ttk.Frame(self._frame); form.pack(fill="x", pady=18)
@@ -87,12 +104,27 @@ class StadiumCaptureWizard(tk.Toplevel):
                                           filetypes=(("WAV audio", "*.wav"),))
         if not path:
             return
-        try:
-            audio = inspect_research_wav(Path(path))
-        except (OSError, wave.Error) as exc:  # wave is imported below for Python 3.9 clarity
-            messagebox.showerror("Cannot read WAV", str(exc), parent=self); return
-        self.experiment.audio = [audio]
         self.wav.set(path)
+        self.experiment.audio = []
+        self._inspection_cancel.clear()
+        if start_research_wav_inspection(
+                self._operations, Path(path), self._inspection_cancel):
+            self.wav_info.set("Inspecting and hashing WAV… You may cancel the session at any time.")
+            self._poll_inspection()
+
+    def _poll_inspection(self):
+        result = self._operations.poll()
+        if result is None:
+            self._poll_job = self.after(50, self._poll_inspection)
+            return
+        self._poll_job = None
+        if result.error:
+            if not isinstance(result.error, CancelledError):
+                messagebox.showerror("Cannot read WAV", str(result.error), parent=self)
+            self.wav_info.set("Choose one small WAV test file.")
+            return
+        audio = result.value
+        self.experiment.audio = [audio]
         self.wav_info.set(f"{audio.filename} — {audio.size:,} bytes — {audio.duration:.2f}s — "
                           f"{audio.sample_rate} Hz — {audio.channels} channel(s)\nSHA-256: {audio.sha256}")
 
@@ -242,7 +274,7 @@ class StadiumCaptureWizard(tk.Toplevel):
 
     def _finish(self, folder):
         self._page("RESEARCH SESSION COMPLETE", f"Session saved to:\n{folder}\n\nThe capture was referenced, not copied. Reapcase sent no commands to Stadium.",
-                   [("Finish", self.destroy), ("Run Comparison Test…", self._comparison)])
+                   [("Finish", self._close), ("Run Comparison Test…", self._comparison)])
 
     def _comparison(self):
         old = self.experiment
@@ -254,9 +286,24 @@ class StadiumCaptureWizard(tk.Toplevel):
 
     def _cancel(self):
         if self.experiment:
-            self._mark("SESSION_CANCELLED"); self.experiment.finish()
+            self._inspection_cancel.set()
+            if hasattr(self, "song"):
+                self.experiment.song_name = self.song.get().strip() or self.experiment.song_name
+                try:
+                    self.experiment.tempo = int(self.tempo.get())
+                except ValueError:
+                    pass
+            self._mark("SESSION_CANCELLED", abort_step=self._abort_step)
+            self.experiment.abort(self._abort_step)
+            try:
+                self.experiment.persist_partial(self.research_root)
+            except OSError as exc:
+                messagebox.showerror("Cannot save aborted session", str(exc), parent=self)
+        if self._poll_job:
+            self.after_cancel(self._poll_job)
+            self._poll_job = None
+        self._close()
+
+    def _close(self):
+        self._operations.close()
         self.destroy()
-
-
-# ``wave.Error`` is intentionally caught only around user-selected research WAVs.
-import wave

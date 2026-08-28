@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import time
@@ -35,7 +37,7 @@ class ResearchAudio:
     sha256: str
 
 
-def inspect_research_wav(path: Path) -> ResearchAudio:
+def inspect_research_wav(path: Path, cancel=None) -> ResearchAudio:
     """Read cheap WAV metadata and hash a user-selected research asset only."""
     path = Path(path)
     with wave.open(str(path), "rb") as source:
@@ -45,6 +47,8 @@ def inspect_research_wav(path: Path) -> ResearchAudio:
     digest = hashlib.sha256()
     with path.open("rb") as source:
         for block in iter(lambda: source.read(1024 * 1024), b""):
+            if cancel is not None and cancel.is_set():
+                raise CancelledError("research WAV inspection cancelled")
             digest.update(block)
     return ResearchAudio(path.name, path.stat().st_size, duration, rate, channels,
                          digest.hexdigest())
@@ -73,6 +77,8 @@ class ResearchExperiment:
         self.target: Optional[dict] = None
         self.capture: Optional[dict] = None
         self.user_observed_operation_duration: Optional[float] = None
+        self.abort_step: Optional[str] = None
+        self.aborted_at: Optional[datetime] = None
 
     def mark(self, name: str, **details) -> ExperimentMarker:
         marker = ExperimentMarker(name, self._clock(),
@@ -90,6 +96,13 @@ class ResearchExperiment:
     def finish(self) -> None:
         self.completed_at = self._clock()
 
+    def abort(self, step: str) -> None:
+        """Retain a user-aborted experiment as a complete partial diagnostic."""
+        self.result = "ABORTED"
+        self.abort_step = step
+        self.aborted_at = self._clock()
+        self.completed_at = self.aborted_at
+
     def diagnostic(self) -> dict:
         verification = {"result": self.result, "note": self.notes}
         return json_value({
@@ -98,7 +111,8 @@ class ResearchExperiment:
                         "experiment_type": self.experiment_type,
                         "started_at": self.started_at, "completed_at": self.completed_at,
                         "result": self.result, "reapcase_version": self.reapcase_version,
-                        "platform": platform.system()},
+                        "platform": platform.system(), "abort_step": self.abort_step,
+                        "aborted_at": self.aborted_at},
             "target": self.target,
             "experiment": {"operation": self.experiment_type,
                            "song": {"name": self.song_name, "tempo": self.tempo},
@@ -109,11 +123,10 @@ class ResearchExperiment:
             "stadium_verification": verification,
         })
 
-    def export_folder(self, parent: Path) -> Path:
+    def export_folder(self, parent: Path, exist_ok: bool = False) -> Path:
         folder = Path(parent) / "StadiumNetworkResearch" / self.session_id
-        folder.mkdir(parents=True, exist_ok=False)
-        (folder / "session.json").write_text(
-            json.dumps(self.diagnostic(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        folder.mkdir(parents=True, exist_ok=exist_ok)
+        self._write_session_json(folder / "session.json")
         trigger = next((m for m in self.markers if m.name == "CREATE_SONG_TRIGGER"), None)
         audio = ", ".join(item.filename for item in self.audio) or "None"
         capture = self.capture["external_path"] if self.capture else "Not associated"
@@ -128,3 +141,13 @@ class ResearchExperiment:
                   "Reapcase did not send commands to Stadium.\n")
         (folder / "README.txt").write_text(readme, encoding="utf-8")
         return folder
+
+    def persist_partial(self, parent: Path) -> Path:
+        """Atomically create or refresh a Reapcase-owned partial session."""
+        return self.export_folder(parent, exist_ok=True)
+
+    def _write_session_json(self, path: Path) -> None:
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(self.diagnostic(), indent=2, sort_keys=True) + "\n",
+                             encoding="utf-8")
+        os.replace(str(temporary), str(path))
