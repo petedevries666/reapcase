@@ -83,6 +83,7 @@ from .stadium_implant import (analyze_audio_update, apply_audio_update,
 from .background_operations import BackgroundOperations
 from .roadmap import build_roadmap_document
 from .roadmap_view import RoadmapView
+from .stadium_network_window import StadiumNetworkWindow
 
 
 LOG = logging.getLogger(__name__)
@@ -465,6 +466,10 @@ class ReapcaseEditor(tk.Tk):
         self._update_zoom_label()
         ttk.Label(self, textvariable=self.status, style="Status.TLabel", anchor="w", padding=5).pack(fill="x")
 
+    def open_stadium_network(self):
+        """Open the isolated observation lab without changing editor state."""
+        StadiumNetworkWindow(self)
+
     def _build_menu(self):
         bar = tk.Menu(self)
         file_menu = tk.Menu(bar, tearoff=False, postcommand=self._refresh_file_menu_state)
@@ -536,6 +541,9 @@ class ReapcaseEditor(tk.Tk):
         bar.add_cascade(label="View", menu=view)
         tools = tk.Menu(bar, tearoff=False)
         tools.add_command(label="Analyze Song", command=self.analyze_song)
+        tools.add_separator()
+        tools.add_command(label="Stadium Network... (EXPERIMENTAL)",
+                          command=self.open_stadium_network)
         bar.add_cascade(label="Tools", menu=tools)
         self.midi_menu = tk.Menu(bar, tearoff=False,
                                  postcommand=self._refresh_midi_menu_labels)
