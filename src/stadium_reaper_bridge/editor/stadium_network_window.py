@@ -12,6 +12,7 @@ from ..stadium_network.probe import SafeProbe, validate_address
 from ..stadium_network.models import Confidence, ProtocolObservation
 from ..stadium_network.session import NetworkResearchSession
 from .background_operations import BackgroundOperations
+from .stadium_capture_wizard import StadiumCaptureWizard
 
 
 class StadiumNetworkWindow(tk.Toplevel):
@@ -45,6 +46,10 @@ class StadiumNetworkWindow(tk.Toplevel):
         ttk.Entry(connection, textvariable=self.address, width=38).grid(row=2, column=1, padx=6, sticky="ew")
         ttk.Button(connection, text="Probe", command=self._probe).grid(row=2, column=2)
         connection.columnconfigure(1, weight=1)
+        research = ttk.LabelFrame(outer, text="Research — EXPERIMENTAL / OBSERVATION ONLY", padding=8)
+        research.pack(fill="x", pady=(8, 0))
+        ttk.Button(research, text="Guided Official App Capture…",
+                   command=self._guided_capture).pack(anchor="w")
         devices = ttk.LabelFrame(outer, text="Observed Devices (select to include in diagnostic)", padding=8)
         devices.pack(fill="both", expand=True, pady=8)
         self.tree = ttk.Treeview(devices, columns=("name", "address", "services"), show="headings", height=7)
@@ -120,6 +125,10 @@ class StadiumNetworkWindow(tk.Toplevel):
         except ValueError:
             return
         self._append(f"MARK: {marker.annotation}", marker.timestamp); self.marker.set("")
+
+    def _guided_capture(self):
+        StadiumCaptureWizard(self, self.session, self.address.get(),
+                             lambda marker: self._append(f"EXPERIMENT: {marker.name}", marker.timestamp))
 
     def _export(self):
         path = filedialog.asksaveasfilename(parent=self, title="Export Network Diagnostic",
