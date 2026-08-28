@@ -10,6 +10,7 @@ from typing import Callable, Dict, List, Optional
 
 from .models import (DiscoveredDevice, NetworkMarker, ProtocolObservation,
                      StadiumEndpoint, json_value, utc_now)
+from .experiment import ResearchExperiment
 
 LOG = logging.getLogger(__name__)
 
@@ -23,6 +24,15 @@ class NetworkResearchSession:
         self.explicit_addresses = set()
         self.observations: List[ProtocolObservation] = []
         self.markers: List[NetworkMarker] = []
+        self.experiments: List[ResearchExperiment] = []
+
+    def start_official_create_song_experiment(self, monotonic=None) -> ResearchExperiment:
+        kwargs = {"clock": self._clock}
+        if monotonic is not None:
+            kwargs["monotonic"] = monotonic
+        experiment = ResearchExperiment(self.version, **kwargs)
+        self.experiments.append(experiment)
+        return experiment
 
     def record_discovery(self, device: DiscoveredDevice) -> None:
         if device.address in self.devices:
