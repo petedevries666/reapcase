@@ -1,0 +1,44 @@
+{
+  "reapcase": {
+    "version": 1,
+    "lights": [],
+    "sequence": {
+      "version": 1,
+      "click_mutes": [],
+      "instructions": [
+        {
+          "id": "count_3_1",
+          "position": "003-01.001",
+          "label": "ONE",
+          "muted": false,
+          "origin": "generated_count",
+          "sample_id": "one"
+        },
+        {
+          "id": "count_3_2",
+          "position": "003-02.001",
+          "label": "TWO",
+          "muted": false,
+          "origin": "generated_count",
+          "sample_id": "two"
+        },
+        {
+          "id": "count_3_3",
+          "position": "003-03.001",
+          "label": "THREE",
+          "muted": false,
+          "origin": "generated_count",
+          "sample_id": "three"
+        },
+        {
+          "id": "count_3_4",
+          "position": "003-04.001",
+          "label": "FOUR",
+          "muted": false,
+          "origin": "generated_count",
+          "sample_id": "four"
+        }
+      ]
+    }
+  }
+}
