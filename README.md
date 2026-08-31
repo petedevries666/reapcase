@@ -345,6 +345,10 @@ Installation du projet et de l'audio desktop :
 python -m pip install -e '.[desktop-audio]'
 ```
 
+```bash
+python -c "import sounddevice, numpy; print('sounddevice', sounddevice.__version__); print('numpy', numpy.__version__)"
+```
+
 Tests :
 
 ```bash
