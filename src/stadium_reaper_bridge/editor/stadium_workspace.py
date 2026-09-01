@@ -124,11 +124,21 @@ def import_backup(archive: Path, parent: Path, *, destination: Optional[Path] = 
         else:
             reference = archive
         safe_extract(reference, temp_workspace)
+        cache_files = {}
+        for item in temp_workspace.rglob("*"):
+            if item.is_file():
+                stat = item.stat()
+                cache_files[item.relative_to(temp_workspace).as_posix()] = {
+                    "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                }
         manifest = {
             "version": 1, "workspace_type": "stadium_backup",
             "source_backup": "../" + archive.name,
             "imported_at": datetime.now(timezone.utc).isoformat(),
             "last_built_package": None, "last_implanted_package": None,
+            # Disposable provenance cache.  It is outside the native payload;
+            # deleting it only makes change classification conservative.
+            "build_cache": {"version": 1, "files": cache_files},
         }
         (temp_workspace / MANIFEST_NAME).write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")

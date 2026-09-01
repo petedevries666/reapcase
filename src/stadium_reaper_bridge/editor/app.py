@@ -1446,7 +1446,7 @@ class ReapcaseEditor(tk.Tk):
         self.midi_router.close()
         self.destroy()
 
-    def _run_migration(self, name, phase, function, success, error_title):
+    def _run_migration(self, name, phase, function, success, error_title, progress_queue=None):
         """Run migration I/O on the dedicated worker and dispatch results on Tk."""
         if self._migration_operations.active:
             messagebox.showinfo("Migration already in progress",
@@ -1456,8 +1456,11 @@ class ReapcaseEditor(tk.Tk):
         self._migration_window = window
         window.title("Stadium operation")
         window.resizable(False, False)
-        ttk.Label(window, text=phase, padding=(22, 18, 22, 8)).pack(fill="x")
-        progress = ttk.Progressbar(window, mode="indeterminate", length=380)
+        phase_label = ttk.Label(window, text=phase, padding=(22, 18, 22, 8))
+        phase_label.pack(fill="x")
+        progress = ttk.Progressbar(window,
+                                   mode="determinate" if progress_queue else "indeterminate",
+                                   length=380, maximum=100)
         progress.pack(padx=22, pady=(4, 18)); progress.start(12)
         ttk.Label(window, text="This stage will finish at a safe boundary. Closing is disabled.",
                   padding=(22, 0, 22, 16)).pack(fill="x")
@@ -1470,6 +1473,18 @@ class ReapcaseEditor(tk.Tk):
         def poll():
             if self._migration_operations.closed or not self.winfo_exists():
                 return
+            if progress_queue is not None:
+                latest = None
+                try:
+                    while True: latest = progress_queue.get_nowait()
+                except Empty:
+                    pass
+                if latest is not None:
+                    detail = (" — %s" % Path(latest.current_file).name
+                              if latest.current_file else "")
+                    phase_label.configure(text="%s%s — %d%%" %
+                                          (latest.phase, detail, latest.percent))
+                    progress.configure(value=latest.percent)
             result = self._migration_operations.poll()
             if result is None:
                 self.after(50, poll)
@@ -1565,8 +1580,10 @@ class ReapcaseEditor(tk.Tk):
         ttk.Button(buttons, text="Cancel", command=window.destroy).pack(side="right", padx=(8, 0))
         def confirm():
             window.destroy()
+            updates = Queue()
             self._run_migration("build", "Building and verifying package...",
-                                lambda: build_package(plan), self._build_complete, "Build failed")
+                                lambda: build_package(plan, progress=updates.put),
+                                self._build_complete, "Build failed", updates)
         ttk.Button(buttons, text="Build Package", command=confirm).pack(side="right")
         self._prepare_dialog(window, "stadium_build_review", primary=confirm, cancel=window.destroy)
 
