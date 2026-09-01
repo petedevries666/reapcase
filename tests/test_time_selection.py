@@ -57,8 +57,8 @@ def test_empty_range_does_not_break_active_invariant():
 
 def test_space_and_escape_use_canonical_commands():
     source = open("src/stadium_reaper_bridge/editor/app.py", encoding="utf-8").read()
-    assert 'e, self.play_pause, allow_native_navigation=False)' in source
-    assert 'e, self.clear_time_selection, allow_native_navigation=False)' in source
+    assert "EditorCommand.PLAY_PAUSE: self.play_pause" in source
+    assert "EditorCommand.ESCAPE: self.clear_time_selection" in source
 
 
 def test_selection_is_editor_state_not_song_serialization():

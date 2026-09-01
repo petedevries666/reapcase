@@ -487,30 +487,14 @@ def test_timeline_arrow_shortcuts_delegate_only_from_canvas():
 
 def test_arrow_and_file_bindings_use_existing_editor_commands():
     source = Path("src/stadium_reaper_bridge/editor/app.py").read_text(encoding="utf-8")
-    expected_bindings = {
-        'self.bind_all("<Left>", lambda e: self._editor_shortcut(e, self.navigate_region, -1))',
-        'self.bind_all("<Right>", lambda e: self._editor_shortcut(e, self.navigate_region, 1))',
-        'self.bind_all("<Up>", lambda e: self._editor_shortcut(e, self.zoom_step, 1.25))',
-        'self.bind_all("<Down>", lambda e: self._editor_shortcut(e, self.zoom_step, 1 / 1.25))',
-        'self.bind_all("<Control-o>", lambda e: self._global_editor_shortcut(e, self.open_json))',
-        'self.bind_all("<Control-s>", lambda e: self._global_editor_shortcut(e, self.save))',
-    }
-    assert expected_bindings <= {line.strip() for line in source.splitlines()}
-    assert 'self.bind_all("<Control-Shift-Key-S>",' in source
-
-    # Guard against an arrow callback growing a second navigation/zoom path.
-    tree = ast.parse(source)
-    editor = next(node for node in tree.body
-                  if isinstance(node, ast.ClassDef) and node.name == "ReapcaseEditor")
-    build_menu = next(node for node in editor.body
-                      if isinstance(node, ast.FunctionDef) and node.name == "_build_menu")
-    arrow_bindings = [node for node in ast.walk(build_menu) if isinstance(node, ast.Call)
-                      and isinstance(node.func, ast.Attribute)
-                      and node.func.attr == "bind_all" and node.args
-                      and isinstance(node.args[0], ast.Constant)
-                      and node.args[0].value in {"<Left>", "<Right>", "<Up>", "<Down>"}]
-    assert len(arrow_bindings) == 4
-    assert all(isinstance(binding.args[1], ast.Lambda) for binding in arrow_bindings)
+    assert "ShortcutRouter(self, callbacks)" in source
+    assert "EditorCommand.PREVIOUS_REGION: lambda: self.navigate_region(-1)" in source
+    assert "EditorCommand.NEXT_REGION: lambda: self.navigate_region(1)" in source
+    assert "EditorCommand.ZOOM_IN: lambda: self.zoom_step(1.25)" in source
+    assert "EditorCommand.ZOOM_OUT: lambda: self.zoom_step(1 / 1.25)" in source
+    assert "EditorCommand.OPEN: self.open_json" in source
+    assert "EditorCommand.SAVE: self.save" in source
+    assert ".bind_all(" not in source
 
 
 def test_file_menu_displays_standard_accelerators():

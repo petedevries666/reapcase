@@ -62,6 +62,7 @@ from .waveform import (WaveformPerformance, WaveformRenderCache, analyze_grid_sy
                        viewport_exits_coverage)
 from .ergonomics import (BackupError, DialogPositions, editor_shortcuts_allowed,
                          follow_scroll, global_editor_shortcuts_allowed)
+from .shortcuts import EditorCommand, KeyboardContext, ShortcutRouter
 from .navigation import (ViewState, event_list_rows, jump_viewport_left,
                          adjacent_event_index, adjacent_marker_index,
                          adjacent_structure_region_index, default_lane_visibility,
@@ -112,12 +113,11 @@ def _new_waveform_executor():
 UI_AUDIO_POLL_BUDGET_SECONDS = 0.012
 MARKER_MANAGER_COLUMNS = ("kind", "name")
 MARKER_FLAG_FILTER_LANES = ("STADIUM", "SECOND HELIX", "VIDEO", "LIGHTS", "MIDI / OTHER")
+# Compatibility/export for integrations that display the established keys.
 GLOBAL_MANAGER_SHORTCUTS = (
     ("<Control-m>", "open_marker_manager"),
     ("<Control-f>", "open_marker_flag_manager"),
 )
-
-
 class Tooltip:
     """Small reusable delayed tooltip for compact controls."""
 
@@ -387,8 +387,6 @@ class ReapcaseEditor(tk.Tk):
         self.canvas.bind("<B2-Motion>", lambda event: self.canvas.scan_dragto(event.x, event.y, gain=1))
         self.canvas.bind("<Motion>", self.timeline_hover)
         self.canvas.bind("<Configure>", self._timeline_resized)
-        self.canvas.bind("<Control-c>", self.copy_events)
-        self.canvas.bind("<Control-v>", self.paste_events)
         self.event_list_frame = ttk.Frame(self.main_content)
         columns = ("position", "lane", "type", "name", "details")
         self.event_tree = ttk.Treeview(self.event_list_frame, columns=columns, show="headings",
@@ -465,6 +463,7 @@ class ReapcaseEditor(tk.Tk):
         self.marker_flag_tree.bind("<<TreeviewSelect>>", self._marker_flag_manager_selected)
         self._update_zoom_label()
         ttk.Label(self, textvariable=self.status, style="Status.TLabel", anchor="w", padding=5).pack(fill="x")
+        self._install_shortcut_router()
 
     def open_stadium_network(self):
         """Open the isolated observation lab without changing editor state."""
@@ -573,48 +572,48 @@ class ReapcaseEditor(tk.Tk):
             show.add_command(label=label, command=command)
         bar.add_cascade(label="Show", menu=show)
         self.configure(menu=bar)
-        self.bind_all("<Control-Key-1>", lambda _e: self.switch_view("timeline"))
-        self.bind_all("<Control-Key-2>", lambda _e: self.switch_view("event_list"))
-        self.bind_all("<Control-Key-3>", lambda _e: self.switch_view("roadmap"))
-        # Timeline navigation remains canvas-only; workflow toggles use the
-        # separate main-window policy below.
-        self.bind_all("<Control-d>", lambda e: self._editor_shortcut(e, self.duplicate_selected))
-        self.bind_all("<Key-f>", lambda e: self._editor_shortcut(e, self.fit_song))
-        self.bind_all("<Shift-Key-F>", lambda e: self._editor_shortcut(e, self.fit_selection))
-        self.bind_all("<Tab>", lambda e: self._editor_shortcut(e, self.navigate_event, 1))
-        self.bind_all("<Shift-Tab>", lambda e: self._editor_shortcut(e, self.navigate_event, -1))
-        self.bind_all("<bracketright>", lambda e: self._editor_shortcut(e, self.navigate_marker, 1))
-        self.bind_all("<bracketleft>", lambda e: self._editor_shortcut(e, self.navigate_marker, -1))
-        self.bind_all("<Home>", lambda e: self._editor_shortcut(e, self.go_song_edge, False))
 
-        self.bind_all("<End>", lambda e: self._editor_shortcut(e, self.go_song_edge, True))
-        # Arrow keys are part of the timeline command layer.  Keeping them on
-        # _editor_shortcut means native text caret and Treeview navigation (as
-        # well as every dialog) continue to receive their ordinary key events.
-        self.bind_all("<Left>", lambda e: self._editor_shortcut(e, self.navigate_region, -1))
-        self.bind_all("<Right>", lambda e: self._editor_shortcut(e, self.navigate_region, 1))
-        self.bind_all("<Up>", lambda e: self._editor_shortcut(e, self.zoom_step, 1.25))
-        self.bind_all("<Down>", lambda e: self._editor_shortcut(e, self.zoom_step, 1 / 1.25))
-        self.bind_all("<space>", lambda e: self._global_editor_shortcut(
-            e, self.play_pause, allow_native_navigation=False))
-        self.bind_all("<Escape>", lambda e: self._global_editor_shortcut(
-            e, self.clear_time_selection, allow_native_navigation=False))
-        self.bind_all("<Control-e>", lambda e: self._global_editor_shortcut(e, self.toggle_inspector))
-        self.bind_all("<Control-r>", lambda e: self._global_editor_shortcut(e, self.toggle_marker_manager))
-        self.bind_all("<Control-l>", lambda e: self._global_editor_shortcut(e, self.toggle_lane_manager))
-        for sequence, method_name in GLOBAL_MANAGER_SHORTCUTS:
-            self.bind_all(sequence, lambda e, name=method_name:
-                          self._global_editor_shortcut(e, getattr(self, name),
-                                                       allow_text_input=True))
-        self.bind_all("<Control-g>", lambda e: self._global_editor_shortcut(e, self.toggle_ghost_preference))
-        # File commands use the application workflow layer: they are available
-        # throughout the main editor, but never consume keys in text inputs or
-        # child/native dialogs.  The callbacks are the File menu callbacks, so
-        # loading, serialization and Save-As fallback behavior stay canonical.
-        self.bind_all("<Control-o>", lambda e: self._global_editor_shortcut(e, self.open_json))
-        self.bind_all("<Control-s>", lambda e: self._global_editor_shortcut(e, self.save))
-        self.bind_all("<Control-Shift-Key-S>",
-                      lambda e: self._global_editor_shortcut(e, self.save_as))
+    def _install_shortcut_router(self):
+        """Install the editor's single semantic keyboard command layer."""
+        callbacks = {
+            EditorCommand.PLAY_PAUSE: self.play_pause,
+            EditorCommand.COPY_EVENTS: self.copy_events,
+            EditorCommand.PASTE_EVENTS: self.paste_events,
+            EditorCommand.UNDO: self.undo,
+            EditorCommand.SAVE: self.save,
+            EditorCommand.SAVE_AS: self.save_as,
+            EditorCommand.OPEN: self.open_json,
+            EditorCommand.DELETE: self.delete_selected,
+            EditorCommand.ESCAPE: self.clear_time_selection,
+            EditorCommand.DUPLICATE: self.duplicate_selected,
+            EditorCommand.FIT_SONG: self.fit_song,
+            EditorCommand.FIT_SELECTION: self.fit_selection,
+            EditorCommand.NEXT_EVENT: lambda: self.navigate_event(1),
+            EditorCommand.PREVIOUS_EVENT: lambda: self.navigate_event(-1),
+            EditorCommand.NEXT_MARKER: lambda: self.navigate_marker(1),
+            EditorCommand.PREVIOUS_MARKER: lambda: self.navigate_marker(-1),
+            EditorCommand.SONG_START: lambda: self.go_song_edge(False),
+            EditorCommand.SONG_END: lambda: self.go_song_edge(True),
+            EditorCommand.PREVIOUS_REGION: lambda: self.navigate_region(-1),
+            EditorCommand.NEXT_REGION: lambda: self.navigate_region(1),
+            EditorCommand.ZOOM_IN: lambda: self.zoom_step(1.25),
+            EditorCommand.ZOOM_OUT: lambda: self.zoom_step(1 / 1.25),
+            EditorCommand.TIMELINE_VIEW: lambda: self.switch_view("timeline"),
+            EditorCommand.EVENT_LIST_VIEW: lambda: self.switch_view("event_list"),
+            EditorCommand.ROADMAP_VIEW: lambda: self.switch_view("roadmap"),
+            EditorCommand.INSPECTOR: self.toggle_inspector,
+            EditorCommand.STRUCTURE_MANAGER: self.open_marker_manager,
+            EditorCommand.MARKER_MANAGER: self.open_marker_flag_manager,
+            EditorCommand.LANE_MANAGER: self.toggle_lane_manager,
+            EditorCommand.GHOST: self.toggle_ghost_preference,
+        }
+        self.shortcut_router = ShortcutRouter(self, callbacks)
+        self.shortcut_router.register(self.timeline_frame, KeyboardContext.TIMELINE)
+        self.shortcut_router.register(self.event_list_frame, KeyboardContext.EVENT_LIST)
+        self.shortcut_router.register(self.marker_manager, KeyboardContext.MANAGER)
+        self.shortcut_router.register(self.marker_flag_manager, KeyboardContext.MANAGER)
+        self.shortcut_router.register(self.roadmap_view, KeyboardContext.ROADMAP)
+        self.shortcut_router.install()
 
     def _refresh_midi_menu_labels(self):
         for index, destination in enumerate(MidiDestination):
@@ -704,6 +703,24 @@ class ReapcaseEditor(tk.Tk):
         candidate = Path(path).resolve()
         return self._begin_song_open(candidate) if candidate in allowed else False
 
+    # Kept as small compatibility entry points for third-party extensions.
+    # Reapcase itself does not bind through these legacy focus policies.
+    def _editor_shortcut(self, event, command, *args):
+        if not editor_shortcuts_allowed(getattr(event, "widget", None), self.canvas):
+            return None
+        command(*args)
+        return "break"
+
+    def _global_editor_shortcut(self, event, command, *args,
+                                allow_native_navigation=True, allow_text_input=False):
+        if not global_editor_shortcuts_allowed(
+                getattr(event, "widget", None), self,
+                allow_native_navigation=allow_native_navigation,
+                allow_text_input=allow_text_input):
+            return None
+        command(*args)
+        return "break"
+
     def set_stadium_workspace(self, workspace):
         """Activate only an explicitly validated imported workspace."""
         workspace = Path(workspace).resolve()
@@ -723,24 +740,6 @@ class ReapcaseEditor(tk.Tk):
             return False
         self.status.set("Opened Stadium workspace: %s" % Path(path).name)
         return True
-
-    def _editor_shortcut(self, event, command, *args):
-        """Run and consume a DAW shortcut only in the timeline canvas."""
-        if not editor_shortcuts_allowed(getattr(event, "widget", None), self.canvas):
-            return None
-        command(*args)
-        return "break"
-
-    def _global_editor_shortcut(self, event, command, *args,
-                                allow_native_navigation=True, allow_text_input=False):
-        """Run workflow commands in the main window, excluding editor inputs."""
-        if not global_editor_shortcuts_allowed(
-                getattr(event, "widget", None), self,
-                allow_native_navigation=allow_native_navigation,
-                allow_text_input=allow_text_input):
-            return None
-        command(*args)
-        return "break"
 
     def switch_view(self, view):
         self.view_state.switch(view); self.current_view.set(view)
