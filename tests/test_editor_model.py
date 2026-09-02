@@ -106,6 +106,14 @@ class EditorModelTests(unittest.TestCase):
         self.assertEqual(sum(e.source.type.startswith("CYCLE") and clocksick.lane(e) == "STRUCTURE"
                              for e in clocksick.timeline.events), 2)
 
+    def test_lane_inventory_classifies_each_event_once(self):
+        model = self.load("clocksick_453.json")
+        with patch.object(model, "lane", wraps=model.lane) as classify:
+            counts = model.lane_counts()
+
+        self.assertEqual(classify.call_count, len(model.timeline.events))
+        self.assertEqual(sum(counts.values()), len(model.timeline.events))
+
     def test_native_looper_time_and_video_lanes(self):
         wanna = self.load("wanna_be_429.json")
         self.assertTrue(all(wanna.lane(e) == "STADIUM" for e in wanna.timeline.events if e.source.type == "LOOPER"))
